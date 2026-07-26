@@ -114,6 +114,12 @@ def select_bridge_port() -> int | None:
 
 BRIDGE_PORT = select_bridge_port()
 
+if BRIDGE_PORT is not None and bridge_manager is not None:
+    os.environ["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
+    os.environ["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
+    bridge_manager.host = BRIDGE_HOST
+    bridge_manager.port = BRIDGE_PORT
+
 
 def is_bridge_responsive(host: str, port: int, timeout: float | None = None) -> bool:
     timeout = timeout or config.MT5_BRIDGE_CONNECT_TIMEOUT
@@ -144,6 +150,14 @@ def get_intro_phrase() -> str:
         "conquerer of the multiverse, wealth itself, born to conquer, the best of the best, mr money, "
         "I am here for you and ready to serve."
     )
+
+
+def get_wake_phrase() -> str:
+    return (
+        "Angelique, the voice of money, ambassador of the rich, conquerer of the multiverse, "
+        "born to conquer and the best of the best."
+    )
+
 
 def launch_mt5_bridge_if_needed() -> bool:
     if BRIDGE_PORT is None:
@@ -256,13 +270,16 @@ def main():
     print("🚀 [Bootstrap] Starting Angelique Environment...")
     launch_mt5_bridge_if_needed()
     
-    print("🔗 [System] Initializing MT5 Trading Engine...")
-    bridge_manager.start()
-    time.sleep(1.5)
-    if bridge_manager.get_status():
-        print("✅ [System] MT5 Bridge Connected Successfully.")
+    if bridge_manager is not None:
+        print("🔗 [System] Initializing MT5 Trading Engine...")
+        bridge_manager.start()
+        time.sleep(1.5)
+        if bridge_manager.get_status():
+            print("✅ [System] MT5 Bridge Connected Successfully.")
+        else:
+            print("⚠️ [System] MT5 Bridge is starting in the background. Will auto-reconnect.")
     else:
-        print("⚠️ [System] MT5 Bridge is starting in the background. Will auto-reconnect.")
+        print("⚠️ [System] Trading bridge unavailable; continuing without MT5 integration.")
     print("=" * 50)
     
     # Initialize wake-word system (START IN SLEEP MODE)

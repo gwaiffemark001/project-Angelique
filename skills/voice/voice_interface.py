@@ -5,6 +5,7 @@ import asyncio
 import subprocess
 import threading
 import re
+from typing import Any
 
 # ==========================================
 # NUCLEAR OPTION: SUPPRESS ALSA/JACK SPAM
@@ -118,7 +119,7 @@ def listen() -> str:
             recognizer.adjust_for_ambient_noise(source, duration=0.5)
             audio = recognizer.listen(source, timeout=4, phrase_time_limit=12)
                 
-        text = recognizer.recognize_google(audio)
+        text = recognizer.recognize_google(audio)  # type: ignore[attr-defined]
         return text
         
     except sr.WaitTimeoutError:
