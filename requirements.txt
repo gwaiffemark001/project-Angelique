@@ -11,7 +11,6 @@ ollama>=0.1.0
 # Memory & Vector DB
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
-sqlite3 # Built-in, but listed for completeness
 
 # Trading
 MetaTrader5>=5.0.0

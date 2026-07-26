@@ -3,8 +3,21 @@ import inspect
 import subprocess
 from skills.os_control.app_discovery import open_app, get_installed_apps
 from skills.memory.memory_tools import save_fact, recall_facts
-from skills.vision.screen_tools import read_screen
-from skills.vision.camera_tools import analyze_camera_scene
+
+try:
+    from skills.vision.screen_tools import read_screen
+except ImportError as e:
+    print(f"⚠️ [Tools] Optional vision.screen_tools unavailable: {e}")
+    def read_screen(*args, **kwargs):
+        return "Error: read_screen unavailable because optional dependency is missing."
+
+try:
+    from skills.vision.camera_tools import analyze_camera_scene
+except ImportError as e:
+    print(f"⚠️ [Tools] Optional vision.camera_tools unavailable: {e}")
+    def analyze_camera_scene(*args, **kwargs):
+        return "Error: analyze_camera_scene unavailable because optional dependency is missing."
+
 from skills.web.search_tools import search_web
 from skills.messaging.whatsapp_tools import prepare_whatsapp_message, execute_whatsapp_send
 from skills.os_control.system_monitor import get_system_health, get_running_processes

@@ -4,7 +4,12 @@ import json
 import os
 import threading
 import time
-import websockets
+
+try:
+    import websockets
+except ImportError as e:
+    print(f"⚠️ [MT5] websockets is not installed: {e}")
+    websockets = None
 
 from core import config
 
@@ -58,6 +63,11 @@ class MT5ConnectionManager:
             await asyncio.sleep(config.MT5_BRIDGE_RECONNECT_INTERVAL)
 
     async def _connect_async(self):
+        if websockets is None:
+            self._is_connected = False
+            print("⚠️ [MT5 Client] websockets is unavailable; cannot connect to MT5 bridge.")
+            return
+
         try:
             self.ws = await websockets.connect(
                 f"ws://{self.host}:{self.port}",

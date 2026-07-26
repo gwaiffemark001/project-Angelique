@@ -1,4 +1,9 @@
-from ddgs import DDGS
+try:
+    from ddgs import DDGS
+except ImportError as e:
+    DDGS = None
+    print(f"⚠️ [Web] DDGS is not installed: {e}")
+
 
 def search_web(query: str) -> str:
     """Searches the live web for real-time information, news, or current events."""

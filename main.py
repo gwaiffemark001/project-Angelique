@@ -10,16 +10,82 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from brain.cognitive_loop import run_cognitive_loop
 from core import config
-from skills.voice.voice_interface import listen, speak
-from skills.voice.wake_word_system import sleep, is_awake
-from skills.trading.engine.connection_manager import bridge_manager
+
+run_cognitive_loop = None
+listen = None
+speak = None
+sleep = None
+is_awake = None
+bridge_manager = None
 
 BRIDGE_HOST = config.MT5_BRIDGE_HOST
 BRIDGE_PORT = config.MT5_BRIDGE_PORT
 RESERVED_MT5_BRIDGE_PORTS = [10001, 10002, 10003, 10004, 10005]
 BRIDGE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills", "trading", "engine", "mt5_bridge_server.py")
+
+
+def _import_runtime_modules():
+    global run_cognitive_loop, listen, speak, sleep, is_awake, bridge_manager
+
+    if run_cognitive_loop is None:
+        try:
+            from brain.cognitive_loop import run_cognitive_loop as _rc
+            run_cognitive_loop = _rc
+        except Exception as e:
+            print(f"⚠️ [Main] Could not import cognitive_loop: {e}")
+
+    if listen is None or speak is None:
+        try:
+            from skills.voice.voice_interface import listen as _listen, speak as _speak
+            listen = _listen
+            speak = _speak
+        except Exception as e:
+            print(f"⚠️ [Main] Voice interface unavailable: {e}")
+            def _missing_listen(*args, **kwargs):
+                return ""
+            def _missing_speak(*args, **kwargs):
+                print("⚠️ [Voice] speak unavailable.")
+            listen = _missing_listen
+            speak = _missing_speak
+
+    if sleep is None or is_awake is None:
+        try:
+            from skills.voice.wake_word_system import sleep as _sleep, is_awake as _is_awake
+            sleep = _sleep
+            is_awake = _is_awake
+        except Exception as e:
+            print(f"⚠️ [Main] Wake-word system unavailable: {e}")
+            def _missing_sleep(*args, **kwargs):
+                pass
+            def _missing_is_awake():
+                return True
+            sleep = _missing_sleep
+            is_awake = _missing_is_awake
+
+    if bridge_manager is None:
+        try:
+            from skills.trading.engine.connection_manager import bridge_manager as _bridge_manager
+            bridge_manager = _bridge_manager
+        except Exception as e:
+            print(f"⚠️ [Main] MT5 bridge manager unavailable: {e}")
+            class DummyBridge:
+                def __init__(self):
+                    self.host = None
+                    self.port = None
+                def start(self):
+                    return False
+                def get_status(self):
+                    return False
+                def ping(self):
+                    return {"error": "bridge unavailable"}
+                def connect(self):
+                    return False
+            bridge_manager = DummyBridge()
+
+
+def get_wake_phrase() -> str:
+    return get_intro_phrase()
 
 def is_port_free(host: str, port: int, timeout: float = 0.1) -> bool:
     try:
@@ -47,12 +113,6 @@ def select_bridge_port() -> int | None:
 
 
 BRIDGE_PORT = select_bridge_port()
-
-if BRIDGE_PORT is not None:
-    os.environ["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
-    os.environ["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
-    bridge_manager.host = BRIDGE_HOST
-    bridge_manager.port = BRIDGE_PORT
 
 
 def is_bridge_responsive(host: str, port: int, timeout: float | None = None) -> bool:
@@ -184,6 +244,15 @@ def get_mode_toggle_action(user_text: str, audio_enabled: bool) -> str | None:
     return None
 
 def main():
+    _import_runtime_modules()
+    if BRIDGE_PORT is not None:
+        os.environ["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
+        os.environ["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
+        if hasattr(bridge_manager, "host"):
+            bridge_manager.host = BRIDGE_HOST
+        if hasattr(bridge_manager, "port"):
+            bridge_manager.port = BRIDGE_PORT
+
     print("🚀 [Bootstrap] Starting Angelique Environment...")
     launch_mt5_bridge_if_needed()
     

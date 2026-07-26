@@ -14,8 +14,9 @@ try:
     import chromadb
     from chromadb.config import Settings
 except Exception as e:
-    print(f"❌ [Memory] ChromaDB REQUIRED but not installed: {e}")
-    raise ImportError("ChromaDB is required for Angelique's semantic memory. Install: pip install chromadb")
+    print(f"⚠️ [Memory] ChromaDB not installed or unavailable: {e}")
+    chromadb = None
+    Settings = None
 
 try:
     import torch  # noqa: F401
@@ -41,15 +42,19 @@ CHROMA_PATH.mkdir(parents=True, exist_ok=True)
 
 memory_collection = None
 chroma_client = None
-try:
-    chroma_client = chromadb.Client(Settings(
-        persist_directory=str(CHROMA_PATH),
-        anonymized_telemetry=False
-    ))
-    memory_collection = chroma_client.get_or_create_collection(name="angelique_memory")
-except Exception as e:
-    print(f"❌ [Memory] Failed to initialize ChromaDB: {e}")
-    raise
+if chromadb is not None and Settings is not None:
+    try:
+        chroma_client = chromadb.Client(Settings(
+            persist_directory=str(CHROMA_PATH),
+            anonymized_telemetry=False
+        ))
+        memory_collection = chroma_client.get_or_create_collection(name="angelique_memory")
+    except Exception as e:
+        print(f"⚠️ [Memory] Failed to initialize ChromaDB: {e}")
+        chroma_client = None
+        memory_collection = None
+else:
+    print("⚠️ [Memory] Skipping ChromaDB initialization because the dependency is unavailable.")
 
 def get_connection():
     conn = sqlite3.connect(config.DB_PATH)
