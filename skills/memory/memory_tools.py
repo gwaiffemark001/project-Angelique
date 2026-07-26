@@ -1,74 +1,125 @@
-from brain.memory_manager import save_fact_to_db, search_facts_in_db, get_all_facts
+# skills/memory/memory_tools.py
+from brain.memory_manager import save_fact_to_db, get_facts_for_entity, semantic_search, get_connection, init_db
+
+def get_all_entities() -> list:
+    """Dynamically fetches all known people/entities from the database."""
+    init_db()
+    conn = get_connection()
+    cursor = conn.execute('SELECT DISTINCT entity FROM memory_log WHERE entity != "User"')
+    entities = [row['entity'] for row in cursor.fetchall()]
+    conn.close()
+    return entities
+
+def get_friends_list() -> list:
+    """Dynamically fetches all known friends of the User."""
+    init_db()
+    conn = get_connection()
+    cursor = conn.execute("SELECT value FROM memory_log WHERE entity = 'User' AND key = 'friend' AND is_active = 1")
+    friends = [row['value'] for row in cursor.fetchall()]
+    conn.close()
+    return friends
 
 def save_fact(**kwargs) -> str:
-    """Saves a fact to the database, intelligently handling unpredictable LLM JSON formatting."""
+    """Saves facts, handling the new flat-list JSON format with importance and context."""
+    facts_list = []
     
-    k = ""
-    v = ""
-
-    # 1. Ideal format: {"key": "name", "value": "Mark"}
-    if 'key' in kwargs and 'value' in kwargs:
-        k = str(kwargs['key']).lower().strip()
-        v = str(kwargs['value']).strip()
-        
-    # 2. LLM hallucinated format: {"name": "Mark", "property": "favorite_dish", "value": ""}
-    elif 'property' in kwargs:
-        k = str(kwargs['property']).lower().strip()
-        v = str(kwargs.get('value', kwargs.get('name', ''))).strip()
-        
-    # 3. LLM sentence format: {"fact": "Mark's favorite dish is unknown"}
-    elif 'fact' in kwargs or 'fact_name' in kwargs:
-        raw_fact = str(kwargs.get('fact') or kwargs.get('fact_name', ''))
-        if " is " in raw_fact:
-            k, v = raw_fact.split(" is ", 1)
-            # Clean up the key (remove "Mark's " or "my ")
-            k = k.replace("Mark's ", "").replace("my ", "").strip().lower()
-            v = v.strip()
-        else:
-            k = raw_fact.strip().lower()
-            v = "unknown"
-            
-    # 4. Fallback format: {"name": "Mark", "favorite_dish": ""}
+    if isinstance(kwargs, list):
+        facts_list = kwargs
+    elif 'facts' in kwargs and isinstance(kwargs['facts'], list):
+        facts_list = kwargs['facts']
+    elif 'person' in kwargs and 'key' in kwargs and 'value' in kwargs:
+        facts_list = [kwargs]
     else:
-        items = list(kwargs.items())
-        if items:
-            k = str(items[0][0]).lower().strip()
-            v = str(items[0][1]).strip()
-        else:
-            return "I couldn't figure out what fact to save. Please be specific."
+        entity = kwargs.get('entity', 'User').strip()
+        facts = kwargs.get('facts', {})
+        for k, v in facts.items():
+            facts_list.append({"person": entity, "key": k, "value": v})
+
+    saved_log = []
+    for item in facts_list:
+        if not isinstance(item, dict):
+            continue
             
-    if not k or k == 'unknown_fact':
-        return "I couldn't figure out what fact to save. Please be specific."
+        person = str(item.get('person', 'User')).strip()
+        key = str(item.get('key', '')).lower().strip()
+        value = str(item.get('value', '')).strip()
+        importance = int(item.get('importance', 5))
+        context = str(item.get('context', '')).strip()
         
-    save_fact_to_db(k, v)
-    return f"Fact saved successfully: {k} = {v}"
+        # Skip empty values or obvious hallucinated placeholders
+        if not person or not key or value == "" or value.lower() == "unknown":
+            continue
+            
+        # Clean up accidental possessives
+        key = key.replace(f"{person.lower()}'s ", "").replace("my ", "").replace("your ", "").strip()
+        
+        save_fact_to_db(person, key, value, importance, context)
+        saved_log.append(f"{person} / {key} = {value} (Importance: {importance}/10)")
+        
+    if not saved_log:
+        return "No new valid facts extracted."
+    return f"Saved: {', '.join(saved_log)}"
 
 def recall_facts(**kwargs) -> str:
-    """Performs semantic search, gathering all clues from the LLM's unpredictable JSON."""
+    """
+    Dynamically resolves entities and formats memory with emotional/episodic context.
+    Uses SEMANTIC SEARCH first (ChromaDB), then falls back to SQL if needed.
+    """
+    query = kwargs.get('query', '').lower()
     
-    # Gather all keys and values to form a comprehensive search query
-    search_parts = []
-    for k, v in kwargs.items():
-        search_parts.append(str(k))
-        if v:
-            search_parts.append(str(v))
-            
-    search_query = " ".join(search_parts).strip()
-    
-    if not search_query:
-        return "I need to know what topic to search for."
-        
-    facts = search_facts_in_db(search_query)
-    
-    if not facts:
-        return f"I don't have any information about '{search_query}' in my memory yet."
-    
-    # Format facts naturally for the user
-    if len(facts) == 1:
-        k, v = list(facts.items())[0]
-        return f"I remember that your {k} is {v}."
-    else:
-        response = "Here's what I know:\n"
-        for k, v in facts.items():
-            response += f"- {k}: {v}\n"
+    if not query:
+        return "No query provided. What would you like to know?"
+
+    # Step 1: Try semantic search (powerful, cross-entity)
+    semantic_results = semantic_search(query, top_k=5)
+    if semantic_results:
+        response = f"📚 **Memory Search Results for '{query}':**\n"
+        for result in semantic_results:
+            imp = result.get('importance', 5)
+            imp_emoji = "🔥" if imp >= 8 else "⭐" if imp >= 5 else "📌"
+            ctx = f" | Context: {result['context']}" if result.get('context') else ""
+            response += f"- {imp_emoji} [{imp}/10] {result['entity']}'s {result['key']}: {result['value']}{ctx}\n"
         return response
+
+    # Step 2: Fall back to entity-based lookup
+    known_entities = get_all_entities()
+    
+    # Handle Ambiguity: "What is my friend's favorite dish?"
+    if "friend" in query and "which" not in query:
+        friends = get_friends_list()
+        valid_friends = [f for f in friends if f in known_entities]
+        if len(valid_friends) > 1:
+            return f"I have multiple friends in my memory: {', '.join(valid_friends)}. Which one are you asking about?"
+        elif len(valid_friends) == 1:
+            entity = valid_friends[0]
+        else:
+            return "I don't know any friends yet. Could you tell me about your friends?"
+            
+    # Dynamic Entity Matching
+    matched_entities = [e for e in known_entities if e.lower() in query]
+    if matched_entities:
+        entity = matched_entities[0]
+    else:
+        entity = "User" 
+        
+    data = get_facts_for_entity(entity)
+    
+    if not data["current"] and not data["history"]:
+        return f"I don't have any information about {entity} yet."
+        
+    response = f"Current facts about {entity} (sorted by importance):\n"
+    for fact in data["current"]:
+        imp = fact['importance']
+        # Add an emoji based on importance
+        imp_emoji = "🔥" if imp >= 8 else "⭐" if imp >= 5 else "📌"
+        ctx = f" | Context: {fact['context']}" if fact['context'] else ""
+        ts = fact['timestamp'].split(' ')[0] if fact['timestamp'] else "Unknown date"
+        
+        response += f"- {imp_emoji} [{imp}/10] {fact['key']}: {fact['value']} (Learned: {ts}){ctx}\n"
+        
+    if data["history"]:
+        response += f"\nPast history for {entity}:\n"
+        for item in data["history"]:
+            response += f"- 🕰️ {item}\n"
+            
+    return response
