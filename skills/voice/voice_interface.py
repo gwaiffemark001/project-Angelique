@@ -1,0 +1,132 @@
+import os
+import sys
+import tempfile
+import asyncio
+import subprocess
+import threading
+import re
+
+# ==========================================
+# NUCLEAR OPTION: SUPPRESS ALSA/JACK SPAM
+# ==========================================
+# Redirect stderr to /dev/null at the C-level BEFORE importing audio libraries.
+# This completely kills the PortAudio/ALSA spam on Linux.
+devnull_fd = os.open(os.devnull, os.O_WRONLY)
+os.dup2(devnull_fd, 2)
+os.close(devnull_fd)
+
+import speech_recognition as sr
+from dotenv import load_dotenv
+load_dotenv()
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "98f6HmuJM9hLdz4dHpfb")
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+
+IS_SPEAKING = False
+speech_lock = threading.Lock()
+
+async def _generate_edge_tts(text: str, voice: str, output_file: str):
+    import edge_tts
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_file)
+
+def _play_audio_file(file_path: str):
+    players = [
+        ["mpv", "--no-video", "--quiet", file_path],
+        ["paplay", file_path],
+        ["aplay", "-q", file_path]
+    ]
+    for player_cmd in players:
+        try:
+            subprocess.run(player_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+
+def speak(text: str):
+    global IS_SPEAKING
+    
+    clean_text = re.sub(r'```.*?```', '', text, flags=re.DOTALL).strip()
+    clean_text = re.sub(r'\[ACTION:.*?\]', '', clean_text).strip()
+    clean_text = clean_text.replace("*", "").replace("_", "")
+    
+    if not clean_text:
+        return
+
+    with speech_lock:
+        IS_SPEAKING = True
+
+    temp_mp3 = tempfile.mktemp(suffix=".mp3")
+    spoke_successfully = False
+
+    # ==========================================
+    # 1. TRY EDGE-TTS FIRST (Free & Unlimited)
+    # ==========================================
+    try:
+        asyncio.run(_generate_edge_tts(clean_text, "en-US-AriaNeural", temp_mp3))
+        if os.path.exists(temp_mp3) and os.path.getsize(temp_mp3) > 0:
+            spoke_successfully = True
+    except Exception as e:
+        print(f"\n⚠️ [Voice] Edge-TTS failed: {e}. Falling back to ElevenLabs...")
+
+    # ==========================================
+    # 2. FALLBACK TO ELEVENLABS (Premium Backup)
+    # ==========================================
+    if not spoke_successfully and ELEVENLABS_API_KEY:
+        try:
+            from elevenlabs.client import ElevenLabs
+            client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+            audio_stream = client.text_to_speech.convert(
+                voice_id=ELEVENLABS_VOICE_ID,
+                text=clean_text[:2000],
+                model_id=ELEVENLABS_MODEL,
+                output_format="mp3_44100_64"
+            )
+            with open(temp_mp3, "wb") as f:
+                for chunk in audio_stream:
+                    if chunk:
+                        f.write(chunk)
+            spoke_successfully = True
+        except Exception as e:
+            print(f"\n⚠️ [Voice] ElevenLabs also failed: {e}")
+
+    # ==========================================
+    # 3. PLAY AUDIO
+    # ==========================================
+    if spoke_successfully and os.path.exists(temp_mp3):
+        _play_audio_file(temp_mp3)
+        os.unlink(temp_mp3)
+        
+    with speech_lock:
+        IS_SPEAKING = False
+
+def listen() -> str:
+    global IS_SPEAKING
+    
+    with speech_lock:
+        if IS_SPEAKING:
+            return ""
+
+    recognizer = sr.Recognizer()
+    recognizer.pause_threshold = 1.5
+    recognizer.energy_threshold = 300
+    recognizer.dynamic_energy_threshold = True
+
+    try:
+        with sr.Microphone() as source:
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            audio = recognizer.listen(source, timeout=4, phrase_time_limit=12)
+                
+        text = recognizer.recognize_google(audio)
+        return text
+        
+    except sr.WaitTimeoutError:
+        return ""
+    except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as e:
+        print(f"\n⚠️ [Voice] Google STT API error: {e}")
+        return ""
+    except Exception:
+        return ""
