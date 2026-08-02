@@ -5,8 +5,203 @@ from brain.llm_interface import query_llm, extract_json_from_text
 from brain.memory_manager import save_fact_to_db
 from brain.heuristic_engine import extract_command_heuristically
 from core.tools import TOOL_REGISTRY, execute_tool
-from skills.memory.memory_tools import recall_facts
-from skills.voice.wake_word_system import is_awake, activation_protocol
+from skills.memory.memory_tools import recall_facts, get_top_memory_facts, train_angelique
+from skills.conversation.chat_skill import (
+    save_conversation as conv_save, recall as conv_recall,
+    get_session_context as conv_context, summarize_context,
+    remember as conv_remember, list_sessions as list_conversations, new_session,
+    is_session_closed,
+)
+
+
+def _is_short_followup_reply(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"yes", "y", "no", "n", "sure", "ok", "okay", "please", "do it", "go ahead", "correct", "right"}:
+        return True
+    return len(normalized.split()) <= 3 and any(token in normalized for token in {"yes", "no", "sure", "ok", "okay"})
+
+
+def _is_followup_continuation(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+    if _is_short_followup_reply(normalized):
+        return True
+
+    continuation_prefixes = ("verify", "confirm", "check", "continue", "proceed", "go ahead")
+    if any(normalized.startswith(prefix) for prefix in continuation_prefixes):
+        return True
+
+    continuation_phrases = (
+        "then continue",
+        "continue executing",
+        "continue with it",
+        "continue with that",
+        "continue the request",
+        "verify that",
+        "make sure",
+        "double check",
+    )
+    return any(phrase in normalized for phrase in continuation_phrases)
+
+
+def _is_retry_request(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+    retry_phrases = (
+        "try again",
+        "retry",
+        "do it again",
+        "run it again",
+        "same again",
+        "again",
+        "another attempt",
+        "one more time",
+    )
+    return any(phrase == normalized or normalized.startswith(f"{phrase} ") for phrase in retry_phrases)
+
+
+def _is_reexplain_request(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+    return bool(re.search(r"\b(reexplain|re-explain|explain again|say that again|say it again|repeat that|repeat it)\b", normalized))
+
+
+def _extract_reexplain_subject(user_input: str) -> str:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return ""
+
+    normalized = normalized.replace("re-explain", "reexplain")
+    patterns = [
+        r"\breexplain\b(?:\s+(.*))?$",
+        r"\bexplain again\b(?:\s+(.*))?$",
+        r"\bsay that again\b(?:\s+(.*))?$",
+        r"\bsay it again\b(?:\s+(.*))?$",
+        r"\brepeat that\b(?:\s+(.*))?$",
+        r"\brepeat it\b(?:\s+(.*))?$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            subject = (match.group(1) or "").strip(" .?!")
+            subject = subject.strip()
+            if not subject:
+                return ""
+            if subject in {"please", "now", "again", "that", "it", "this", "more", "just", "please now", "please again"}:
+                return ""
+            return subject
+    return ""
+
+
+def _assistant_is_waiting_for_followup(last_response: str) -> bool:
+    normalized = (last_response or "").strip().lower()
+    if not normalized:
+        return False
+    question_mark = "?" in normalized
+    followup_phrases = (
+        "would you like",
+        "do you want",
+        "should i",
+        "shall i",
+        "can i",
+        "would you like me",
+        "do you want me",
+        "want me to",
+        "need me to",
+    )
+    return question_mark or any(phrase in normalized for phrase in followup_phrases)
+
+
+def _is_identity_question(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+    identity_patterns = [
+        r"\bwhat\s+is\s+your\s+name\b",
+        r"\bwho\s+are\s+you\b",
+        r"\bwhat\s+are\s+you\b",
+        r"\bwhat\s+is\s+your\s+identity\b",
+        r"\bwhat\s+should\s+i\s+call\s+you\b",
+    ]
+    return any(re.search(pattern, normalized) for pattern in identity_patterns)
+
+
+def _is_simple_question(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized.endswith("?"):
+        words = re.findall(r"\b[\w']+\b", normalized)
+        return len(words) <= 12
+
+
+def _strip_training_mode_prefix(user_input: str) -> str:
+    text = (user_input or "").strip()
+    if not text:
+        return ""
+    prefix_patterns = [
+        r"^\s*\[\[TRAINING_MODE\]\]\s*",
+        r"^\s*TRAINING MODE:\s*",
+        r"^\s*TRAINING:\s*",
+    ]
+    for pattern in prefix_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def _is_training_intent(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+
+    if "[[training_mode]]" in normalized or "training mode:" in normalized or normalized.startswith("training:"):
+        return True
+
+    if normalized.endswith("?"):
+        return False
+
+    training_terms = (
+        "memorize",
+        "remember",
+        "learn",
+        "training",
+        "train",
+        "core training",
+        "from now on",
+    )
+    if any(term in normalized for term in training_terms):
+        return True
+
+    directive_markers = (
+        "my name is",
+        "my primary trading platform is",
+        "my maximum risk per trade is",
+        "my absolute maximum risk per trade is",
+        "my minimum risk to reward ratio",
+        "i never enter a trade without",
+        "i do not trade",
+        "you must always",
+        "you should always",
+        "you need to always",
+        "you must",
+        "you should",
+        "you need to",
+        "structured format",
+        "trade recommendations",
+        "explicit confirmation before executing any trade",
+    )
+    if any(marker in normalized for marker in directive_markers):
+        return True
+
+    if re.search(r"\b(?:my|i)\s+(?:name|primary trading platform|maximum risk per trade|absolute maximum risk per trade|minim(?:um|a) risk(?: to reward ratio| to reward)|risk to reward ratio|trading platform)\b", normalized):
+        return True
+
+    return False
 
 def nlp_to_tool_mapping(text: str):
     """
@@ -16,8 +211,24 @@ def nlp_to_tool_mapping(text: str):
     tool_name, args = extract_command_heuristically(text)
     return tool_name, args
 
+def _looks_like_general_query(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized.endswith("?"):
+        return True
+    words = re.findall(r"\b[\w']+\b", normalized)
+    if len(words) <= 2:
+        return True
+    question_starters = ("what ", "who ", "when ", "where ", "why ", "how ", "do ", "does ", "did ", "is ", "are ", "can ", "could ", "would ", "should ", "will ")
+    return normalized.startswith(question_starters)
+
+
 def extract_facts_silently(user_input: str):
     """Silently extracts facts, scoring their emotional importance and episodic context."""
+    if _looks_like_general_query(user_input):
+        return
+
     extraction_prompt = (
         "You are a strict cognitive fact-extraction engine. Analyze the user's input below.\n"
         "Extract ALL facts about ANY person mentioned. Return ONLY a valid JSON list of objects.\n"
@@ -74,42 +285,85 @@ def extract_facts_silently(user_input: str):
         print(f"⚠️ [DEBUG] Silent extraction failed: {e}")
 
 def run_cognitive_loop(user_input: str) -> str:
-    # 0. CHECK WAKE-WORD STATUS
-    if not is_awake():
-        # Still listen for activation trigger
-        if "angelique" in user_input.lower():
-            print("🎤 Angelique wake-word detected. Awaiting clap confirmation...")
-            # Note: In actual usage, we'd need audio samples for clap detection
-            # For now, if "angelique" is mentioned, we activate
-            from skills.voice.wake_word_system import wake_up
-            wake_up()
-            return "🌟 I'm awake! How can I help?"
-        else:
-            return "😴 I'm sleeping. Say 'Angelique' to wake me up."
-    
-    # 1. Silent memory extraction
-    extract_facts_silently(user_input)
+    session_id = "default"
+    if is_session_closed(session_id):
+        return "Angelique session has been closed."
 
-    # 2. Retrieve relevant memory
-    memory_check = recall_facts(query=user_input)
-    has_memory = "don't have any information" not in memory_check.lower() and "no new valid facts" not in memory_check.lower()
-    memory_text = memory_check if has_memory else "None. You do not know this yet."
+    session_context = conv_context(session_id)
+    last_response = session_context.get("last_response", "")
+    last_user_input = session_context.get("last_user", "")
+    if _is_retry_request(user_input) and last_user_input:
+        user_input = last_user_input
+
+    if _assistant_is_waiting_for_followup(last_response) and _is_followup_continuation(user_input):
+        followup_prompt = (
+            "You are Angelique continuing a previous exchange. The user has replied to your last question. "
+            "Treat this as a continuation of the conversation, not a brand new command, unless the reply clearly introduces one. "
+            "Answer naturally and stay within the context of the prior assistant message."
+        )
+        followup_messages = [
+            {"role": "system", "content": followup_prompt},
+            {"role": "assistant", "content": last_response},
+            {"role": "user", "content": user_input},
+        ]
+        followup_response = query_llm(followup_messages, temperature=0.2)
+        final_response = followup_response or "I’m continuing from the previous point. What would you like me to do next?"
+        conv_save(session_id, user_input, final_response)
+        return final_response
+
+    if _is_reexplain_request(user_input) and not _extract_reexplain_subject(user_input):
+        clarification = "Sure, what exactly would you like me to reexplain?"
+        conv_save(session_id, user_input, clarification)
+        return clarification
+
+    if _is_training_intent(user_input):
+        stripped_input = _strip_training_mode_prefix(user_input)
+        training_response = train_angelique(stripped_input or user_input)
+        conv_save(session_id, user_input, training_response)
+        return training_response
+
+    # 1. Silent memory extraction only for substantive, fact-bearing turns.
+    if not _is_identity_question(user_input):
+        extract_facts_silently(user_input)
+
+    # 2. Avoid preloading memory for plain questions. Let the model reason first,
+    #    and only use memory later when the response clearly needs it.
+    if _is_identity_question(user_input) or _is_simple_question(user_input):
+        memory_text = "None. You do not know this yet."
+    else:
+        memory_check = recall_facts(query=user_input)
+        has_memory = "don't have any information" not in memory_check.lower() and "no new valid facts" not in memory_check.lower()
+        memory_text = memory_check if has_memory else "None. You do not know this yet."
+
+    top_memory_facts = get_top_memory_facts(min_importance=8, limit=6)
+    if top_memory_facts:
+        top_memory_lines = [
+            f"- {fact['entity']} / {fact['key']} = {fact['value']} (importance {fact['importance']})"
+            for fact in top_memory_facts
+        ]
+        training_memory_text = "CORE TRAINING MEMORY (high importance):\n" + "\n".join(top_memory_lines)
+    else:
+        training_memory_text = "CORE TRAINING MEMORY: None."
 
     tools_schema = json.dumps({name: info["description"] for name, info in TOOL_REGISTRY.items()}, indent=2)
 
     system_prompt = (
         "You are Angelique, a highly advanced, self-evolving autonomous AI companion.\n\n"
         f"You have access to the following tools:\n{tools_schema}\n\n"
+        f"{training_memory_text}\n\n"
         f"RELEVANT MEMORY ABOUT THE USER (Sorted by emotional importance):\n{memory_text}\n\n"
         "CORE DIRECTIVES:\n"
         "1. ACTION REQUESTS: If the user asks you to do something, you MUST reply with ONLY a JSON object for the tool.\n"
         "   Format: {\"tool\": \"tool_name\", \"args\": {\"param1\": \"value1\"}}\n"
         "2. CONVERSATION: If the user is just chatting, reply naturally. DO NOT output JSON.\n"
         "3. MEMORY USAGE: Use the RELEVANT MEMORY to personalize your responses. Notice the importance scores (🔥 is high, 📌 is low). Prioritize highly important facts.\n"
-        "4. NEVER hallucinate facts. Only use facts present in RELEVANT MEMORY.\n\n"
+        "4. NEVER hallucinate facts. Only use facts present in RELEVANT MEMORY.\n"
+        "5. TRADING NEWS: When the user asks about forex news, market events, or the economic calendar, use the get_forex_news and get_market_calendar tools immediately.\n\n"
         "EXAMPLES:\n"
         "User: open Firefox\n"
         "Assistant: {\"tool\": \"open_app\", \"args\": {\"app_name\": \"Firefox\"}}\n\n"
+        "User: uninstall cmatrix\n"
+        "Assistant: {\"tool\": \"run_shell_command\", \"args\": {\"command\": \"apt-get remove cmatrix\"}}\n\n"
         "User: what is your name?\n"
         "Assistant: I am Angelique, your assistant. How can I help?\n"
     )
@@ -124,15 +378,17 @@ def run_cognitive_loop(user_input: str) -> str:
         return "I'm having a little trouble connecting to my brain right now."
 
     decision = extract_json_from_text(raw_response)
-
     tool_name = None
     args = {}
-    
-    if not decision:
+
+    # Handle LLM responses that return empty or invalid JSON
+    if not decision or not isinstance(decision, dict) or len(decision) == 0:
+        if _is_identity_question(user_input):
+            conv_save(session_id, user_input, raw_response)
+            return raw_response
         tool_name, args = nlp_to_tool_mapping(user_input)
         if not tool_name:
             tool_name, args = nlp_to_tool_mapping(raw_response or "")
-
     if isinstance(decision, dict) and len(decision) > 0:
         if "tool" in decision:
             tool_name = decision["tool"]
@@ -144,7 +400,11 @@ def run_cognitive_loop(user_input: str) -> str:
                     args = decision[t]
                     break
 
-    if args is None: args = {}
+    # Ensure args is always a valid dict
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
 
     if tool_name and tool_name in TOOL_REGISTRY:
         print(f"🧠 [Thought] Using tool: {tool_name} with args {args}")
@@ -158,16 +418,31 @@ def run_cognitive_loop(user_input: str) -> str:
             'check_mt5_status',
             'recall_memory',
             'create_and_execute_skill',
-            'execute_generated_code'
+            'execute_generated_code',
+            'list_apps',
+            'get_installed_apps',
+            'list_directory',
+            'disk_usage',
+            'get_network_info',
+            'get_network_interfaces',
+            'get_logs',
+            'get_forex_news',
+            'get_market_calendar',
         }
 
         if tool_name in direct_return_tools:
+            conv_save(session_id, user_input, tool_result)
             return tool_result
 
         reflection_messages = messages + [
             {"role": "assistant", "content": raw_response},
             {"role": "user", "content": f"[System Output from {tool_name}]: {tool_result}. Now reply naturally to the user based on this result."}
         ]
-        return query_llm(reflection_messages, temperature=0.7)
+        final_response = query_llm(reflection_messages, temperature=0.7)
+        if final_response is None:
+            final_response = "I have the result, but I need another moment to explain it clearly."
+        conv_save(session_id, user_input, final_response)
+        return final_response
 
+    conv_save(session_id, user_input, raw_response)
     return raw_response
