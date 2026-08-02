@@ -51,8 +51,6 @@ dateparser>=1.1.0
 pytz>=2023.3
 
 # GUI & UI (Optional, for launcher)
-PyQt6>=6.5.0
-PySimpleGUI>=4.60.0
 
 # Development & Testing
 pytest>=7.4.0
