@@ -5,6 +5,7 @@ import asyncio
 import subprocess
 import threading
 import re
+import socket
 from typing import Any
 
 # ==========================================
@@ -27,6 +28,15 @@ ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 IS_SPEAKING = False
 speech_lock = threading.Lock()
 
+
+def _is_online() -> bool:
+    try:
+        with socket.create_connection(("8.8.8.8", 53), timeout=1):
+            return True
+    except Exception:
+        return False
+
+
 async def _generate_edge_tts(text: str, voice: str, output_file: str):
     import edge_tts
     communicate = edge_tts.Communicate(text, voice)
@@ -47,6 +57,10 @@ def _play_audio_file(file_path: str):
 
 def speak(text: str):
     global IS_SPEAKING
+
+    if not _is_online():
+        print("⚠️ [Voice] Offline mode: speech output disabled.")
+        return
     
     clean_text = re.sub(r'```.*?```', '', text, flags=re.DOTALL).strip()
     clean_text = re.sub(r'\[ACTION:.*?\]', '', clean_text).strip()
@@ -58,8 +72,11 @@ def speak(text: str):
     with speech_lock:
         IS_SPEAKING = True
 
-    temp_mp3 = tempfile.mktemp(suffix=".mp3")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+        temp_mp3 = temp_file.name
+
     spoke_successfully = False
+    temp_file_created = True
 
     # ==========================================
     # 1. TRY EDGE-TTS FIRST (Free & Unlimited)
@@ -93,17 +110,38 @@ def speak(text: str):
             print(f"\n⚠️ [Voice] ElevenLabs also failed: {e}")
 
     # ==========================================
-    # 3. PLAY AUDIO
+    # 3. LOCAL FALLBACK TTS
+    # ==========================================
+    if not spoke_successfully:
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            engine.say(clean_text)
+            engine.runAndWait()
+            spoke_successfully = True
+        except Exception:
+            pass
+
+    # ==========================================
+    # 4. PLAY AUDIO
     # ==========================================
     if spoke_successfully and os.path.exists(temp_mp3):
         _play_audio_file(temp_mp3)
-        os.unlink(temp_mp3)
-        
+
+    if temp_file_created and os.path.exists(temp_mp3):
+        try:
+            os.unlink(temp_mp3)
+        except Exception:
+            pass
+
     with speech_lock:
         IS_SPEAKING = False
 
 def listen() -> str:
     global IS_SPEAKING
+
+    if not _is_online():
+        return ""
     
     with speech_lock:
         if IS_SPEAKING:
@@ -128,6 +166,12 @@ def listen() -> str:
         return ""
     except sr.RequestError as e:
         print(f"\n⚠️ [Voice] Google STT API error: {e}")
-        return ""
+        try:
+            return recognizer.recognize_sphinx(audio)
+        except Exception:
+            return ""
     except Exception:
-        return ""
+        try:
+            return recognizer.recognize_sphinx(audio)
+        except Exception:
+            return ""
