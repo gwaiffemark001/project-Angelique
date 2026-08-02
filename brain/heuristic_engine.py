@@ -15,6 +15,27 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     if not normalized:
         return None, {}
 
+    def _clean_install_target(candidate: str) -> str:
+        cleaned = candidate.strip()
+        cleaned = re.sub(r'\b(?:and\s+)?working\b.*$', '', cleaned).strip()
+        cleaned = re.sub(r'\b(?:installed|check|verify|confirm|whether|if|is|are|was)\b', '', cleaned).strip()
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip(' ?.,')
+        return cleaned
+
+    def _split_install_target_and_version(candidate: str) -> tuple[str, str | None]:
+        cleaned = _clean_install_target(candidate)
+        version_match = re.search(r'\bversion\s+([vV]?\d+(?:\.\d+)+(?:[-+~][\w.]+)?)\b', cleaned)
+        if version_match:
+            version = version_match.group(1).lstrip('vV')
+            target = re.sub(r'\bversion\s+[vV]?\d+(?:\.\d+)+(?:[-+~][\w.]+)?\b', '', cleaned).strip()
+            return _clean_install_target(target), version
+
+        parts = cleaned.split()
+        if len(parts) >= 2 and re.fullmatch(r'[vV]?\d+(?:\.\d+)+(?:[-+~][\w.]+)?', parts[-1]):
+            return ' '.join(parts[:-1]).strip(), parts[-1].lstrip('vV')
+
+        return cleaned, None
+
     # ============================================================
     # ACCOUNT & BALANCE CHECKING
     # ============================================================
@@ -50,6 +71,25 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     # ============================================================
     # SYSTEM MONITORING
     # ============================================================
+    install_check_patterns = [
+        r'\b(?:check|see|tell me|find out|verify|confirm)\s+(?:if|whether)\s+(.+?)\s+(?:version\s+[vV]?\d+(?:\.\d+)+(?:[-+~][\w.]+)?\s+)?is\s+installed(?:\s+and\s+working)?\b',
+        r'\b(?:check|see|tell me|find out|verify|confirm)\b.*\b(?:if|whether)\b.*\b(?:installed|installed\s+or\s+not)\b',
+        r'\b(?:is|was|are)\s+(.+?)\s+installed\b',
+        r'\b(?:check|verify|confirm)\s+(?:if\s+)?(.+?)\s+is\s+installed\b',
+    ]
+    for pattern in install_check_patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            target = match.group(1).strip() if match.groups() else normalized
+            target, version = _split_install_target_and_version(target)
+            if target:
+                args = {'target_name': target}
+                if version:
+                    args['version'] = version
+                if 'working' in normalized:
+                    args['working'] = True
+                return 'check_installation_status', args
+
     system_monitor_patterns = [
         r'\b(?:cpu|ram|memory|disk|load|system|performance|health|telemetry|monitoring)\b',
         r'\b(?:how.*?(?:cpu|ram|memory|resources).*?(?:used|used up))\b',
@@ -132,6 +172,27 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
             return 'prepare_whatsapp_message', {'contact_name': contact.strip(), 'message': msg.strip()}
 
     # ============================================================
+    # TRADING NEWS & MARKET CALENDAR
+    # ============================================================
+    news_patterns = [
+        r'\b(?:news|forex news|market news|latest news|current events)\b',
+        r'\b(?:economic calendar|market calendar|events today|events this week)\b',
+        r'\b(?:what.*?happening|what.*?going on|what.*?news)\b',
+        r'\b(?:currency news|fx news|crypto news)(?:\s+for\s+(\w+))?\b',
+    ]
+    if any(re.search(p, normalized) for p in news_patterns):
+        symbol_match = re.search(r'(?:news|currency news|fx news|crypto news)\s+(?:for\s+)?(\w+)', normalized)
+        symbol = symbol_match.group(1).upper() if symbol_match else None
+        return 'get_forex_news', {'symbol': symbol}
+
+    calendar_patterns = [
+        r'\b(?:calendar|economic events|high impact events|market events|schedule|what.*?happening today|what.*?today)\b',
+        r'\b(?:calendar|events)\b',
+    ]
+    if any(re.search(p, normalized) for p in calendar_patterns):
+        return 'get_market_calendar', {}
+
+    # ============================================================
     # MARKET ANALYSIS & TRADING
     # ============================================================
     trading_symbols = ['eurusd', 'gbpusd', 'audusd', 'usdjpy', 'xauusd', 'btcusd', 'ethusd', 'linkusd', 'aaveusd']
@@ -157,6 +218,18 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
         timeframe_match = re.search(r'\b(m1|m5|m15|m30|h1|h4|d1|w1)\b', normalized)
         timeframe = timeframe_match.group(1).upper() if timeframe_match else 'H1'
         return 'analyze_market_and_recommend', {'symbol': symbol, 'timeframe': timeframe, 'risk_percent': 1.0}
+
+    # ============================================================
+    # APP LISTING
+    # ============================================================
+    app_patterns = [
+        r'\b(?:list|show|what).*\b(?:apps|applications|programs|software|installed)\b',
+        r'\b(?:what|which|list).*\b(?:apps?|applications?|programs?)\b.*(?:on|of|in|my|laptop|system|computer)\b',
+        r'\b(?:installed|running)\s+(?:apps?|applications?|programs?|software)',
+        r'\blist\s+(?:of\s+)?apps?\b',
+    ]
+    if any(re.search(p, normalized) for p in app_patterns):
+        return 'list_apps', {}
 
     # ============================================================
     # SKILL GENERATION & CODE EXECUTION
