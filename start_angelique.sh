@@ -67,8 +67,9 @@ echo -e "${BLUE}💾 Initializing memory system...${NC}"
 python3 -c "from brain.memory_manager import init_db; init_db(); print('✅ Memory system initialized')" 2>/dev/null || true
 
 # 6. Start Angelique
-echo -e "${GREEN}✨ Launching Angelique...${NC}"
-python3 main.py
+echo -e "${GREEN}✨ Launching Angelique (GUI)...${NC}"
+export ANGELIQUE_LAUNCHED=1
+python3 launcher.py --gui
 
 # Cleanup on exit
 trap "echo -e '${BLUE}💤 Angelique shutting down...${NC}'" EXIT
