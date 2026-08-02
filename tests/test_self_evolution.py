@@ -11,6 +11,17 @@ class SelfEvolutionTests(unittest.TestCase):
         self.assertIsInstance(skill_name, str)
         self.assertIn("return 7 ** 2", code)
 
+    def test_generate_skill_from_instruction_sum_without_llm(self):
+        skill_name, code = cg.generate_skill_from_instruction("Add the numbers 3, 5, and 7", allow_llm=False)
+        self.assertIsInstance(skill_name, str)
+        self.assertIn("return sum([3, 5, 7])", code)
+
+    def test_build_recovery_instruction_contains_failure_context(self):
+        recovery_instruction = cg.build_recovery_instruction("Convert input.webm to output.mp4", "FileNotFoundError: input.webm")
+        self.assertIn("Convert input.webm to output.mp4", recovery_instruction)
+        self.assertIn("FileNotFoundError", recovery_instruction)
+        self.assertIn("revised skill", recovery_instruction.lower())
+
     def test_execute_generated_code_simple_function(self):
         code = "def main(**kwargs):\n    return kwargs.get('x', 0) + 1\n"
         result = cg.execute_generated_code(code, function_name="main", x=4)
