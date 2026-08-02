@@ -159,6 +159,31 @@ def get_wake_phrase() -> str:
     )
 
 
+def _get_bridge_launch_command() -> list[str]:
+    return [sys.executable, BRIDGE_SCRIPT]
+
+
+def _launch_bridge_process(bridge_env: dict[str, str], pass_fds=()):
+    return subprocess.Popen(
+        _get_bridge_launch_command(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=bridge_env,
+        start_new_session=True,
+        pass_fds=pass_fds,
+    )
+
+
+def _reserve_bridge_port(host: str, port: int):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(5)
+    sock.setblocking(False)
+    return sock
+
+
 def launch_mt5_bridge_if_needed() -> bool:
     if BRIDGE_PORT is None:
         print("❌ [Bootstrap] No free MT5 bridge port was available. Available ports are: " + ", ".join(str(p) for p in RESERVED_MT5_BRIDGE_PORTS))
@@ -169,46 +194,41 @@ def launch_mt5_bridge_if_needed() -> bool:
         print(f"🔌 [Bootstrap] MT5 Bridge already available on {BRIDGE_HOST}:{BRIDGE_PORT}")
         return True
 
-    wine_path = shutil.which("wine")
-    if wine_path is None:
-        if os.path.exists(BRIDGE_SCRIPT):
+    if not os.path.exists(BRIDGE_SCRIPT):
+        print(f"⚠️ [Bootstrap] Bridge script not found: {BRIDGE_SCRIPT}")
+        return False
+
+    print("🔧 [Bootstrap] Launching MT5 Bridge Server with local Python...")
+    bridge_env = os.environ.copy()
+    bridge_env["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
+    bridge_env["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
+    bridge_socket = None
+    try:
+        bridge_socket = _reserve_bridge_port(BRIDGE_HOST, BRIDGE_PORT)
+        bridge_env["ANGELIQUE_MT5_BRIDGE_FD"] = str(bridge_socket.fileno())
+        bridge_process = _launch_bridge_process(bridge_env, pass_fds=(bridge_socket.fileno(),))
+    except Exception as exc:
+        if bridge_socket is not None:
             try:
-                print("⚠️ [Bootstrap] Wine not found — launching bridge with local Python as fallback.")
-                bridge_env = os.environ.copy()
-                bridge_env["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
-                bridge_env["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
-                subprocess.Popen(
-                    [sys.executable, BRIDGE_SCRIPT],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=bridge_env,
-                    start_new_session=True,
-                )
-            except Exception as exc:
-                print(f"❌ [Bootstrap] Failed to launch MT5 Bridge with local Python: {exc}")
-                return False
-        else:
-            print(f"⚠️ [Bootstrap] Bridge script not found: {BRIDGE_SCRIPT}")
-            return False
-    else:
-        if not os.path.exists(BRIDGE_SCRIPT):
-            print(f"⚠️ [Bootstrap] Bridge script not found: {BRIDGE_SCRIPT}")
-            return False
-        print("🍷 [Bootstrap] Launching MT5 Bridge Server inside Wine...")
-        bridge_env = os.environ.copy()
-        bridge_env["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
-        bridge_env["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
-        try:
-            subprocess.Popen(
-                [wine_path, "python", BRIDGE_SCRIPT],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=bridge_env,
-                start_new_session=True,
-            )
-        except Exception as exc:
-            print(f"❌ [Bootstrap] Failed to launch MT5 Bridge: {exc}")
-            return False
+                bridge_socket.close()
+            except Exception:
+                pass
+        print(f"❌ [Bootstrap] Failed to launch MT5 Bridge: {exc}")
+        return False
+    finally:
+        if bridge_socket is not None:
+            try:
+                bridge_socket.close()
+            except Exception:
+                pass
+
+    time.sleep(0.5)
+    if bridge_process.poll() is not None:
+        output = bridge_process.stdout.read().strip() if bridge_process.stdout else ""
+        if output:
+            print(output)
+        print(f"❌ [Bootstrap] MT5 Bridge exited immediately with code {bridge_process.returncode}.")
+        return False
 
     print(f"⏳ [Bootstrap] Waiting for MT5 Bridge to initialize on port {BRIDGE_PORT}...")
     deadline = time.time() + config.MT5_BRIDGE_CONNECT_TIMEOUT
@@ -259,6 +279,21 @@ def get_mode_toggle_action(user_text: str, audio_enabled: bool) -> str | None:
 
 def main():
     _import_runtime_modules()
+    # Acquire single-session lock for terminal mode
+    try:
+        from core.session_lock import acquire_lock, release_lock, read_lock
+    except Exception:
+        acquire_lock = None
+        release_lock = None
+        read_lock = None
+
+    if acquire_lock:
+        ok = acquire_lock("terminal")
+        if not ok:
+            existing = read_lock()
+            mode = existing.get("mode") if existing else "unknown"
+            print(f"Another Angelique session is already running (mode={mode}). Exiting.")
+            return
     if BRIDGE_PORT is not None:
         os.environ["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
         os.environ["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
@@ -282,30 +317,20 @@ def main():
         print("⚠️ [System] Trading bridge unavailable; continuing without MT5 integration.")
     print("=" * 50)
     
-    # Initialize wake-word system (START IN SLEEP MODE)
-    print("😴 [System] Angelique wake-word system initialized. Angelique is sleeping.")
-    print("   Say 'Angelique' followed by a clap to wake her up.")
-    sleep()  # Start in sleep mode for safety
+    # System ready - always active, no wake word required
+    print("🟢 Angelique v2 - Cognitive Architecture Online")
+    print(" Trading focus | Memory enabled | Fast AI pipeline")
+    print(" Type 'mode terminal' for text CLI. Type 'exit' or 'goodbye' to quit.\n")
 
     audio_enabled = True
-    has_started = False
-    last_speech_time = 0.0
     has_had_conversation = False
-
-    print("🟢 Angelique v1 - Cognitive Architecture Online")
-    print(" Audio is ON by default. Press Enter to toggle audio on/off.")
-    print("Type 'exit' or say 'goodbye' to quit.\n")
 
     while True:
         user_input = ""
         try:
-            if audio_enabled and not has_started and not has_had_conversation:
-                speak_intro_phrase()
-                has_started = True
-
             if audio_enabled:
                 print("🎤 Listening... (press Enter to toggle audio)", end="\r")
-                result: list[str | None] = [None]
+                result = [None]
                 def listen_thread():
                     result[0] = listen()
                 t = threading.Thread(target=listen_thread, daemon=True)
@@ -315,8 +340,9 @@ def main():
                     if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                         pressed = input().strip()
                         if pressed == "":
-                            audio_enabled = False
-                            print("\n🔈 Audio disabled. Press Enter again to re-enable audio.")
+                            audio_enabled = not audio_enabled
+                            mode = "🎤 Audio" if audio_enabled else "💬 Text"
+                            print(f"\n{mode} mode.")
                         else:
                             user_input = pressed
                         break
@@ -325,27 +351,25 @@ def main():
                     if user_input:
                         print(f"\n🗣️ You: {user_input}")
             else:
-                print("\n Text mode active. Type your message, or press Enter to re-enable audio.")
+                print("\n💬 Text mode. Type your message, or press Enter to re-enable audio.", end="\n💬 You: ")
                 try:
-                    pressed = input("💬 You: ").strip()
+                    pressed = input().strip()
                 except EOFError:
                     break
                 if pressed == "":
                     audio_enabled = True
-                    print("\n🔈 Audio enabled again.")
+                    print("\n🎤 Audio enabled.")
                     continue
                 user_input = pressed
 
-            if user_input:
-                action = get_mode_toggle_action(user_input, audio_enabled)
-                if action == "disable":
-                    audio_enabled = False
-                    print("\n🔈 Audio disabled.")
-                    continue
-                if action == "enable":
-                    audio_enabled = True
-                    print("\n🔈 Audio enabled again.")
-                    continue
+            if user_input.lower() in ("mode", "mode terminal", "text mode", "terminal"):
+                print("\n💬 Switched to text mode. Type 'mode audio' to return to voice.")
+                audio_enabled = False
+                continue
+            if user_input.lower() in ("mode audio", "audio mode", "voice"):
+                print("\n🎤 Switched to audio mode.")
+                audio_enabled = True
+                continue
 
             if not user_input:
                 continue
@@ -356,18 +380,25 @@ def main():
         lower_input = user_input.lower()
         if lower_input in ["exit", "quit", "goodbye", "shut down", "stop"]:
             print("\n👋 Shutting down...")
-            speak("Alright, I'm shutting down now. Talk to you later!")
             break
 
         has_had_conversation = True
         print("\n🧠 Thinking...")
-        response = run_cognitive_loop(user_input)
+        try:
+            response = run_cognitive_loop(user_input)
+        except Exception as e:
+            response = f"I encountered an error processing your request: {e}"
         print(f"\n✨ Angelique: {response}\n")
         if audio_enabled:
-            now = time.time()
-            if now - last_speech_time > 0.8:
+            try:
                 speak(response)
-                last_speech_time = now
+            except Exception:
+                pass
+        try:
+            if release_lock:
+                release_lock()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     if os.environ.get("ANGELIQUE_LAUNCHED") == "1":
