@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 WorkingDirectory=%h/Desktop/Projects/project-Angelique
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -n "$DISPLAY" ] && exit 0; [ -e /tmp/.X11-unix/X0 ] && exit 0; [ -n "$XDG_RUNTIME_DIR" ] && [ -e "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; exit 0'
-ExecStart=%h/Desktop/Projects/project-Angelique/.venv/bin/python %h/Desktop/Projects/project-Angelique/launcher.py
+ExecStart=%h/Desktop/Projects/project-Angelique/.venv/bin/python %h/Desktop/Projects/project-Angelique/launcher.py --gui
 Restart=on-failure
 RestartSec=5
 

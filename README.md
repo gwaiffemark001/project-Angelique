@@ -42,11 +42,7 @@ pip install -r requirements.txt
 python3 launcher.py
 ```
 
-If `launcher.py` is not available or configured, start with:
-
-```bash
-python3 main.py
-```
+This will launch Angelique's native desktop app in GUI mode by default. Use `python3 launcher.py --terminal` to start the terminal interface.
 
 ## Self-Evolution Workflow
 
