@@ -11,11 +11,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-SKILLS_DIR = Path("data/generated_skills")
-SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+from core import config
 
-EVOLUTION_LOG = Path("data/generated_skills/evolution_log.json")
-COMPONENT_CACHE = Path("data/generated_skills/component_cache.json")
+SKILLS_DIR = config.GENERATED_SKILLS_DIR
+EVOLUTION_LOG = config.EVOLUTION_LOG
+COMPONENT_CACHE = config.COMPONENT_CACHE
 
 def _load_json(path, default=None):
     try:
