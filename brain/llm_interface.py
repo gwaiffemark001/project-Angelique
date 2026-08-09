@@ -1,15 +1,63 @@
 import json
 import re
 import requests
+import socket
 from typing import Any, Optional
 from datetime import datetime
 import os
 from core import config
 
+
+def _is_online() -> bool:
+    try:
+        with socket.create_connection((config.NETWORK_CHECK_HOST, config.NETWORK_CHECK_PORT), timeout=1):
+            return True
+    except Exception:
+        return False
+
 def query_llm(messages: list, temperature: float = 0.7) -> str:
     """Core function to query LLMs with a professional, high-reliability fallback chain."""
+
+    def _try_ollama_model(model_name: str) -> Optional[str]:
+        try:
+            response = requests.post(
+                f"{config.OLLAMA_BASE_URL}/api/chat",
+                json={"model": model_name, "messages": messages, "stream": False},
+                timeout=45
+            )
+            if response.status_code == 200:
+                return response.json()["message"]["content"]
+        except Exception as e:
+            print(f"⚠️ [LLM] Ollama model '{model_name}' failed: {e}")
+        return None
+
+    # Prefer the installed local models when the network is unavailable.
+    if not _is_online() and "ollama" in config.API_PRIORITY:
+        for model_name in config.OLLAMA_MODEL_CANDIDATES:
+            if not model_name:
+                continue
+            result = _try_ollama_model(model_name)
+            if result:
+                return result
     
-    # 1. Try OpenRouter (Best for strict JSON tool calling)
+    # 1. Try NVIDIA NIM (Highest quality, lowest latency)
+    if "nvidia" in config.API_PRIORITY and config.NVIDIA_API_KEY:
+        try:
+            response = requests.post(
+                config.NVIDIA_API_URL,
+                headers={
+                    "Authorization": f"Bearer {config.NVIDIA_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={"model": config.NVIDIA_MODEL, "messages": messages, "temperature": temperature},
+                timeout=15
+            )
+            if response.status_code == 200 and "choices" in response.json():
+                return response.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"⚠️ [LLM] NVIDIA failed: {e}")
+
+    # 2. Try OpenRouter (Excellent for JSON tool calling)
     if "openrouter" in config.API_PRIORITY and config.OPENROUTER_API_KEY:
         try:
             response = requests.post(
@@ -17,11 +65,10 @@ def query_llm(messages: list, temperature: float = 0.7) -> str:
                 headers={
                     "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost",
-                    "X-Title": "Angelique AI"
+                    "HTTP-Referer": config.API_DEFAULT_REFERER,
+                    "X-Title": config.API_CLIENT_TITLE
                 },
-                # Qwen 2.5 Coder 32B is exceptionally reliable at JSON formatting
-                json={"model": "qwen/qwen-2.5-coder-32b-instruct", "messages": messages, "temperature": temperature},
+                json={"model": config.OPENROUTER_MODEL, "messages": messages, "temperature": temperature},
                 timeout=20
             )
             if response.status_code == 200 and "choices" in response.json():
@@ -29,30 +76,13 @@ def query_llm(messages: list, temperature: float = 0.7) -> str:
         except Exception as e:
             print(f"⚠️ [LLM] OpenRouter failed: {e}")
 
-    # 2. Try NVIDIA NIM (High-quality Llama 3.1 70B)
-    if "nvidia" in config.API_PRIORITY and config.NVIDIA_API_KEY:
-        try:
-            response = requests.post(
-                "https://integrate.api.nvidia.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {config.NVIDIA_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={"model": "meta/llama-3.1-70b-instruct", "messages": messages, "temperature": temperature},
-                timeout=20
-            )
-            if response.status_code == 200 and "choices" in response.json():
-                return response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"⚠️ [LLM] NVIDIA failed: {e}")
-
     # 3. Try Bluesminds
     if "bluesminds" in config.API_PRIORITY and config.BLUESMINDS_API_KEY:
         try:
             response = requests.post(
                 f"{config.BLUESMINDS_BASE_URL}/chat/completions",
                 headers={"Authorization": f"Bearer {config.BLUESMINDS_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "meta/llama-3.1-8b-instruct", "messages": messages, "temperature": temperature},
+                json={"model": config.BLUESMINDS_MODEL, "messages": messages, "temperature": temperature},
                 timeout=20
             )
             if response.status_code == 200 and "choices" in response.json():
@@ -82,7 +112,7 @@ def query_llm(messages: list, temperature: float = 0.7) -> str:
                 payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
                 
             response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={config.GEMINI_API_KEY}",
+                f"{config.GEMINI_BASE_URL}/models/{config.GEMINI_MODEL}:generateContent?key={config.GEMINI_API_KEY}",
                 headers={"Content-Type": "application/json"},
                 json=payload,
                 timeout=20
@@ -94,16 +124,12 @@ def query_llm(messages: list, temperature: float = 0.7) -> str:
 
     # 5. Try Ollama (Local Fallback)
     if "ollama" in config.API_PRIORITY:
-        try:
-            response = requests.post(
-                f"{config.OLLAMA_BASE_URL}/api/chat",
-                json={"model": config.PRIMARY_MODEL, "messages": messages, "stream": False},
-                timeout=45
-            )
-            if response.status_code == 200:
-                return response.json()["message"]["content"]
-        except Exception as e:
-            print(f"⚠️ [LLM] Ollama failed: {e}")
+        for model_name in config.OLLAMA_MODEL_CANDIDATES:
+            if not model_name:
+                continue
+            result = _try_ollama_model(model_name)
+            if result:
+                return result
 
     return "I'm having a little trouble connecting to my brain right now."
 
@@ -151,9 +177,9 @@ def extract_json_from_text(text: Optional[str]) -> Any:
 
     # Logging: append raw input and parsed result to data/logs/llm_extractions.log
     try:
-        log_dir = os.path.join(os.getcwd(), 'data', 'logs')
+        log_dir = config.LOG_DIR
         os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, 'llm_extractions.log')
+        log_path = os.path.join(str(log_dir), 'llm_extractions.log')
         with open(log_path, 'a', encoding='utf-8') as f:
             entry = {
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
