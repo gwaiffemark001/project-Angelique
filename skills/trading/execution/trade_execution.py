@@ -1,7 +1,7 @@
 from skills.trading.engine.mt5_bridge import bridge
 import json
 
-def execute_market_order(symbol: str, order_type: str, volume: float, sl: float, tp: float, comment: str = "Angelique AI") -> str:
+def execute_market_order(symbol: str, order_type: str, volume: float, sl: float, tp: float, comment: str = "Angelique AI", account_mode: str = "demo") -> str:
     """Sends the execution command to the Wine Bridge."""
     payload = {
         "action": "place_order",
@@ -10,7 +10,8 @@ def execute_market_order(symbol: str, order_type: str, volume: float, sl: float,
         "volume": volume,
         "sl": sl,
         "tp": tp,
-        "comment": comment
+        "comment": comment,
+        "account_mode": account_mode,
     }
     
     response = bridge.send_command("place_order", payload)

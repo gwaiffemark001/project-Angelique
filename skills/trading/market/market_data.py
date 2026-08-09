@@ -6,9 +6,16 @@ from skills.trading.engine.connection_manager import bridge_manager
 from skills.trading.market.indicators import calculate_all_indicators
 
 
+from core import config
+
 class MarketData:
     @staticmethod
-    def get_candles_and_indicators(symbol: str, timeframe: str = "H1", count: int = 100) -> dict:
+    def get_candles_and_indicators(
+        symbol: str,
+        timeframe: str = config.DEFAULT_TRADING_TIMEFRAME,
+        count: int = 100,
+        account_mode: str = "demo",
+    ) -> dict:
         """Fetch REAL market data from MT5 bridge, calculate indicators."""
         
         # Ensure connection to MT5 bridge
@@ -18,28 +25,33 @@ class MarketData:
                 return {"error": "MT5 bridge disconnected", "status": "error"}
         
         try:
-            # Query actual market data from MT5 bridge
+            requested_mode = str(account_mode or "demo").lower()
+            if requested_mode == "real":
+                requested_mode = "live"
+
             request = {
                 "command": "get_rates",
                 "symbol": symbol,
                 "timeframe": timeframe,
-                "count": count
+                "count": count,
+                "account_mode": requested_mode,
             }
-            
+
             # Send to bridge via async or blocking call
             import time
             import json
-            
-            # Try to query the bridge's API endpoint
+
             response = bridge_manager.send_request(request)
-            
-            if not response or "error" in response:
-                print(f"⚠️ [Trading] MT5 bridge error: {response.get('error', 'Unknown error')}")
+
+            if not response:
                 return {"error": "Failed to fetch market data from MT5", "status": "error"}
-            
-            # Parse bridge response
+            if "error" in response:
+                return response
+
             candles_raw = response.get("rates", [])
-            if not candles_raw:
+            if isinstance(candles_raw, dict) and "error" in candles_raw:
+                return candles_raw
+            if not isinstance(candles_raw, list) or not candles_raw:
                 return {"error": "No candles returned from MT5", "status": "error"}
             
             # Convert raw MT5 candles to our format
