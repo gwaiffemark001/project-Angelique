@@ -47,6 +47,7 @@ def _load_screen_tools():
                 "capture_photo": lambda *args, **kwargs: "Error: screen tools unavailable.",
             }
     return _screen_tools
+from core import config
 from skills.trading.engine.mt5_bridge import bridge
 from skills.trading.trading_skill import analyze_and_recommend, execute_approved_trade
 from skills.trading.news import get_forex_news, get_market_calendar
@@ -324,7 +325,7 @@ TOOL_REGISTRY = {
             "timeframe": "Chart timeframe (e.g., 'M15', 'H1', 'H4')",
             "risk_percent": "Risk percentage per trade (default 1.0)",
         },
-        "function": lambda symbol, timeframe="H1", risk_percent=1.0: analyze_and_recommend(symbol, timeframe, risk_percent),
+        "function": lambda symbol, timeframe=config.DEFAULT_TRADING_TIMEFRAME, risk_percent=1.0: analyze_and_recommend(symbol, timeframe, risk_percent),
     },
     "execute_approved_trade": {
         "description": "Execute a market order. ONLY use after explicit user confirmation.",
