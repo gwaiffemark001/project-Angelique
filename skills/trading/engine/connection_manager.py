@@ -13,12 +13,14 @@ except ImportError as e:
 
 from core import config
 
+
 class MT5ConnectionManager:
     def __init__(self, host=None, port=None):
         self.host = host or config.MT5_BRIDGE_HOST
         self.port = int(port or config.MT5_BRIDGE_PORT)
         self.ws = None
         self._is_connected = False
+        self._last_error = None
         self._loop = None
         self._thread = None
         self._lock = threading.Lock()
@@ -69,48 +71,83 @@ class MT5ConnectionManager:
             return
 
         try:
-            self.ws = await websockets.connect(
-                f"ws://{self.host}:{self.port}",
-                open_timeout=config.MT5_BRIDGE_CONNECT_TIMEOUT,
+            self.ws = await asyncio.wait_for(
+                websockets.connect(
+                    f"ws://{self.host}:{self.port}",
+                    open_timeout=config.MT5_BRIDGE_CONNECT_TIMEOUT,
+                ),
+                timeout=config.MT5_BRIDGE_CONNECT_TIMEOUT,
             )
             self._is_connected = True
             print("🟢 [MT5 Client] Connected to Wine Bridge.")
         except Exception as e:
             self._is_connected = False
+            self._last_error = str(e)
             print(f"⚠️ [MT5 Client] Connect failed, retrying in {config.MT5_BRIDGE_RECONNECT_INTERVAL}s: {e}")
 
     def send_command(self, action: str, params: dict | None = None) -> dict:
         if not self._is_connected:
-            self.connect()
-            return {"error": "Not connected"}
+            if not self.connect():
+                self._last_error = "Not connected to MT5 bridge"
+                return {"error": "Not connected to MT5 bridge"}
 
         payload = {"action": action}
         if params:
             payload.update(params)
 
         if self._loop is None:
+            self._last_error = "Event loop not available"
             return {"error": "Event loop not available"}
 
         try:
             future = asyncio.run_coroutine_threadsafe(
                 self._send_async(json.dumps(payload)),
-                self._loop
+                self._loop,
             )
-            return future.result(timeout=config.MT5_BRIDGE_CONNECT_TIMEOUT)
+            result = future.result(timeout=config.MT5_BRIDGE_CONNECT_TIMEOUT)
+            if "error" in result and "WebSocket" in result.get("error", ""):
+                self._is_connected = False
+                if self.connect():
+                    future2 = asyncio.run_coroutine_threadsafe(
+                        self._send_async(json.dumps(payload)),
+                        self._loop,
+                    )
+                    result = future2.result(timeout=config.MT5_BRIDGE_CONNECT_TIMEOUT)
+            return result
         except Exception as e:
-            self._is_connected = False
+            self._last_error = str(e)
+            if not self._is_connected:
+                self.connect()
             return {"error": str(e)}
 
     async def _send_async(self, message: str) -> dict:
-        if self.ws is None or self.ws.closed:
+        if self.ws is None:
             self._is_connected = False
             return {"error": "WebSocket not connected"}
-        await self.ws.send(message)
-        response = await self.ws.recv()
-        return json.loads(response)
+        try:
+            check = getattr(self.ws, "closed", None)
+            if check is not None and check:
+                self._is_connected = False
+                return {"error": "WebSocket not connected"}
+        except Exception:
+            pass
+        try:
+            await self.ws.send(message)
+            response = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
+            return json.loads(response)
+        except asyncio.TimeoutError:
+            self._is_connected = False
+            return {"error": "WebSocket response timed out"}
+        except Exception as e:
+            self._is_connected = False
+            self._last_error = f"WebSocket error: {e}"
+            return {"error": f"WebSocket error: {e}"}
 
     def get_status(self) -> bool:
         return self._is_connected
+
+    def get_last_error(self) -> str | None:
+        return self._last_error
 
     def send_request(self, request: dict) -> dict:
         """Send a request to MT5 bridge and get response."""
@@ -118,4 +155,3 @@ class MT5ConnectionManager:
 
 
 bridge_manager = MT5ConnectionManager()
-
