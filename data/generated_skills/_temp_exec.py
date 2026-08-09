@@ -1,7 +1,15 @@
-from datetime import datetime
 def main(**kwargs):
-    return datetime.now().isoformat()
-
+    if 'provide' in kwargs:
+        if kwargs['provide'] == 'help':
+            print("This script provides help on how to use it.")
+        elif kwargs['provide'] == 'information':
+            print("This script provides information on a given topic.")
+        elif kwargs['provide'] == 'data':
+            print("This script provides data in a given format.")
+        else:
+            print("Invalid option. Please use 'help', 'information' or 'data'.")
+    else:
+        print("Please provide an option to use this script.")
 
 if __name__ == '__main__':
     import json, sys, traceback

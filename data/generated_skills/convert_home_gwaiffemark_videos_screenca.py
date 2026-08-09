@@ -1,10 +1,13 @@
 import subprocess
 from pathlib import Path
+
 def main(**kwargs):
-    input_path = Path(r'''/home/gwaiffemark/Videos/Screencasts/Screencast from 2026-07-23 03-56-12.webm''').expanduser().resolve()
-    output_path = Path(r'''/home/gwaiffemark/Videos/Screencast from 2026-07-23 03-56-12.mp4''').expanduser().resolve()
-    if not input_path or not output_path:
-        raise ValueError("Both source and destination paths must be provided")
+    if 'input_path' not in kwargs or 'output_path' not in kwargs:
+        raise ValueError("Both input_path and output_path must be provided")
+    input_path = Path(kwargs['input_path']).expanduser().resolve()
+    output_path = Path(kwargs['output_path']).expanduser().resolve()
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
