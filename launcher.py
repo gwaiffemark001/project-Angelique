@@ -6,12 +6,30 @@ import json
 import time
 from pathlib import Path
 
+try:
+    from core import config
+except Exception:
+    config = None
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "angelique", "config.json")
 COMMAND_PATH = os.path.join(os.path.expanduser("~"), ".config", "angelique", "command.json")
 
+# Ensure child processes can import the project package modules by adding ROOT to PYTHONPATH.
+def _ensure_pythonpath_in_env(env: dict) -> dict:
+    try:
+        existing = env.get("PYTHONPATH", "")
+        if existing:
+            env["PYTHONPATH"] = ROOT + os.pathsep + existing
+        else:
+            env["PYTHONPATH"] = ROOT
+    except Exception:
+        pass
+    return env
+
 def _read_default_mode() -> str:
-    env = os.environ.get("ANGELIQUE_DEFAULT_MODE")
+    env_name = config.ANGELIQUE_DEFAULT_MODE_ENV if config is not None else "ANGELIQUE_DEFAULT_MODE"
+    env = os.environ.get(env_name)
     if env:
         return env.lower()
     try:
@@ -49,6 +67,25 @@ def _check_session_conflict(mode: str) -> bool:
         return True
     return False
 
+def _to_windows_path(path: str) -> str:
+    if shutil.which("winepath") is None:
+        return path
+    try:
+        completed = subprocess.run([
+            "winepath", "-w", path
+        ], capture_output=True, text=True, check=True)
+        return completed.stdout.strip() or path
+    except Exception:
+        return path
+
+
+def _get_wine_bridge_command() -> list[str] | None:
+    for exe in ("wine", "wine64"):
+        if shutil.which(exe):
+            return [exe, "cmd", "/c", "python"]
+    return None
+
+
 def launch_child_process(mode: str):
     # Prevent launching a child if another differing session is active
     if _check_session_conflict(mode):
@@ -56,7 +93,9 @@ def launch_child_process(mode: str):
         raise SystemExit(1)
     cmd = _child_cmd_for_mode(mode)
     env = os.environ.copy()
-    env["ANGELIQUE_LAUNCHED"] = "1"
+    launched_env_name = config.ANGELIQUE_LAUNCHED_ENV if config is not None else "ANGELIQUE_LAUNCHED"
+    env[launched_env_name] = "1"
+    env = _ensure_pythonpath_in_env(env)
     return subprocess.Popen(cmd, cwd=ROOT, env=env)
 
 def _write_switch_command(mode: str):
@@ -77,13 +116,23 @@ if __name__ == "__main__":
         if sys.argv[1] == "--gui":
             launch_child_process("gui").wait()
         elif sys.argv[1] == "--start-bridge":
-            # Start the demo MT5 bridge server in foreground
+            # Start the demo MT5 bridge server in foreground via Wine
             bridge_script = os.path.join(ROOT, "skills", "trading", "engine", "mt5_bridge_server.py")
-            subprocess.run([sys.executable, bridge_script])
+            wine_cmd = _get_wine_bridge_command()
+            if wine_cmd is None:
+                print("Wine is not available; cannot launch MT5 bridge.")
+                raise SystemExit(1)
+            windows_bridge_script = _to_windows_path(bridge_script)
+            subprocess.run(wine_cmd + [windows_bridge_script], cwd=ROOT)
         elif sys.argv[1] == "--start-bridge-bg":
-            # Start the demo MT5 bridge server in background and return
+            # Start the demo MT5 bridge server in background and return via Wine
             bridge_script = os.path.join(ROOT, "skills", "trading", "engine", "mt5_bridge_server.py")
-            subprocess.Popen([sys.executable, bridge_script], cwd=ROOT)
+            wine_cmd = _get_wine_bridge_command()
+            if wine_cmd is None:
+                print("Wine is not available; cannot launch MT5 bridge.")
+                raise SystemExit(1)
+            windows_bridge_script = _to_windows_path(bridge_script)
+            subprocess.Popen(wine_cmd + [windows_bridge_script], cwd=ROOT)
         elif sys.argv[1] == "--terminal":
             launch_child_process("terminal").wait()
         elif sys.argv[1] == "--set-default":

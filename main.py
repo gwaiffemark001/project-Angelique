@@ -2,6 +2,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import socket
 import subprocess
@@ -21,7 +22,7 @@ bridge_manager = None
 
 BRIDGE_HOST = config.MT5_BRIDGE_HOST
 BRIDGE_PORT = config.MT5_BRIDGE_PORT
-RESERVED_MT5_BRIDGE_PORTS = [10001, 10002, 10003, 10004, 10005]
+RESERVED_MT5_BRIDGE_PORTS = config.MT5_BRIDGE_RESERVED_PORTS
 BRIDGE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills", "trading", "engine", "mt5_bridge_server.py")
 
 
@@ -98,27 +99,46 @@ def is_port_free(host: str, port: int, timeout: float = 0.1) -> bool:
         return False
 
 
+def _find_responsive_bridge_port() -> int | None:
+    for port in RESERVED_MT5_BRIDGE_PORTS:
+        if is_bridge_responsive(BRIDGE_HOST, port, timeout=1.0):
+            return port
+    return None
+
+
 def select_bridge_port() -> int | None:
     if BRIDGE_PORT:
         if is_port_free(BRIDGE_HOST, BRIDGE_PORT):
             return BRIDGE_PORT
-        print(f"⚠️ [Bootstrap] Requested bridge port {BRIDGE_PORT} is already in use.")
+
+        if is_bridge_responsive(BRIDGE_HOST, BRIDGE_PORT, timeout=1.0):
+            print(f"🔌 [Bootstrap] MT5 Bridge already available on {BRIDGE_HOST}:{BRIDGE_PORT}")
+            return BRIDGE_PORT
+
+        other_port = _find_responsive_bridge_port()
+        if other_port is not None:
+            print(f"⚠️ [Bootstrap] Requested bridge port {BRIDGE_PORT} is already in use; using existing bridge on {BRIDGE_HOST}:{other_port}")
+            return other_port
+
+        # Only allow reserved fallback ports, no additional port scanning.
+        for port in RESERVED_MT5_BRIDGE_PORTS:
+            if port != BRIDGE_PORT and is_port_free(BRIDGE_HOST, port):
+                print(f"⚠️ [Bootstrap] Requested bridge port {BRIDGE_PORT} is already in use; falling back to {port}")
+                return port
+
+        print(f"⚠️ [Bootstrap] Requested bridge port {BRIDGE_PORT} is already in use and no reserved port is free.")
         return None
+
+    responsive_port = _find_responsive_bridge_port()
+    if responsive_port is not None:
+        print(f"🔌 [Bootstrap] MT5 Bridge already available on {BRIDGE_HOST}:{responsive_port}")
+        return responsive_port
 
     for port in RESERVED_MT5_BRIDGE_PORTS:
         if is_port_free(BRIDGE_HOST, port):
             return port
 
     return None
-
-
-BRIDGE_PORT = select_bridge_port()
-
-if BRIDGE_PORT is not None and bridge_manager is not None:
-    os.environ["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
-    os.environ["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
-    bridge_manager.host = BRIDGE_HOST
-    bridge_manager.port = BRIDGE_PORT
 
 
 def is_bridge_responsive(host: str, port: int, timeout: float | None = None) -> bool:
@@ -144,6 +164,15 @@ def is_bridge_responsive(host: str, port: int, timeout: float | None = None) -> 
         return False
 
 
+BRIDGE_PORT = select_bridge_port()
+
+if BRIDGE_PORT is not None and bridge_manager is not None:
+    os.environ[config.MT5_BRIDGE_HOST_ENV] = BRIDGE_HOST
+    os.environ[config.MT5_BRIDGE_PORT_ENV] = str(BRIDGE_PORT)
+    bridge_manager.host = BRIDGE_HOST
+    bridge_manager.port = BRIDGE_PORT
+
+
 def get_intro_phrase() -> str:
     return (
         "Angelique, my love, the voice of money, ambassador of the rich, brother from another mother, "
@@ -159,13 +188,43 @@ def get_wake_phrase() -> str:
     )
 
 
+def _to_windows_path(path: str) -> str:
+    if shutil.which("winepath") is None:
+        return path
+    try:
+        completed = subprocess.run(
+            ["winepath", "-w", path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        converted = completed.stdout.strip()
+        return converted or path
+    except Exception:
+        return path
+
+
 def _get_bridge_launch_command() -> list[str]:
-    return [sys.executable, BRIDGE_SCRIPT]
+    launcher = getattr(config, "MT5_BRIDGE_LAUNCHER", "wine cmd /c python")
+    parts = shlex.split(str(launcher))
+    if not parts:
+        raise RuntimeError("MT5 bridge launcher command is not configured.")
+
+    executable = parts[0]
+    if shutil.which(executable) is None:
+        raise RuntimeError(f"MT5 bridge launcher command not found: {executable}")
+
+    if executable.startswith("wine"):
+        script_path = _to_windows_path(BRIDGE_SCRIPT)
+    else:
+        script_path = BRIDGE_SCRIPT
+
+    return parts + [script_path]
 
 
-def _launch_bridge_process(bridge_env: dict[str, str], pass_fds=()):
+def _launch_bridge_process(bridge_env: dict[str, str], cmd: list[str], pass_fds=()):
     return subprocess.Popen(
-        _get_bridge_launch_command(),
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -198,15 +257,25 @@ def launch_mt5_bridge_if_needed() -> bool:
         print(f"⚠️ [Bootstrap] Bridge script not found: {BRIDGE_SCRIPT}")
         return False
 
-    print("🔧 [Bootstrap] Launching MT5 Bridge Server with local Python...")
+    print("🔧 [Bootstrap] Launching MT5 Bridge Server under Wine...")
     bridge_env = os.environ.copy()
-    bridge_env["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
-    bridge_env["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
+    bridge_env[config.MT5_BRIDGE_HOST_ENV] = BRIDGE_HOST
+    bridge_env[config.MT5_BRIDGE_PORT_ENV] = str(BRIDGE_PORT)
+    bridge_env[config.MT5_BRIDGE_FD_ENV] = ""
+    cmd = _get_bridge_launch_command()
+    if cmd[0].startswith("wine"):
+        bridge_env["PYTHONPATH"] = _to_windows_path(os.path.dirname(os.path.abspath(__file__)))
+    else:
+        bridge_env["PYTHONPATH"] = os.path.dirname(os.path.abspath(__file__))
     bridge_socket = None
     try:
-        bridge_socket = _reserve_bridge_port(BRIDGE_HOST, BRIDGE_PORT)
-        bridge_env["ANGELIQUE_MT5_BRIDGE_FD"] = str(bridge_socket.fileno())
-        bridge_process = _launch_bridge_process(bridge_env, pass_fds=(bridge_socket.fileno(),))
+        if cmd[0].startswith("wine"):
+            bridge_env[config.MT5_BRIDGE_FD_ENV] = ""
+            bridge_process = _launch_bridge_process(bridge_env, cmd=cmd)
+        else:
+            bridge_socket = _reserve_bridge_port(BRIDGE_HOST, BRIDGE_PORT)
+            bridge_env[config.MT5_BRIDGE_FD_ENV] = str(bridge_socket.fileno())
+            bridge_process = _launch_bridge_process(bridge_env, cmd=cmd, pass_fds=(bridge_socket.fileno(),))
     except Exception as exc:
         if bridge_socket is not None:
             try:
@@ -241,7 +310,7 @@ def launch_mt5_bridge_if_needed() -> bool:
         time.sleep(config.MT5_BRIDGE_RECONNECT_INTERVAL)
         
     print(f"⚠️ [Bootstrap] MT5 Bridge did not start in time on {BRIDGE_HOST}:{BRIDGE_PORT}.")
-    print("    If this port is already used by another app, set ANGELIQUE_MT5_BRIDGE_PORT to a free port and restart.")
+    print(f"    If this port is already used by another app, set {config.MT5_BRIDGE_PORT_ENV} to a free port and restart.")
     return False
 
 def speak_intro_phrase() -> None:
@@ -295,8 +364,8 @@ def main():
             print(f"Another Angelique session is already running (mode={mode}). Exiting.")
             return
     if BRIDGE_PORT is not None:
-        os.environ["ANGELIQUE_MT5_BRIDGE_HOST"] = BRIDGE_HOST
-        os.environ["ANGELIQUE_MT5_BRIDGE_PORT"] = str(BRIDGE_PORT)
+        os.environ[config.MT5_BRIDGE_HOST_ENV] = BRIDGE_HOST
+        os.environ[config.MT5_BRIDGE_PORT_ENV] = str(BRIDGE_PORT)
         if hasattr(bridge_manager, "host"):
             bridge_manager.host = BRIDGE_HOST
         if hasattr(bridge_manager, "port"):
@@ -401,7 +470,7 @@ def main():
             pass
 
 if __name__ == "__main__":
-    if os.environ.get("ANGELIQUE_LAUNCHED") == "1":
+    if os.environ.get(config.ANGELIQUE_LAUNCHED_ENV) == "1":
         main()
     else:
         print("Please start Angelique via launcher.py. Run: python3 launcher.py")
