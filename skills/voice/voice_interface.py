@@ -20,10 +20,12 @@ os.close(devnull_fd)
 import speech_recognition as sr
 from dotenv import load_dotenv
 load_dotenv()
+from core import config
 
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "98f6HmuJM9hLdz4dHpfb")
-ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+ELEVENLABS_API_KEY = config.ELEVENLABS_API_KEY
+ELEVENLABS_VOICE_ID = config.ELEVENLABS_VOICE_ID
+ELEVENLABS_MODEL = config.ELEVENLABS_MODEL
+EDGE_TTS_VOICE = config.EDGE_TTS_VOICE
 
 IS_SPEAKING = False
 speech_lock = threading.Lock()
@@ -31,7 +33,7 @@ speech_lock = threading.Lock()
 
 def _is_online() -> bool:
     try:
-        with socket.create_connection(("8.8.8.8", 53), timeout=1):
+        with socket.create_connection((config.NETWORK_CHECK_HOST, config.NETWORK_CHECK_PORT), timeout=1):
             return True
     except Exception:
         return False
@@ -82,7 +84,7 @@ def speak(text: str):
     # 1. TRY EDGE-TTS FIRST (Free & Unlimited)
     # ==========================================
     try:
-        asyncio.run(_generate_edge_tts(clean_text, "en-US-AriaNeural", temp_mp3))
+        asyncio.run(_generate_edge_tts(clean_text, EDGE_TTS_VOICE, temp_mp3))
         if os.path.exists(temp_mp3) and os.path.getsize(temp_mp3) > 0:
             spoke_successfully = True
     except Exception as e:
