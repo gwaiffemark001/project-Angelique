@@ -181,3 +181,25 @@ def new_session() -> str:
         "pending_followup": False,
     }
     return session_id
+
+
+def handle_user_message(session_id: str, user_message: str) -> dict:
+    """High-level handler: routes user message through cognitive resolver,
+    saves conversation, and returns structured result.
+
+    Returns: { 'session_id', 'source', 'answer', 'details' }
+    """
+    try:
+        from brain.cognitive_loop import resolve_user_query
+    except Exception:
+        return {"error": "Cognitive resolver unavailable"}
+
+    result = resolve_user_query(user_message, session_id=session_id)
+    # Save conversation (best-effort)
+    try:
+        agent_text = result.get("answer") if isinstance(result, dict) else str(result)
+        save_conversation(session_id, user_message, agent_text)
+    except Exception:
+        pass
+
+    return {"session_id": session_id, "source": result.get("source"), "answer": result.get("answer"), "details": result.get("details", {})}

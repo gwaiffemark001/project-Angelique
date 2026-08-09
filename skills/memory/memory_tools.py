@@ -236,6 +236,47 @@ def _parse_training_text(text: str) -> list[dict]:
             'importance': 10,
             'context': 'core training',
         })
+
+    # Relationship patterns: detect phrases like "my girlfriend is called X" or "my girlfriend is X".
+    for rel in RELATIONSHIP_KEYWORDS:
+        # my girlfriend is called NAME
+        m = re.search(rf"my\s+{re.escape(rel)}\s+is\s+called\s+([\w\s]+?)(?:\.|,|$)", normalized, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip().rstrip('.').strip()
+            if _looks_like_real_name(val, relationship=rel):
+                facts.append({'person': 'User', 'key': f'{rel} name', 'value': val, 'importance': 8, 'context': 'core training'})
+                continue
+        # my girlfriend is NAME
+        m2 = re.search(rf"my\s+{re.escape(rel)}\s+is\s+([\w\s]+?)(?:\.|,|$)", normalized, re.IGNORECASE)
+        if m2:
+            val = m2.group(1).strip().rstrip('.').strip()
+            if _looks_like_real_name(val, relationship=rel):
+                facts.append({'person': 'User', 'key': f'{rel} name', 'value': val, 'importance': 8, 'context': 'core training'})
+                continue
+        # my girlfriend's name is NAME
+        m3 = re.search(rf"my\s+{re.escape(rel)}(?:'s|s)?\s+name\s+is\s+([\w\s]+?)(?:\.|,|$)", normalized, re.IGNORECASE)
+        if m3:
+            val = m3.group(1).strip().rstrip('.').strip()
+            if _looks_like_real_name(val, relationship=rel):
+                facts.append({'person': 'User', 'key': f'{rel} name', 'value': val, 'importance': 8, 'context': 'core training'})
+                continue
+    # Assistant renaming: detect when the user gives the assistant a name (e.g., "your name is X", "you are called X", "from now on your name is X")
+    assistant_patterns = [
+        r"your name (?:from now onward|from now on|now onward|from now)? is ([\w\s]+?)(?:\.|,|$)",
+        r"you are called ([\w\s]+?)(?:\.|,|$)",
+        r"you will be called ([\w\s]+?)(?:\.|,|$)",
+        r"call you ([\w\s]+?)(?:\.|,|$)",
+        r"your new name is ([\w\s]+?)(?:\.|,|$)",
+    ]
+    for pat in assistant_patterns:
+        m = re.search(pat, normalized, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip().rstrip('.').strip()
+            if _looks_like_real_name(val):
+                facts.append({'person': 'Assistant', 'key': 'name', 'value': val, 'importance': 9, 'context': 'renaming'})
+                # prefer the first match
+                break
+
     return facts
 
 
@@ -300,6 +341,29 @@ def save_fact(**kwargs) -> str:
         return "No new valid facts extracted."
     return f"Saved: {', '.join(saved_log)}"
 
+def _should_query_conversation_memory(query: str) -> bool:
+    normalized = (query or "").strip().lower()
+    if not normalized:
+        return False
+
+    conversation_phrases = (
+        "what did i tell you",
+        "what did i say",
+        "do you remember",
+        "remember when",
+        "something i said",
+        "as we discussed",
+        "as you said",
+        "conversation",
+        "chat",
+        "recall that",
+        "recall when",
+        "did i say",
+        "did i tell you",
+    )
+    return any(phrase in normalized for phrase in conversation_phrases)
+
+
 def recall_facts(**kwargs) -> str:
     """
     Dynamically resolves entities and formats memory with emotional/episodic context.
@@ -317,17 +381,18 @@ def recall_facts(**kwargs) -> str:
         if best:
             return _format_memory_response(best.get('entity', ''), best.get('key', 'detail'), best.get('value', ''))
 
-    conversation_results = search_conversation_memory(query, top_k=3)
-    if conversation_results:
-        snippets = []
-        for item in conversation_results:
-            text = item.get('value', '')
-            if not text:
-                continue
-            truncated = text if len(text) <= 250 else text[:247] + '...'
-            snippets.append(truncated)
-        if snippets:
-            return " | ".join(snippets)
+    if _should_query_conversation_memory(query):
+        conversation_results = search_conversation_memory(query, top_k=3)
+        if conversation_results:
+            snippets = []
+            for item in conversation_results:
+                text = item.get('value', '')
+                if not text:
+                    continue
+                truncated = text if len(text) <= 250 else text[:247] + '...'
+                snippets.append(truncated)
+            if snippets:
+                return " | ".join(snippets)
 
     if semantic_results:
         response = f"📚 **Memory Search Results for '{query}':**\n"
