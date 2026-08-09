@@ -6,6 +6,7 @@ Two-step protocol: Draft → Confirm → Send (safety first)
 import asyncio
 from pathlib import Path
 from typing import Optional
+from core import config
 
 # Global state for message drafting
 DRAFT_STATE = {
@@ -33,7 +34,7 @@ async def initialize_whatsapp(headless: bool = False) -> tuple[Browser, BrowserC
             page = await context.new_page()
             
             # Navigate to WhatsApp Web
-            await page.goto("https://web.whatsapp.com", timeout=30000)
+            await page.goto(config.WHATSAPP_WEB_URL, timeout=30000)
             
             # Wait for QR code or chat list
             print("📱 [WhatsApp] Please scan QR code or wait for login...")
