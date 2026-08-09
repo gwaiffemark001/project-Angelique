@@ -1,213 +1,319 @@
-# brain/memory_manager.py
+import hashlib
 import sqlite3
+import uuid
 from pathlib import Path
 from core import config
 
-# Optional heavy dependencies: fall back to SQLite-only behavior if they cannot be imported.
+# --- Optional Heavy Dependencies ---
+try:
+    import numpy as np
+except Exception as e:
+    print(f"⚠️ [Memory] numpy import failed: {e}")
+    np = None
+
 try:
     from sentence_transformers import SentenceTransformer
 except Exception as e:
-    print(f"⚠️ [Memory] sentence_transformers not found: {e}")
+    print(f"⚠️ [Memory] sentence-transformers import failed: {e}")
     SentenceTransformer = None
 
 try:
     import chromadb
     from chromadb.config import Settings
+    from chromadb.utils import embedding_functions
 except Exception as e:
-    print(f"⚠️ [Memory] ChromaDB not installed or unavailable: {e}")
+    print(f"⚠️ [Memory] chromadb import failed: {e}")
     chromadb = None
     Settings = None
+    embedding_functions = None
 
-try:
-    import torch  # noqa: F401
-except Exception:
-    torch = None
-
-# Force CPU to prevent CUDA errors on older GPUs
 DEVICE = "cpu"
+EMBEDDING_DIM = 384
 EMBEDDING_MODEL = None
+_chroma_client = None
+_memory_collection = None
 
-# Defer instantiation of SentenceTransformer until needed to avoid heavy imports at startup
+class HashFallbackEmbeddingModel:
+    """Deterministic fallback embedding model for offline ChromaDB persistence."""
+
+    def __init__(self, dim: int = EMBEDDING_DIM):
+        self.dim = dim
+
+    def encode(self, texts):
+        if isinstance(texts, str):
+            texts = [texts]
+        vectors = []
+        for text in texts:
+            if text is None:
+                text = ""
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            arr = np.frombuffer(digest, dtype=np.uint8).astype(np.float32)
+            if arr.size < self.dim:
+                repeat_count = int(np.ceil(self.dim / arr.size))
+                arr = np.tile(arr, repeat_count)
+            arr = arr[: self.dim]
+            arr = arr - 128.0
+            norm = np.linalg.norm(arr)
+            if norm == 0.0:
+                norm = 1.0
+            vectors.append(arr / norm)
+        return np.vstack(vectors)
+
+class EmbeddingModelAdapter:
+    def __init__(self, impl):
+        self.impl = impl
+
+    def encode(self, texts):
+        if isinstance(texts, str):
+            texts = [texts]
+        if hasattr(self.impl, "encode"):
+            result = self.impl.encode(texts)
+        else:
+            result = self.impl(texts)
+        return np.asarray(result, dtype=np.float32)
+
+# --- Lazy Loading for Embedding Model ---
+def _onnx_model_available() -> bool:
+    if embedding_functions is None:
+        return False
+    try:
+        model_cls = embedding_functions.ONNXMiniLM_L6_V2
+        cache_dir = Path(model_cls.DOWNLOAD_PATH) / model_cls.EXTRACTED_FOLDER_NAME
+        return (cache_dir / "model.onnx").exists()
+    except Exception:
+        return False
+
+
 def _get_embedding_model():
     global EMBEDDING_MODEL
-    if EMBEDDING_MODEL is None and SentenceTransformer is not None:
+    if EMBEDDING_MODEL is not None:
+        return EMBEDDING_MODEL
+
+    if SentenceTransformer is not None:
         try:
-            EMBEDDING_MODEL = SentenceTransformer('all-MiniLM-L6-v2', device=DEVICE)
-        except Exception:
-            EMBEDDING_MODEL = None
-    return EMBEDDING_MODEL
+            model = SentenceTransformer('all-MiniLM-L6-v2', device=DEVICE)
+            EMBEDDING_MODEL = EmbeddingModelAdapter(model)
+            return EMBEDDING_MODEL
+        except Exception as e:
+            print(f"⚠️ [Memory] SentenceTransformer load failed: {e}")
 
-CHROMA_PATH = Path("data/chroma_memory")
-CHROMA_PATH.mkdir(parents=True, exist_ok=True)
+    if chromadb is not None and embedding_functions is not None:
+        try:
+            st_impl = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name='all-MiniLM-L6-v2', device=DEVICE
+            )
+            EMBEDDING_MODEL = EmbeddingModelAdapter(st_impl)
+            return EMBEDDING_MODEL
+        except Exception as e:
+            print(f"⚠️ [Memory] chromadb SentenceTransformerEmbeddingFunction failed: {e}")
 
-memory_collection = None
-chroma_client = None
-if chromadb is not None and Settings is not None:
+        if _onnx_model_available():
+            try:
+                onnx_impl = embedding_functions.ONNXMiniLM_L6_V2()
+                EMBEDDING_MODEL = EmbeddingModelAdapter(onnx_impl)
+                return EMBEDDING_MODEL
+            except Exception as e:
+                print(f"⚠️ [Memory] ONNXMiniLM_L6_V2 load failed: {e}")
+        else:
+            print("⚠️ [Memory] ONNXMiniLM_L6_V2 skipped because no local ONNX model is cached.")
+
+    if np is not None:
+        EMBEDDING_MODEL = HashFallbackEmbeddingModel(dim=EMBEDDING_DIM)
+        return EMBEDDING_MODEL
+
+    print("⚠️ [Memory] No embedding model available for ChromaDB. Vector persistence disabled.")
+    return None
+
+# --- Lazy Loading for ChromaDB (Uses Absolute Path from Config) ---
+def _get_memory_collection():
+    global _chroma_client, _memory_collection
+    if _memory_collection is not None:
+        return _memory_collection
+    if chromadb is None or Settings is None:
+        return None
+
+    path = Path(config.CHROMA_DB_PATH)
+    path.mkdir(parents=True, exist_ok=True)
     try:
-        chroma_client = chromadb.Client(Settings(
-            persist_directory=str(CHROMA_PATH),
-            anonymized_telemetry=False
+        _chroma_client = chromadb.Client(Settings(
+            persist_directory=str(path),
+            is_persistent=True,
+            anonymized_telemetry=False,
         ))
-        memory_collection = chroma_client.get_or_create_collection(name="angelique_memory")
+        _memory_collection = _chroma_client.get_or_create_collection(name=config.MEMORY_COLLECTION_NAME)
+        print(f"✅ [Memory] ChromaDB initialized at {path}")
     except Exception as e:
-        print(f"⚠️ [Memory] Failed to initialize ChromaDB: {e}")
-        chroma_client = None
-        memory_collection = None
-else:
-    print("⚠️ [Memory] Skipping ChromaDB initialization because the dependency is unavailable.")
+        print(f"⚠️ [Memory] ChromaDB init failed: {e}")
+        _memory_collection = None
+    return _memory_collection
 
+# --- SQLite Functions ---
 def get_connection():
+    Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = get_connection()
-    # 1. Create base table
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS memory_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entity TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value TEXT NOT NULL,
-            is_active INTEGER DEFAULT 1,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS memory_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+        is_active INTEGER DEFAULT 1, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_entity_key_active ON memory_log(entity, key, is_active)')
-    
-    # 2. SAFE MIGRATION: Add new columns for Episodic & Emotional memory if they don't exist
-    try:
-        conn.execute("ALTER TABLE memory_log ADD COLUMN importance_score INTEGER DEFAULT 5")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    
-    try:
-        conn.execute("ALTER TABLE memory_log ADD COLUMN context TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-        
+    try: conn.execute("ALTER TABLE memory_log ADD COLUMN importance_score INTEGER DEFAULT 5")
+    except sqlite3.OperationalError: pass
+    try: conn.execute("ALTER TABLE memory_log ADD COLUMN context TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
     conn.commit()
     conn.close()
 
-def save_fact_to_db(entity: str, key: str, value: str, importance: int = 5, context: str = ""):
-    """Archives old facts and saves the new one as active, with emotional/episodic metadata."""
+def get_top_memory_facts(min_importance: int = 8, limit: int = 5) -> list:
     init_db()
     conn = get_connection()
-    
-    # 1. Archive all previous active facts for this entity and key
-    conn.execute('''
-        UPDATE memory_log 
-        SET is_active = 0 
-        WHERE entity = ? AND key = ? AND is_active = 1
-    ''', (entity, key))
-    
-    # 2. Insert the new active fact with importance and context
-    conn.execute('''
-        INSERT INTO memory_log (entity, key, value, is_active, importance_score, context) 
-        VALUES (?, ?, ?, 1, ?, ?)
-    ''', (entity, key, value, importance, context))
-    
+    cursor = conn.execute('''
+        SELECT entity, key, value, importance_score, context
+        FROM memory_log WHERE is_active = 1 AND importance_score >= ?
+        ORDER BY importance_score DESC, timestamp DESC LIMIT ?
+    ''', (min_importance, limit))
+    facts = []
+    for row in cursor.fetchall():
+        fact = dict(row)
+        fact["importance"] = fact.get("importance_score", fact.get("importance", 5))
+        facts.append(fact)
+    conn.close()
+    return facts
+
+def save_fact_to_db(entity: str, key: str, value: str, importance: int = 5, context: str = ""):
+    init_db()
+    conn = get_connection()
+    conn.execute('UPDATE memory_log SET is_active = 0 WHERE entity = ? AND key = ? AND is_active = 1', (entity, key))
+    conn.execute('INSERT INTO memory_log (entity, key, value, is_active, importance_score, context) VALUES (?, ?, ?, 1, ?, ?)', (entity, key, value, importance, context))
     conn.commit()
     conn.close()
     
-    # Update vector DB
+    print(f"💾 [Memory] SAVED to SQLite: {entity} -> {key} = '{value}' (Importance: {importance})")
     save_to_vector_db(entity, key, value, importance, context)
 
-def save_to_vector_db(entity: str, key: str, value: str, importance: int = 5, context: str = ""):
-    """Save fact to ChromaDB for semantic search."""
+def save_conversation_memory(session_id: str, role: str, text: str, importance: int = 5, context: str = "conversation"):
+    if not text or not isinstance(text, str):
+        return
+    save_to_vector_db(role, "conversation", text, importance, context, item_type="conversation", session_id=session_id)
+
+# --- ChromaDB Vector Functions ---
+def save_to_vector_db(entity: str, key: str, value: str, importance: int = 5, context: str = "", item_type: str = "fact", session_id: str = None):
     model = _get_embedding_model()
-    if model is None or memory_collection is None:
+    col = _get_memory_collection()
+    if model is None or col is None:
         return
-
     try:
-        combined_text = f"{entity}'s {key} is {value}. Context: {context}"
-        embedding = model.encode(combined_text).tolist()
+        if item_type == "conversation":
+            combined_text = value
+            doc_id = f"conversation_{session_id or 'unknown'}_{uuid.uuid4().hex}"
+            metadata = {"entity": entity, "key": key, "value": value, "importance": importance, "context": context, "type": "conversation", "session_id": session_id or "unknown"}
+        else:
+            combined_text = f"{entity}'s {key} is {value}. Context: {context}"
+            doc_id = f"fact_{entity.lower()}_{key.replace(' ', '_').lower()}_{int(importance)}"
+            metadata = {"entity": entity, "key": key, "value": value, "importance": importance, "context": context, "type": "fact"}
 
-        memory_collection.upsert(
-            ids=[f"fact_{entity.lower()}_{key.replace(' ', '_').lower()}_{int(importance)}"],
-            embeddings=[embedding],
-            metadatas={
-                "entity": entity,
-                "key": key,
-                "value": value,
-                "importance": importance,
-                "context": context
-            },
-            documents=[combined_text]
+        embedding = model.encode(combined_text)
+        if hasattr(embedding, "tolist"):
+            embedding = embedding.tolist()
+
+        if not isinstance(embedding, list):
+            embedding = [embedding]
+
+        if isinstance(embedding[0], (int, float)):
+            embeddings = [embedding]
+        else:
+            embeddings = embedding
+
+        col.upsert(
+            ids=[doc_id],
+            embeddings=embeddings,
+            metadatas=[metadata],
+            documents=[combined_text],
         )
+        print(f"✅ [Memory] SAVED to ChromaDB: {key}")
     except Exception as e:
-        print(f"⚠️ [Memory] Vector storage failed: {e}")
-        return
+        print(f"❌ [Memory] ChromaDB save failed: {e}")
 
-def semantic_search(query: str, top_k: int = 5) -> list[dict]:
-    """
-    Search memory semantically using ChromaDB.
-    Returns list of matching facts sorted by importance.
-    """
-    if memory_collection is None:
+def search_memory(query: str, top_k: int = 5, include_conversation: bool = True) -> list:
+    col = _get_memory_collection()
+    if col is None:
         return []
-
     try:
         model = _get_embedding_model()
         if model is None:
             return []
 
-        query_embedding = model.encode(query).tolist()
-        results = memory_collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k
-        )
+        query_embedding = model.encode(query)
+        if hasattr(query_embedding, "tolist"):
+            query_embedding = query_embedding.tolist()
 
-        formatted_results = []
+        if isinstance(query_embedding, list) and len(query_embedding) == 1 and isinstance(query_embedding[0], list):
+            query_embedding = query_embedding[0]
+
+        results = col.query(query_embeddings=[query_embedding], n_results=top_k * 2)
+        
+        formatted = []
         if results and results.get("metadatas"):
             for metadata_list in results["metadatas"]:
                 for metadata in metadata_list:
-                    formatted_results.append({
-                        "entity": metadata.get("entity"),
-                        "key": metadata.get("key"),
-                        "value": metadata.get("value"),
-                        "importance": metadata.get("importance", 5),
-                        "context": metadata.get("context", "")
-                    })
-
-        # Sort by importance descending
-        formatted_results.sort(key=lambda x: x.get("importance", 5), reverse=True)
-        return formatted_results[:top_k]
+                    formatted.append(dict(metadata))
+        formatted.sort(key=lambda x: x.get("importance", 5), reverse=True)
+        
+        if include_conversation:
+            return formatted[:top_k]
+        return [item for item in formatted if item.get("type") == "fact"][:top_k]
     except Exception as e:
-        print(f"⚠️ [Memory] Semantic search failed: {e}")
+        print(f"⚠️ [Memory] Search failed: {e}")
         return []
 
+def search_conversation_memory(query: str, top_k: int = 3) -> list:
+    return [item for item in search_memory(query, top_k=top_k * 2, include_conversation=True) if item.get("type") == "conversation"][:top_k]
+
+def semantic_search(query: str, top_k: int = 5) -> list:
+    return search_memory(query, top_k=top_k, include_conversation=False)
+
+
+# -- Explicit, clear wrappers to separate conversation vs fact memory queries --
+def query_conversation_memory(query: str, top_k: int = 5) -> list:
+    """Query conversation memory only (explicit wrapper)."""
+    return search_conversation_memory(query, top_k=top_k)
+
+
+def query_fact_memory(query: str, top_k: int = 5) -> list:
+    """Query fact/knowledge memory only (explicit wrapper)."""
+    return semantic_search(query, top_k=top_k)
+
+
+def save_fact(entity: str, key: str, value: str, importance: int = 5, context: str = "") -> None:
+    """Helper to save a fact to both SQLite and vector DB (explicit API)."""
+    save_fact_to_db(entity, key, value, importance, context)
+
+# --- Entity Lookup (Fixed Syntax & Keys) ---
 def get_facts_for_entity(entity: str) -> dict:
-    """Retrieves current and historical facts, sorted by importance."""
     init_db()
     conn = get_connection()
-    
-    # Get current active facts (Ordered by importance descending)
     current_cursor = conn.execute('''
         SELECT key, value, importance_score, context, timestamp 
-        FROM memory_log 
-        WHERE entity = ? AND is_active = 1
+        FROM memory_log WHERE entity = ? AND is_active = 1
         ORDER BY importance_score DESC
     ''', (entity,))
-    
     current_facts = []
     for row in current_cursor.fetchall():
-        current_facts.append({
-            "key": row['key'],
-            "value": row['value'],
-            "importance": row['importance_score'],
-            "context": row['context'],
-            "timestamp": row['timestamp']
-        })
-
-    # Get historical (archived) facts
+        fact = dict(row)
+        fact["importance"] = fact.get("importance_score", fact.get("importance", 5))
+        current_facts.append(fact)
+    
     history_cursor = conn.execute('''
         SELECT key, value, timestamp FROM memory_log 
-        WHERE entity = ? AND is_active = 0
-        ORDER BY timestamp DESC
+        WHERE entity = ? AND is_active = 0 ORDER BY timestamp DESC
     ''', (entity,))
     history_facts = [f"{row['key']} was {row['value']} (on {row['timestamp']})" for row in history_cursor.fetchall()]
-    
     conn.close()
+    
+    # NO TRAILING SPACES IN KEYS
     return {"current": current_facts, "history": history_facts}
