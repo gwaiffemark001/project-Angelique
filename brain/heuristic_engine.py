@@ -4,6 +4,7 @@ Comprehensive heuristic engine for deterministic command routing.
 Maps natural language to tool actions without LLM dependency for critical commands.
 """
 import re
+from core import config
 
 
 def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, dict]:
@@ -195,29 +196,33 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     # ============================================================
     # MARKET ANALYSIS & TRADING
     # ============================================================
-    trading_symbols = ['eurusd', 'gbpusd', 'audusd', 'usdjpy', 'xauusd', 'btcusd', 'ethusd', 'linkusd', 'aaveusd']
+    trading_symbols = [s.lower() for s in config.TRADING_SYMBOLS]
+    timeframe_regex = '|'.join([s.lower() for s in config.TRADING_TIMEFRAMES])
     for symbol in trading_symbols:
         if symbol in normalized:
-            timeframe_match = re.search(r'\b(m1|m5|m15|m30|h1|h4|d1|w1)\b', normalized)
-            timeframe = timeframe_match.group(1).upper() if timeframe_match else 'H1'
+            timeframe_match = re.search(r"\b(" + timeframe_regex + r")\b", normalized)
+            timeframe = timeframe_match.group(1).upper() if timeframe_match else None
             risk_match = re.search(r'(?:risk|bet)\s+(\d+(?:\.\d+)?)\s*%?', normalized)
             risk_percent = float(risk_match.group(1)) / 100 if risk_match else 1.0
-            return 'analyze_market_and_recommend', {
-                'symbol': symbol.upper(),
-                'timeframe': timeframe,
-                'risk_percent': risk_percent
-            }
+            args = {'symbol': symbol.upper(), 'risk_percent': risk_percent}
+            if timeframe is not None:
+                args['timeframe'] = timeframe
+            return 'analyze_market_and_recommend', args
 
     chart_patterns = [
         r'\b(?:chart|candle|candlestick|rsi|ema|moving\s+average|indicator|analysis)\b',
         r'\b(?:show|display|plot|draw)\s+(?:chart|graph|candle)\b',
     ]
     if any(re.search(p, normalized) for p in chart_patterns):
-        symbol_match = re.search(r'\b(eurusd|gbpusd|audusd|usdjpy|xauusd|btcusd|ethusd|linkusd|aaveusd)\b', normalized)
-        symbol = symbol_match.group(1).upper() if symbol_match else 'EURUSD'
-        timeframe_match = re.search(r'\b(m1|m5|m15|m30|h1|h4|d1|w1)\b', normalized)
-        timeframe = timeframe_match.group(1).upper() if timeframe_match else 'H1'
-        return 'analyze_market_and_recommend', {'symbol': symbol, 'timeframe': timeframe, 'risk_percent': 1.0}
+        symbol_match = re.search(r"\b(" + '|'.join(trading_symbols) + r")\b", normalized)
+        if not symbol_match:
+            return None, {}
+        symbol = symbol_match.group(1).upper()
+        timeframe_match = re.search(r"\b(" + timeframe_regex + r")\b", normalized)
+        args = {'symbol': symbol, 'risk_percent': 1.0}
+        if timeframe_match:
+            args['timeframe'] = timeframe_match.group(1).upper()
+        return 'analyze_market_and_recommend', args
 
     # ============================================================
     # APP LISTING
