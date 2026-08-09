@@ -2,6 +2,7 @@
 import json
 import re
 from brain.llm_interface import query_llm, extract_json_from_text
+from brain import memory_manager as memory_manager
 from brain.memory_manager import save_fact_to_db
 from brain.heuristic_engine import extract_command_heuristically
 from core.tools import TOOL_REGISTRY, execute_tool
@@ -10,7 +11,7 @@ from skills.conversation.chat_skill import (
     save_conversation as conv_save, recall as conv_recall,
     get_session_context as conv_context, summarize_context,
     remember as conv_remember, list_sessions as list_conversations, new_session,
-    is_session_closed,
+    is_session_closed, get_conversation_history,
 )
 
 
@@ -21,6 +22,25 @@ def _is_short_followup_reply(user_input: str) -> bool:
     if normalized in {"yes", "y", "no", "n", "sure", "ok", "okay", "please", "do it", "go ahead", "correct", "right"}:
         return True
     return len(normalized.split()) <= 3 and any(token in normalized for token in {"yes", "no", "sure", "ok", "okay"})
+
+
+def _build_messages_with_history(system_prompt: str, user_input: str, session_id: str | None = None) -> list[dict]:
+    messages = [{"role": "system", "content": system_prompt}]
+    try:
+        session_key = session_id or "default"
+        entries = get_conversation_history(session_key, limit=6)
+        if entries:
+            for entry in entries[-4:]:
+                user_text = entry.get("user", "")
+                agent_text = entry.get("agent", "")
+                if isinstance(user_text, str) and user_text and user_text != user_input:
+                    messages.append({"role": "user", "content": user_text})
+                if isinstance(agent_text, str) and agent_text and agent_text != user_input:
+                    messages.append({"role": "assistant", "content": agent_text})
+    except Exception:
+        pass
+    messages.append({"role": "user", "content": user_input})
+    return messages
 
 
 def _is_followup_continuation(user_input: str) -> bool:
@@ -121,23 +141,159 @@ def _is_identity_question(user_input: str) -> bool:
     normalized = (user_input or "").strip().lower()
     if not normalized:
         return False
-    identity_patterns = [
+    # Use configurable identity phrases from core.config to avoid hard-coded literals.
+    try:
+        from core import config as _config
+        phrases = getattr(_config, "IDENTITY_QUESTION_PHRASES", [])
+    except Exception:
+        phrases = []
+    if phrases:
+        return any(phrase in normalized for phrase in phrases)
+    # Fallback to legacy regex patterns if config wasn't available.
+    legacy_patterns = [
         r"\bwhat\s+is\s+your\s+name\b",
         r"\bwho\s+are\s+you\b",
         r"\bwhat\s+are\s+you\b",
         r"\bwhat\s+is\s+your\s+identity\b",
         r"\bwhat\s+should\s+i\s+call\s+you\b",
     ]
-    return any(re.search(pattern, normalized) for pattern in identity_patterns)
+    return any(re.search(pattern, normalized) for pattern in legacy_patterns)
+
+
+def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
+    """High-level coordinated query resolver.
+
+    Steps:
+    1. "Think": silently extract facts from the user's input and persist them.
+    2. Check conversation memory when appropriate.
+    3. Check fact/knowledge memory when appropriate.
+    4. If nothing is found, query external LLMs (and other models) via `query_llm`.
+    5. Persist any new facts discovered from external answers.
+
+    Returns a dict with keys: `source` (one of 'conversation','fact','llm'), `answer`, and `details`.
+    """
+    text = _strip_training_mode_prefix(user_input)
+
+    # 1) Think: extract facts silently and persist them
+    try:
+        extract_facts_silently(text)
+    except Exception:
+        pass
+
+    # 2) Conversation memory check
+    if _should_query_conversation_memory(text):
+        conv_hits = memory_manager.query_conversation_memory(text, top_k=5)
+        if conv_hits:
+            return {"source": "conversation", "answer": conv_hits, "details": {"count": len(conv_hits)}}
+
+    # 3) Fact memory check
+    if _should_query_memory(text):
+        fact_hits = memory_manager.query_fact_memory(text, top_k=5)
+        if fact_hits:
+            return {"source": "fact", "answer": fact_hits, "details": {"count": len(fact_hits)}}
+
+    # 4) Fall back to external models / LLMs. Use orchestration selectively.
+    try:
+        if _should_use_orchestration(text):
+            orchestration = orchestrate_models(text, session_id=session_id)
+            final_answer = orchestration.get("final_answer") if isinstance(orchestration, dict) else orchestration
+            # Save any extracted facts from the final answer silently
+            try:
+                extract_facts_silently(final_answer)
+            except Exception:
+                pass
+            details = orchestration.get("details", {}) if isinstance(orchestration, dict) else {}
+            details["orchestrated"] = True
+            return {"source": "llm", "answer": final_answer, "details": details}
+        else:
+            # Single-pass lightweight LLM call for simple queries
+            response = query_llm(_build_messages_with_history(
+                "You are Angelique. Answer the user's request naturally and keep recent conversation context in mind.",
+                text,
+                session_id=session_id,
+            ), temperature=0.2)
+            try:
+                extract_facts_silently(response)
+            except Exception:
+                pass
+            return {"source": "llm", "answer": response, "details": {"orchestrated": False}}
+    except Exception as e:
+        return {"source": "error", "answer": None, "details": {"error": str(e)}}
 
 
 def _is_simple_question(user_input: str) -> bool:
     normalized = (user_input or "").strip().lower()
     if not normalized:
         return False
+
+    words = re.findall(r"\b[\w']+\b", normalized)
+    if len(words) > 14:
+        return False
+
+    question_prefixes = (
+        "what",
+        "who",
+        "where",
+        "when",
+        "why",
+        "how",
+        "did",
+        "does",
+        "is",
+        "are",
+        "can",
+        "could",
+        "would",
+        "should",
+        "will",
+    )
+
     if normalized.endswith("?"):
-        words = re.findall(r"\b[\w']+\b", normalized)
-        return len(words) <= 12
+        return True
+    if words and words[0] in question_prefixes:
+        return True
+
+    return False
+
+
+def _should_query_memory(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+    if _is_identity_question(user_input) or _is_simple_question(user_input):
+        return False
+
+    try:
+        from core import config as _config
+        memory_trigger_phrases = getattr(_config, "MEMORY_TRIGGER_PHRASES", [])
+    except Exception:
+        memory_trigger_phrases = []
+
+    if memory_trigger_phrases and any(phrase in normalized for phrase in memory_trigger_phrases):
+        return True
+
+    # Fallback token check
+    personal_tokens = ("my", "me", "mine", "your", "name", "favorite", "favourite", "remember", "recall")
+    return any(token in normalized for token in personal_tokens)
+
+
+def _should_query_conversation_memory(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+
+    conversation_phrases = (
+        "what did i tell you",
+        "what did i say",
+        "do you remember",
+        "remember when",
+        "something i said",
+        "as we discussed",
+        "as you said",
+        "conversation",
+        "chat",
+    )
+    return any(phrase in normalized for phrase in conversation_phrases)
 
 
 def _strip_training_mode_prefix(user_input: str) -> str:
@@ -165,18 +321,16 @@ def _is_training_intent(user_input: str) -> bool:
     if normalized.endswith("?"):
         return False
 
-    training_terms = (
-        "memorize",
-        "remember",
-        "learn",
-        "training",
-        "train",
-        "core training",
-        "from now on",
-    )
-    if any(term in normalized for term in training_terms):
+    try:
+        from core import config as _config
+        training_terms = getattr(_config, "TRAINING_DIRECTIVE_MARKERS", [])
+    except Exception:
+        training_terms = []
+
+    if training_terms and any(term in normalized for term in training_terms):
         return True
 
+    # Fallback heuristic markers (legacy)
     directive_markers = (
         "my name is",
         "my primary trading platform is",
@@ -197,9 +351,7 @@ def _is_training_intent(user_input: str) -> bool:
     )
     if any(marker in normalized for marker in directive_markers):
         return True
-
-    if re.search(r"\b(?:my|i)\s+(?:name|primary trading platform|maximum risk per trade|absolute maximum risk per trade|minim(?:um|a) risk(?: to reward ratio| to reward)|risk to reward ratio|trading platform)\b", normalized):
-        return True
+    return False
 
     return False
 
@@ -222,6 +374,47 @@ def _looks_like_general_query(user_input: str) -> bool:
         return True
     question_starters = ("what ", "who ", "when ", "where ", "why ", "how ", "do ", "does ", "did ", "is ", "are ", "can ", "could ", "would ", "should ", "will ")
     return normalized.startswith(question_starters)
+
+
+def _should_use_orchestration(user_input: str) -> bool:
+    """Decide whether to run multi-LLM orchestration for a given input.
+
+    Heuristics:
+    - Disabled via `core.config.ENABLE_MULTI_LLM_ORCHESTRATION`.
+    - Never for identity or simple questions.
+    - Use for inputs with at least `ORCHESTRATION_MIN_WORDS` words or containing
+      one of the `ORCHESTRATION_KEYWORDS`.
+    """
+    try:
+        from core import config as _config
+        enabled = getattr(_config, "ENABLE_MULTI_LLM_ORCHESTRATION", True)
+        min_words = int(getattr(_config, "ORCHESTRATION_MIN_WORDS", 8))
+        keywords = list(getattr(_config, "ORCHESTRATION_KEYWORDS", [
+            "explain", "compare", "analyze", "evaluate", "why", "how", "recommend", "design", "strategy",
+        ]))
+    except Exception:
+        enabled = True
+        min_words = 8
+        keywords = ["explain", "compare", "analyze", "evaluate", "why", "how", "recommend", "design", "strategy"]
+
+    if not enabled:
+        return False
+
+    if not user_input or not user_input.strip():
+        return False
+
+    if _is_identity_question(user_input) or _is_simple_question(user_input):
+        return False
+
+    words = re.findall(r"\b[\w']+\b", user_input)
+    if len(words) >= min_words:
+        return True
+
+    normalized = user_input.lower()
+    if any(k in normalized for k in keywords):
+        return True
+
+    return False
 
 
 def extract_facts_silently(user_input: str):
@@ -280,15 +473,60 @@ def extract_facts_silently(user_input: str):
                 
                 imp_emoji = "🔥" if importance >= 8 else "⭐" if importance >= 5 else "📌"
                 print(f"🧠 [Memory Update] {imp_emoji} [{importance}/10] '{person}' / '{key}' = '{value}' (Context: {context})")
-                
     except Exception as e:
         print(f"⚠️ [DEBUG] Silent extraction failed: {e}")
+
+
+def orchestrate_models(user_text: str, session_id: str | None = None) -> dict:
+    """Run a small ensemble of LLM passes to simulate chain-of-thought style reasoning.
+
+    Passes:
+    - thinker: ask for step-by-step reasoning and a provisional answer
+    - critic: ask for critique of the provisional answer
+    - synthesizer: produce a concise final answer using thinker+critic
+
+    Returns a dict with `final_answer` and `details` containing each pass output.
+    """
+    if not user_text:
+        return {"final_answer": "", "details": {}}
+
+    details = {}
+    try:
+        # Thinker: ask for step-by-step reasoning
+        thinker_prompt = _build_messages_with_history(
+            "You are a careful step-by-step reasoning assistant. Show your chain-of-thought clearly, then provide a provisional answer.",
+            f"Analyze and reason about the following request step-by-step, then give a provisional answer:\n\n{user_text}",
+            session_id=session_id,
+        )
+        thinker_out = query_llm(thinker_prompt, temperature=0.2)
+        details["thinker"] = thinker_out
+
+        # Critic: ask another pass to critique the provisional answer
+        critic_prompt = _build_messages_with_history(
+            "You are a critical reviewer. Given a user's request and a provisional answer, point out mistakes, missing assumptions, and potential improvements.",
+            f"User request:\n{user_text}\n\nProvisional answer:\n{thinker_out}\n\nProvide concise critique and corrections.",
+            session_id=session_id,
+        )
+        critic_out = query_llm(critic_prompt, temperature=0.1)
+        details["critic"] = critic_out
+
+        # Synthesizer: produce final concise answer, considering thinker and critic
+        synth_prompt = _build_messages_with_history(
+            "You are an assistant that synthesizes multiple opinions into a clear final answer. Use the reasoning and criticism provided to produce a concise, actionable response.",
+            f"User request:\n{user_text}\n\nReasoning (thinker):\n{thinker_out}\n\nCritique (critic):\n{critic_out}\n\nProduce a single final answer (no internal chain-of-thought).",
+            session_id=session_id,
+        )
+        final_out = query_llm(synth_prompt, temperature=0.0)
+        details["synthesizer"] = final_out
+
+        return {"final_answer": final_out, "details": details}
+    except Exception as e:
+        return {"final_answer": f"Error composing answers: {e}", "details": {"error": str(e)}}
 
 def run_cognitive_loop(user_input: str) -> str:
     session_id = "default"
     if is_session_closed(session_id):
         return "Angelique session has been closed."
-
     session_context = conv_context(session_id)
     last_response = session_context.get("last_response", "")
     last_user_input = session_context.get("last_user", "")
@@ -301,11 +539,16 @@ def run_cognitive_loop(user_input: str) -> str:
             "Treat this as a continuation of the conversation, not a brand new command, unless the reply clearly introduces one. "
             "Answer naturally and stay within the context of the prior assistant message."
         )
-        followup_messages = [
-            {"role": "system", "content": followup_prompt},
-            {"role": "assistant", "content": last_response},
-            {"role": "user", "content": user_input},
-        ]
+        followup_messages = _build_messages_with_history(
+            followup_prompt,
+            user_input,
+            session_id="default",
+        )
+        if last_response:
+            followup_messages = [
+                {"role": "system", "content": followup_prompt},
+                {"role": "assistant", "content": last_response},
+            ] + followup_messages[1:]
         followup_response = query_llm(followup_messages, temperature=0.2)
         final_response = followup_response or "I’m continuing from the previous point. What would you like me to do next?"
         conv_save(session_id, user_input, final_response)
@@ -315,6 +558,66 @@ def run_cognitive_loop(user_input: str) -> str:
         clarification = "Sure, what exactly would you like me to reexplain?"
         conv_save(session_id, user_input, clarification)
         return clarification
+
+    # Handle identity questions by consulting stored facts/conversation before asking external LLMs.
+    if _is_identity_question(user_input):
+        try:
+            # 1) Check explicit fact memory for any 'name' facts
+            # First, prefer deterministic SQLite facts for Assistant (avoid relying solely on vector search results).
+            chosen = None
+            try:
+                assistant_facts = memory_manager.get_facts_for_entity('Assistant')
+                current = assistant_facts.get('current', []) if isinstance(assistant_facts, dict) else []
+                # Find any 'name' keys in Assistant facts
+                assistant_name_candidates = [f for f in current if 'name' in str(f.get('key','')).lower() and f.get('value')]
+                if assistant_name_candidates:
+                    chosen = max(assistant_name_candidates, key=lambda x: int(x.get('importance', x.get('importance_score', 5))))
+            except Exception:
+                chosen = None
+
+            # If no Assistant fact found in SQLite, fall back to semantic/vector fact search
+            if not chosen:
+                fact_hits = memory_manager.query_fact_memory("name", top_k=10)
+                # Prefer facts whose key contains 'name' and highest importance
+                assistant_priorities = [f for f in fact_hits if "name" in str(f.get("key", "")).lower() and str(f.get("entity", "")).lower() in ("assistant", "angelique")]
+                if assistant_priorities:
+                    chosen = max(assistant_priorities, key=lambda x: int(x.get("importance", 5)))
+                else:
+                    # Fallback to any 'name' facts sorted by importance
+                    for f in sorted(fact_hits, key=lambda x: int(x.get("importance", 5)), reverse=True):
+                        k = str(f.get("key", "")).lower()
+                        v = f.get("value") or f.get("value", "")
+                        if "name" in k and v:
+                            chosen = f
+                            break
+
+            # 2) If none found, scan recent conversation for user-provided renaming statements
+            if not chosen:
+                history = conv_context(session_id)
+                # inspect recent conversation file for lines where the user declared a name
+                try:
+                    from skills.conversation.chat_skill import get_conversation_history
+                    hist = get_conversation_history(session_id, limit=30)
+                    for entry in reversed(hist):
+                        u = entry.get("user", "")
+                        if isinstance(u, str) and "your name" in u.lower() or "you are" in u.lower() and "called" in u.lower():
+                            # naive parse: extract last capitalized words
+                            parts = re.findall(r"[A-Z][a-z]+(?:\s[A-Z][a-z]+)*", u)
+                            if parts:
+                                chosen = {"key": "new name", "value": parts[-1], "importance": 7, "entity": "User"}
+                                break
+                except Exception:
+                    pass
+
+            if chosen:
+                name = chosen.get("value")
+                resp = f"My name is {name}."
+                conv_save(session_id, user_input, resp)
+                return resp
+            # No stored name found; let the normal reasoning path answer instead of forcing a prompt.
+        except Exception:
+            # fall through to normal handling if memory check fails
+            pass
 
     if _is_training_intent(user_input):
         stripped_input = _strip_training_mode_prefix(user_input)
@@ -328,12 +631,12 @@ def run_cognitive_loop(user_input: str) -> str:
 
     # 2. Avoid preloading memory for plain questions. Let the model reason first,
     #    and only use memory later when the response clearly needs it.
-    if _is_identity_question(user_input) or _is_simple_question(user_input):
-        memory_text = "None. You do not know this yet."
-    else:
+    if _should_query_memory(user_input):
         memory_check = recall_facts(query=user_input)
         has_memory = "don't have any information" not in memory_check.lower() and "no new valid facts" not in memory_check.lower()
         memory_text = memory_check if has_memory else "None. You do not know this yet."
+    else:
+        memory_text = "None. You do not know this yet."
 
     top_memory_facts = get_top_memory_facts(min_importance=8, limit=6)
     if top_memory_facts:
@@ -368,10 +671,18 @@ def run_cognitive_loop(user_input: str) -> str:
         "Assistant: I am Angelique, your assistant. How can I help?\n"
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_input}
-    ]
+    recent_history = []
+    try:
+        history = conv_context(session_id)
+        last_response = history.get("last_response", "")
+        last_user = history.get("last_user", "")
+        if last_user or last_response:
+            recent_history.append({"role": "user", "content": last_user})
+            recent_history.append({"role": "assistant", "content": last_response})
+    except Exception:
+        recent_history = []
+
+    messages = _build_messages_with_history(system_prompt, user_input, session_id=session_id)
 
     raw_response = query_llm(messages, temperature=0.0)
     if raw_response is None:
