@@ -1,0 +1,37 @@
+{
+  "test:26ad4868316e": {
+    "name": "test",
+    "code": "def main(**k): return \"ok\"",
+    "metadata": {},
+    "created_at": "2026-07-28T23:07:39.908801Z",
+    "usage_count": 0
+  },
+  "h:87afbfa4ab84": {
+    "name": "h",
+    "code": "def double(x): return x*2",
+    "metadata": {},
+    "created_at": "2026-07-28T23:07:39.914605Z",
+    "usage_count": 0
+  },
+  "provide:4b6e607fb09a": {
+    "name": "provide",
+    "code": "def main(**kwargs):\n    if 'provide' in kwargs:\n        if kwargs['provide'] == 'help':\n            print(\"Available options: help, exit, example\")\n        elif kwargs['provide'] == 'exit':\n            print(\"Exiting program.\")\n            exit()\n        elif kwargs['provide'] == 'example':\n            print(\"This is an example.\")\n        else:\n            print(\"Invalid option. Please use 'help' for available options.\")\n    else:\n        print(\"Invalid instruction. Please use 'provide' to specify an action.\")",
+    "metadata": {},
+    "created_at": "2026-08-01T23:35:49.157341Z",
+    "usage_count": 0
+  },
+  "provide:e47a9dad28ea": {
+    "name": "provide",
+    "code": "def main(**kwargs):\n    if 'provide' in kwargs:\n        if kwargs['provide'] == 'help':\n            print(\"Available options: help, exit\")\n        elif kwargs['provide'] == 'exit':\n            print(\"Exiting program.\")\n            exit()\n        else:\n            print(\"Unknown option. Please use 'help' for available options.\")\n    else:\n        print(\"Unknown instruction. Please use 'help' for available options.\")\n\nif __name__ == \"__main__\":\n    main()",
+    "metadata": {},
+    "created_at": "2026-08-01T23:45:00.522036Z",
+    "usage_count": 0
+  },
+  "compute_the_square_of_7:26f19dc21668": {
+    "name": "compute_the_square_of_7",
+    "code": "def main(**kwargs):\n    return 7 ** 2\n",
+    "metadata": {},
+    "created_at": "2026-08-10T19:00:26.357489Z",
+    "usage_count": 0
+  }
+}

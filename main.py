@@ -23,7 +23,7 @@ bridge_manager = None
 BRIDGE_HOST = config.MT5_BRIDGE_HOST
 BRIDGE_PORT = config.MT5_BRIDGE_PORT
 RESERVED_MT5_BRIDGE_PORTS = config.MT5_BRIDGE_RESERVED_PORTS
-BRIDGE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills", "trading", "engine", "mt5_bridge_server.py")
+BRIDGE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills", "trading_skill", "wine_server.py")
 
 
 def _import_runtime_modules():

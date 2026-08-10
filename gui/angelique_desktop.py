@@ -128,6 +128,11 @@ class AngeliqueDesktopApp(tk.Tk):
             "_last_chart_data": None,
             "_chart_tooltip": None,
             "_last_full_candles": None,
+            "_trading_monitor_running": False,
+            "_trading_monitor_signature": None,
+            "_trading_monitor_popup_open": False,
+            "_trading_monitor_status_var": None,
+            "_trading_monitor_scan_active": False,
             "_trading_status_var": None,
             "_trading_detail_var": None,
             "_ticker_index": 0,
@@ -181,6 +186,7 @@ class AngeliqueDesktopApp(tk.Tk):
         self._initialize_runtime()
         self._update_system_metrics()
         self._refresh_trading_bridge_status()
+        self._start_trading_monitor()
         self._append_console("SYSTEM", "Angelique desktop matrix initialized. Live system data is now active.")
 
         # Chart state
@@ -477,6 +483,18 @@ class AngeliqueDesktopApp(tk.Tk):
         )
         detail_label.pack(anchor="nw", padx=20, pady=(0, 12))
 
+        self._trading_monitor_status_var = tk.StringVar(value="ANGELIQUE MONITOR: STARTING...")
+        monitor_label = tk.Label(
+            self.trading_view_frame,
+            textvariable=self._trading_monitor_status_var,
+            fg=self._theme("accent"),
+            bg=self._theme("panel"),
+            font=("Consolas", 10, "bold"),
+            justify="left",
+            wraplength=1100,
+        )
+        monitor_label.pack(anchor="nw", padx=20, pady=(0, 12))
+
         timeframe_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
         timeframe_frame.pack(anchor="nw", padx=20, pady=(0, 14))
 
@@ -490,7 +508,8 @@ class AngeliqueDesktopApp(tk.Tk):
         symbols = self._get_market_symbols()
         self._symbol_var = tk.StringVar(value=symbols[0] if symbols else config.DEFAULT_TRADING_SYMBOL)
         self._symbol_var.trace_add("write", lambda *args: self._refresh_trading_view())
-        symbol_menu = tk.OptionMenu(timeframe_frame, self._symbol_var, *symbols)
+        self._symbol_menu = tk.OptionMenu(timeframe_frame, self._symbol_var, *(symbols or [config.DEFAULT_TRADING_SYMBOL]))
+        symbol_menu = self._symbol_menu
         symbol_menu.configure(
             bg=self._theme("button_bg"),
             fg=self._theme("text"),
@@ -564,7 +583,7 @@ class AngeliqueDesktopApp(tk.Tk):
             font=("Consolas", 12, "bold"),
         ).pack(anchor="nw", padx=14, pady=(14, 6))
 
-        for label in ["Balance", "Equity", "Free Margin", "Margin Level", "Leverage", "Currency"]:
+        for label in ["Balance", "Equity", "Used Margin", "Free Margin", "Margin Level", "Leverage", "Currency"]:
             container = tk.Frame(account_frame, bg=self._theme("panel"))
             container.pack(fill="x", padx=14, pady=6)
             tk.Label(
@@ -648,20 +667,7 @@ class AngeliqueDesktopApp(tk.Tk):
         button_row = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
         button_row.pack(anchor="nw", padx=20, pady=(0, 8))
 
-        self._trade_action_button = tk.Button(
-            button_row,
-            text="PLAN TRADE",
-            command=self._handle_plan_and_execute_trade,
-            fg=self._theme("text"),
-            bg=self._theme("button_bg"),
-            activebackground=self._theme("button_active"),
-            activeforeground=self._theme("accent"),
-            bd=0,
-            padx=16,
-            pady=10,
-            font=("Consolas", 10, "bold"),
-        )
-        self._trade_action_button.pack(side="left", padx=(0, 12))
+        self._trade_action_button = None
 
         self._back_to_home_button = tk.Button(
             button_row,
@@ -728,6 +734,48 @@ class AngeliqueDesktopApp(tk.Tk):
         self._draw_trading_placeholder_chart()
         threading.Thread(target=self._refresh_trading_view_data, args=(symbol, timeframe, account_mode), daemon=True).start()
 
+    def _start_trading_monitor(self):
+        if self._trading_monitor_running:
+            return
+        self._trading_monitor_running = True
+        self.after(5000, self._monitor_trading_opportunities)
+
+    def _monitor_trading_opportunities(self):
+        if not self._trading_monitor_running:
+            return
+        if self._trading_monitor_scan_active:
+            self.after(15000, self._monitor_trading_opportunities)
+            return
+        try:
+            account_mode = self._get_selected_account_mode()
+            self._trading_monitor_scan_active = True
+            self._trading_monitor_status_var.set("ANGELIQUE MONITOR: SCANNING ELIGIBLE MT5 SYMBOLS...")
+            threading.Thread(target=self._monitor_trading_opportunity_worker, args=(account_mode,), daemon=True).start()
+        finally:
+            self.after(15000, self._monitor_trading_opportunities)
+
+    def _monitor_trading_opportunity_worker(self, account_mode):
+        try:
+            from skills.trading_skill.service import monitor_universe
+            scan = monitor_universe(account_mode)
+            candidates = scan.get("candidates", [])
+            if scan.get("state") != "OPPORTUNITY_FOUND":
+                self.after(0, lambda: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: WAITING FOR OPPORTUNITY | SCANNED {len(candidates)} ELIGIBLE SYMBOLS | NO VALID SETUP YET"))
+                return
+            result = scan["opportunity"]
+            plan = result["plan"]
+            signature = plan.get("confirmation_phrase")
+            if not signature or signature == self._trading_monitor_signature or self._trading_monitor_popup_open:
+                return
+            self._trading_monitor_signature = signature
+            self.after(0, lambda: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: OPPORTUNITY FOUND ON {plan.get('mt5_symbol')} | PLAN READY FOR REVIEW"))
+            self.after(0, lambda: self._show_trade_plan_popup(result))
+        except Exception as exc:
+            self.after(0, lambda: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: BLOCKED | {exc}"))
+            self.after(0, lambda: self._append_console("TRADING-ERR", f"Opportunity monitor: {exc}"))
+        finally:
+            self.after(0, lambda: setattr(self, "_trading_monitor_scan_active", False))
+
     def _get_selected_account_mode(self) -> str:
         return (getattr(self, "_account_mode_var", None).get() if getattr(self, "_account_mode_var", None) is not None else "demo")
 
@@ -774,6 +822,12 @@ class AngeliqueDesktopApp(tk.Tk):
                 bridge_error = bridge_manager.get_last_error()
             market_data = market.get_candles_and_indicators(symbol, timeframe, account_mode=account_mode)
 
+            try:
+                symbols_response = bridge_manager.send_command("list_instruments", {"account_mode": account_mode})
+                self.after(0, lambda: self._update_symbol_menu(symbols_response))
+            except Exception:
+                pass
+
             self.after(0, lambda: self._apply_trading_view_data(symbol, account, market_data, active, bridge_error, account_mode))
         except Exception as exc:
             bridge_error = str(exc)
@@ -795,7 +849,7 @@ class AngeliqueDesktopApp(tk.Tk):
         actual_login = account.get("login") or "unavailable"
 
         # If the returned account indicates no login, treat the requested account as unavailable
-        if not account.get("login"):
+        if not account.get("login") or account.get("error") or not account_mode_match:
             # Ensure the summary shows zero values for the requested account
             balance = 0
             account = {**(account or {}), "balance": 0, "equity": 0, "free_margin": 0, "margin_level": 0, "login": None}
@@ -808,8 +862,7 @@ class AngeliqueDesktopApp(tk.Tk):
             # Keep last account response for badge and diagnostics
             self._last_account = account or {}
             self._last_account_error = account.get("error") or bridge_error
-            # No further chart updates for unavailable requested account
-            return
+            # Continue so market data can render independently of account login.
 
         if active and not account_mode_match:
             self.trading_status_var.set(
@@ -828,12 +881,27 @@ class AngeliqueDesktopApp(tk.Tk):
         self._last_account = account or {}
         self._last_account_error = account.get("error") or bridge_error
 
+        if active and account.get("login"):
+            self._append_trading_transcript(
+                f"Bridge connected. Account: {account.get('login')} | Balance: ${account.get('balance', 0):,.2f}"
+            )
+
         if isinstance(market_data, dict) and "candles" in market_data and market_data["candles"]:
             self._draw_trading_chart(market_data["candles"])
             self.trading_detail_var.set("Bridge connected and ready.")
+            self._append_trading_transcript(
+                f"Market data loaded for {market_data.get('symbol', symbol)} ({len(market_data['candles'])} candles)."
+            )
         else:
             self._draw_trading_placeholder_chart()
             error_text = market_data.get("error") if isinstance(market_data, dict) else None
+            suggestions = market_data.get("suggestions") if isinstance(market_data, dict) else None
+            if suggestions:
+                self._append_trading_transcript(f"Symbol '{symbol}' not found. Broker suggests: {suggestions}")
+            elif error_text:
+                self._append_trading_transcript(f"Market data error for {symbol}: {error_text}")
+            else:
+                self._append_trading_transcript(f"Market chart unavailable for {symbol}.")
             self.trading_detail_var.set(
                 f"Market chart unavailable{': ' + error_text if error_text else ''}"
             )
@@ -890,10 +958,12 @@ class AngeliqueDesktopApp(tk.Tk):
                 display_mode = account.get("mode", "demo")
         display_mode = self._swap_display_mode(display_mode)
 
-        if not account or not account.get("login") or (account.get("error") and account.get("mode_match", True) is True):
+        # Show zero balance if: no account, no login, or ANY error
+        if not account or not account.get("login") or account.get("error"):
             values = {
                 "balance": 0,
                 "equity": 0,
+                "used_margin": 0,
                 "free_margin": 0,
                 "margin_level": 0,
                 "leverage": "—",
@@ -905,6 +975,7 @@ class AngeliqueDesktopApp(tk.Tk):
             values = {
                 "balance": account.get("balance", 0),
                 "equity": account.get("equity", 0),
+                "used_margin": account.get("used_margin", account.get("margin", 0)),
                 "free_margin": account.get("free_margin", 0),
                 "margin_level": account.get("margin_level", 0),
                 "leverage": account.get("leverage", "—"),
@@ -1334,6 +1405,22 @@ class AngeliqueDesktopApp(tk.Tk):
         self.trading_transcript_text.see(tk.END)
         self.trading_transcript_text.configure(state="disabled")
 
+    def _update_symbol_menu(self, response):
+        if not isinstance(response, dict):
+            return
+        symbols = response.get("symbols") or response.get("instruments") or []
+        from skills.trading_skill.universe import eligible_symbols
+        symbols = eligible_symbols(sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}))
+        if not symbols or not hasattr(self, "_symbol_menu"):
+            return
+        current = self._symbol_var.get().strip().upper()
+        menu = self._symbol_menu["menu"]
+        menu.delete(0, "end")
+        for symbol in symbols:
+            menu.add_command(label=symbol, command=lambda value=symbol: self._symbol_var.set(value))
+        if current not in symbols:
+            self._symbol_var.set(symbols[0])
+
     def _get_market_symbols(self) -> list[str]:
         # Attempt to query the market module or bridge for available symbols
         try:
@@ -1351,20 +1438,25 @@ class AngeliqueDesktopApp(tk.Tk):
                         resp = bridge_manager.send_command("get_symbols")
                     except Exception:
                         resp = None
-                if isinstance(resp, dict) and resp.get("symbols"):
-                    return [s.upper() for s in resp.get("symbols")]
+                if isinstance(resp, dict) and (resp.get("symbols") or resp.get("instruments")):
+                    from skills.trading_skill.universe import eligible_symbols
+                    return eligible_symbols([s.upper() for s in (resp.get("symbols") or resp.get("instruments"))])
                 if isinstance(resp, dict) and resp.get("instruments"):
-                    return [s.upper() for s in resp.get("instruments")]
+                    from skills.trading_skill.universe import eligible_symbols
+                    return eligible_symbols([s.upper() for s in resp.get("instruments")])
                 if isinstance(resp, list):
-                    return [s.upper() for s in resp]
+                    from skills.trading_skill.universe import eligible_symbols
+                    return eligible_symbols([s.upper() for s in resp])
                 # Try multiple common bridge command names
                 for cmd in ("list_instruments", "get_instruments", "list_symbols", "get_symbols"):
                     try:
                         alt = bridge_manager.send_command(cmd)
                         if isinstance(alt, list) and alt:
-                            return [s.upper() for s in alt]
-                        if isinstance(alt, dict) and alt.get("symbols"):
-                            return [s.upper() for s in alt.get("symbols")]
+                            from skills.trading_skill.universe import eligible_symbols
+                            return eligible_symbols([s.upper() for s in alt])
+                        if isinstance(alt, dict) and (alt.get("symbols") or alt.get("instruments")):
+                            from skills.trading_skill.universe import eligible_symbols
+                            return eligible_symbols([s.upper() for s in (alt.get("symbols") or alt.get("instruments"))])
                     except Exception:
                         continue
             except Exception:
@@ -1373,83 +1465,91 @@ class AngeliqueDesktopApp(tk.Tk):
             pass
 
         # Fallback common symbols list
-        return [s.upper() for s in config.TRADING_SYMBOLS]
+        from skills.trading_skill.universe import eligible_symbols
+        return eligible_symbols([s.upper() for s in config.TRADING_SYMBOLS])
 
-    def _handle_plan_and_execute_trade(self):
-        symbol = self._prompt_for_trade_symbol()
-        if not symbol:
+    def _show_trade_plan_popup(self, result):
+        """Show a complete assistant-generated plan before any approval action."""
+        plan = result.get("plan") if isinstance(result, dict) else None
+        message = result.get("message", "No executable trade plan was produced.") if isinstance(result, dict) else str(result)
+        if not plan:
+            self.trading_detail_var.set(message)
+            self._append_console("TRADING", message)
             return
+        dialog = tk.Toplevel(self)
+        dialog.title("Angelique trade plan")
+        dialog.configure(bg=self._theme("panel"))
+        dialog.transient(self)
+        dialog.grab_set()
+        def get_value(name):
+            value = plan.get(name) if isinstance(plan, dict) else getattr(plan, name)
+            return "-" if value is None else value
 
-        selected_timeframe = getattr(self, '_timeframe_var', None)
-        selected_timeframe = selected_timeframe.get() if selected_timeframe is not None else config.DEFAULT_TRADING_TIMEFRAME
-        account_mode = (getattr(self, "_account_mode_var", None).get() if getattr(self, "_account_mode_var", None) is not None else "demo")
+        rationale = plan.get("rationale", []) if isinstance(plan, dict) else plan.rationale
+        account = result.get("account") if isinstance(result, dict) else None
+        market = result.get("market") if isinstance(result, dict) else None
+        if account is not None and not isinstance(account, dict):
+            account = account.__dict__
+        if market is not None and not isinstance(market, dict):
+            market = market.__dict__
+        risk_amount = float(get_value("risk_amount"))
+        potential_profit = risk_amount * float(get_value("reward_to_risk"))
+        body = "\n".join([
+            "ANGELIQUE - TRADE PLAN",
+            "STATUS: READY FOR YOUR APPROVAL",
+            "",
+            "MARKET",
+            f"{get_value('mt5_symbol')} | {get_value('direction')} | {get_value('order_type')}",
+            "Analysis: H4 -> H1 -> M15 -> M5",
+            f"Bid: {(market or {}).get('bid', '-')} | Ask: {(market or {}).get('ask', '-')} | Spread: {(market or {}).get('spread', '-')}",
+            "",
+            "TRADE LEVELS",
+            f"Requested entry: {get_value('entry')}",
+            f"Stop loss: {get_value('stop_loss')}",
+            f"Take profit: {get_value('take_profit')}",
+            f"Reward/Risk: 1:{float(get_value('reward_to_risk')):.2f}",
+            "",
+            "POSITION & RISK",
+            f"Volume: {get_value('volume')}",
+            f"Risk: {get_value('risk_percent')}% | Maximum loss: ${risk_amount:.2f}",
+            f"Estimated profit: ${potential_profit:.2f}",
+            f"Used margin before: ${(account or {}).get('used_margin', (account or {}).get('margin', '-'))}",
+            f"Margin required: ${get_value('margin_required')}",
+            f"Free margin after: ${get_value('free_margin_after')}",
+            f"Projected margin level: {get_value('projected_margin_level'):.1f}%" if isinstance(get_value('projected_margin_level'), (int, float)) else f"Projected margin level: {get_value('projected_margin_level')}",
+            f"Equity: ${(account or {}).get('equity', '-')} | Free margin: ${(account or {}).get('free_margin', '-')}",
+            "",
+            "SETUP EVIDENCE",
+            "",
+            *rationale,
+            "",
+            "INVALIDATION",
+            f"The {get_value('direction').lower()} idea is invalidated at the stop-loss level: {get_value('stop_loss')}.",
+            "",
+            "EXECUTION WARNING",
+            "Market execution is not guaranteed at the requested entry. Spread and slippage may change the fill.",
+            "",
+            f"Type exactly: {get_value('confirmation_phrase')}",
+        ])
+        tk.Label(dialog, text=body, justify="left", wraplength=720, fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 11)).pack(padx=20, pady=20, anchor="w")
+        actions = tk.Frame(dialog, bg=self._theme("panel"))
+        actions.pack(fill="x", padx=20, pady=(0, 20))
+        tk.Button(actions, text="Cancel", command=lambda: self._cancel_trade_plan(dialog), fg=self._theme("text"), bg=self._theme("button_bg"), bd=0, padx=16, pady=10).pack(side="right", padx=(10, 0))
+        self._trading_monitor_popup_open = True
+        tk.Button(actions, text="APPROVE & EXECUTE", command=lambda: self._approve_trade_plan(dialog, get_value("confirmation_phrase")), fg=self._theme("text"), bg=self._theme("button_active"), bd=0, padx=16, pady=10).pack(side="right")
+        self._center_dialog(dialog)
 
-        if self._pending_trade is None:
-            if not self._confirm_dialog(
-                "Plan Trade",
-                f"Analyze and prepare a trade plan for {symbol} on {selected_timeframe}? This will not execute the trade yet.",
-                confirm_text="Plan",
-                cancel_text="Cancel",
-            ):
-                return
+    def _cancel_trade_plan(self, dialog):
+        self._trading_monitor_popup_open = False
+        dialog.destroy()
 
-            self._append_console("TRADING", f"Planning trade for {symbol} {selected_timeframe} in {account_mode.upper()} mode.")
-            self.trading_detail_var.set("Planning trade and analyzing market conditions...")
-            self._trade_action_button.configure(state="disabled")
-            threading.Thread(
-                target=self._plan_trade_background,
-                args=(symbol, selected_timeframe, account_mode),
-                daemon=True,
-            ).start()
-        else:
-            if not self._confirm_dialog(
-                "Execute Trade",
-                f"Execute the planned trade for {self._pending_trade} in {account_mode.upper()} mode?",
-                confirm_text="Execute",
-                cancel_text="Cancel",
-            ):
-                return
-            self._append_console("TRADING", f"Executing trade for {self._pending_trade}.")
-            self.trading_detail_var.set("Executing planned trade...")
-            self._trade_action_button.configure(state="disabled")
-            threading.Thread(
-                target=self._execute_trade_background,
-                args=(self._pending_trade, selected_timeframe, account_mode),
-                daemon=True,
-            ).start()
-
-    def _plan_trade_background(self, symbol: str, timeframe: str, account_mode: str):
-        try:
-            from skills.trading.trading_skill import analyze_and_recommend
-            result = analyze_and_recommend(symbol, timeframe=timeframe, auto_execute=False, account_mode=account_mode)
-            self.after(0, lambda: self._finish_trade_plan(symbol, result))
-        except Exception as exc:
-            self.after(0, lambda: self._finish_trade_error(f"Planning failed: {exc}"))
-
-    def _execute_trade_background(self, symbol: str, timeframe: str, account_mode: str):
-        try:
-            from skills.trading.trading_skill import analyze_and_recommend
-            result = analyze_and_recommend(symbol, timeframe=timeframe, auto_execute=True, account_mode=account_mode)
-            self.after(0, lambda: self._finish_trade_execution(result))
-        except Exception as exc:
-            self.after(0, lambda: self._finish_trade_error(f"Execution failed: {exc}"))
-
-    def _finish_trade_plan(self, symbol: str, result: str):
-        self._pending_trade = symbol
-        self.trading_detail_var.set(result[:1400])
-        self._trade_action_button.configure(text="EXECUTE PLANNED TRADE", state="normal")
-        self._append_console("TRADING", f"Trade plan ready for {symbol}.")
-
-    def _finish_trade_execution(self, result: str):
-        self.trading_detail_var.set(result[:1400])
-        self._append_console("TRADING", result)
-        self._pending_trade = None
-        self._trade_action_button.configure(text="PLAN TRADE", state="normal")
-
-    def _finish_trade_error(self, message: str):
-        self.trading_detail_var.set(message)
-        self._append_console("TRADING-ERR", message)
-        self._trade_action_button.configure(state="normal")
+    def _approve_trade_plan(self, dialog, confirmation_phrase):
+        dialog.destroy()
+        self._trading_monitor_popup_open = False
+        from skills.trading_skill.service import execute_trade
+        result = execute_trade(confirmation_phrase)
+        self.trading_detail_var.set(result.message)
+        self._append_console("TRADING", result.message)
 
     def _update_avatar(self):
         # Ensure canvas layout is settled before measuring

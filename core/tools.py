@@ -50,6 +50,7 @@ def _load_screen_tools():
 from core import config
 from skills.trading.engine.mt5_bridge import bridge
 from skills.trading.trading_skill import analyze_and_recommend, execute_approved_trade
+from skills.trading_skill.service import prepare_trade_payload
 from skills.trading.news import get_forex_news, get_market_calendar
 from skills.messaging.whatsapp_tools import (
     send_whatsapp, draft_whatsapp, send_whatsapp_approved,
@@ -319,13 +320,13 @@ TOOL_REGISTRY = {
         "function": lambda: bridge.get_account_info(),
     },
     "analyze_market_and_recommend": {
-        "description": "Analyze a trading pair using the 10-Rule Constitution. Returns a detailed trade recommendation.",
+        "description": "Prepare a deterministic multi-timeframe trade plan. Never executes; returns a plan requiring exact user approval.",
         "parameters": {
             "symbol": "Trading pair (e.g., 'EURUSD', 'XAUUSD')",
             "timeframe": "Chart timeframe (e.g., 'M15', 'H1', 'H4')",
             "risk_percent": "Risk percentage per trade (default 1.0)",
         },
-        "function": lambda symbol, timeframe=config.DEFAULT_TRADING_TIMEFRAME, risk_percent=1.0: analyze_and_recommend(symbol, timeframe, risk_percent),
+        "function": lambda symbol, timeframe=config.DEFAULT_TRADING_TIMEFRAME, risk_percent=1.0: prepare_trade_payload(symbol, risk_percent=risk_percent),
     },
     "execute_approved_trade": {
         "description": "Execute a market order. ONLY use after explicit user confirmation.",

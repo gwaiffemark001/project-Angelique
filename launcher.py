@@ -117,7 +117,7 @@ if __name__ == "__main__":
             launch_child_process("gui").wait()
         elif sys.argv[1] == "--start-bridge":
             # Start the demo MT5 bridge server in foreground via Wine
-            bridge_script = os.path.join(ROOT, "skills", "trading", "engine", "mt5_bridge_server.py")
+            bridge_script = os.path.join(ROOT, "skills", "trading_skill", "wine_server.py")
             wine_cmd = _get_wine_bridge_command()
             if wine_cmd is None:
                 print("Wine is not available; cannot launch MT5 bridge.")
@@ -126,7 +126,7 @@ if __name__ == "__main__":
             subprocess.run(wine_cmd + [windows_bridge_script], cwd=ROOT)
         elif sys.argv[1] == "--start-bridge-bg":
             # Start the demo MT5 bridge server in background and return via Wine
-            bridge_script = os.path.join(ROOT, "skills", "trading", "engine", "mt5_bridge_server.py")
+            bridge_script = os.path.join(ROOT, "skills", "trading_skill", "wine_server.py")
             wine_cmd = _get_wine_bridge_command()
             if wine_cmd is None:
                 print("Wine is not available; cannot launch MT5 bridge.")

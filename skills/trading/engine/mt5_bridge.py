@@ -1,44 +1,45 @@
-# skills/trading/engine/mt5_bridge.py
-from skills.trading.engine.connection_manager import bridge_manager
+from __future__ import annotations
+
+from skills.trading_skill.bridge import WineBridgeClient
 
 
-class MT5Bridge:
-    @staticmethod
-    def ensure_connected():
-        if not bridge_manager.get_status():
-            bridge_manager.connect()
-        return bridge_manager.get_status()
+class BridgeFacade:
+    def __init__(self):
+        self.client = WineBridgeClient()
+        self._connected = False
+        self._last_error = None
 
-    @staticmethod
-    def send_command(action: str, params: dict | None = None) -> dict:
-        if not MT5Bridge.ensure_connected():
-            return {"error": "Not connected"}
-        return bridge_manager.send_command(action, params)
+    def connect(self):
+        response = self.client.request("symbols", {"account_mode": "demo"})
+        self._connected = response.get("status") == "connected"
+        self._last_error = response.get("error")
+        return self._connected
 
-    @staticmethod
-    def get_account_info(account_mode: str = "demo") -> dict:
-        if not MT5Bridge.ensure_connected():
-            return {"error": "Not connected"}
-        return bridge_manager.send_command("get_account_info", {"account_mode": account_mode})
+    def start(self):
+        return self.connect()
 
-    @staticmethod
-    def ping() -> dict:
-        if not MT5Bridge.ensure_connected():
-            return {"error": "Not connected"}
-        return bridge_manager.send_command("ping")
+    def get_status(self):
+        return self.connect()
 
-    @staticmethod
-    def list_instruments() -> list:
-        if not MT5Bridge.ensure_connected():
-            return {"error": "Not connected"}
-        return bridge_manager.send_command("list_instruments")
+    def ping(self):
+        return {"status": "connected"} if self.connect() else {"status": "error", "error": self._last_error}
 
-    @staticmethod
-    def create_demo_pattern(symbol: str, pattern: str, length: int = 60) -> dict:
-        if not MT5Bridge.ensure_connected():
-            return {"error": "Not connected"}
-        payload = {"symbol": symbol, "pattern": pattern, "length": length}
-        return bridge_manager.send_command("create_demo_pattern", payload)
+    def get_last_error(self):
+        return self._last_error
+
+    def request(self, operation, payload=None):
+        response = self.client.request(operation, payload or {})
+        self._connected = response.get("status") != "error"
+        self._last_error = response.get("error")
+        return response
+
+    def send_command(self, action, payload=None):
+        operations = {"get_account_info": "account", "list_instruments": "symbols", "get_symbols": "symbols", "get_rates": "market"}
+        operation = operations.get(action, action)
+        return self.request(operation, payload)
+
+    def get_account_info(self, account_mode="demo"):
+        return self.request("account", {"account_mode": account_mode})
 
 
-bridge = MT5Bridge()
+bridge = BridgeFacade()
