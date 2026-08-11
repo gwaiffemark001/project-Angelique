@@ -170,6 +170,60 @@ def execute(request: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
+def close_position(request: dict[str, Any]) -> dict[str, Any]:
+    requested_mode = _mode(request.get("account_mode"))
+    symbol = str(request.get("symbol") or "").strip()
+
+    def _normalize(value: str) -> str:
+        return "".join(char for char in value.upper() if char.isalnum())
+
+    try:
+        mt5 = importlib.import_module("MetaTrader5")
+        if not _connect(mt5, requested_mode):
+            return {"success": False, "status": "error", "error": "MT5 initialization failed"}
+
+        positions = []
+        if symbol:
+            resolved_symbol = _resolve(mt5, symbol) or symbol
+            positions = mt5.positions_get(symbol=resolved_symbol) or []
+            if not positions:
+                all_positions = mt5.positions_get() or []
+                normalized_target = _normalize(symbol)
+                positions = [pos for pos in all_positions if _normalize(str(getattr(pos, "symbol", ""))) == normalized_target]
+        else:
+            positions = mt5.positions_get() or []
+
+        if not positions:
+            return {"success": False, "status": "error", "error": f"No open position found for {symbol or 'current account'}"}
+
+        position = positions[0]
+        closing_type = mt5.ORDER_TYPE_SELL if position.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        close_request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": position.symbol,
+            "volume": float(position.volume),
+            "type": closing_type,
+            "position": int(position.ticket),
+            "deviation": 20,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+            "comment": "Angelique manual exit"
+        }
+        result = mt5.order_send(close_request)
+        raw = _raw(result) if result is not None else {}
+        success = result is not None and getattr(result, "retcode", None) in {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
+        return {
+            "success": success,
+            "status": "closed" if success else "error",
+            "symbol": position.symbol,
+            "ticket": int(position.ticket),
+            "message": "Position closed successfully." if success else raw.get("comment", "MT5 rejected the manual exit."),
+            "error": None if success else raw.get("comment", "MT5 rejected the manual exit."),
+        }
+    except Exception as exc:
+        return {"success": False, "status": "error", "error": str(exc), "message": str(exc)}
+
+
 async def handle(websocket, path=None):
     async for message in websocket:
         payload = json.loads(message)
@@ -194,6 +248,8 @@ async def handle(websocket, path=None):
             result = market(payload)
         elif operation == "execute":
             result = execute(payload)
+        elif operation == "close_position":
+            result = close_position(payload)
         else:
             result = {"status": "error", "error": f"Unknown operation: {operation}"}
         await websocket.send(json.dumps(result))

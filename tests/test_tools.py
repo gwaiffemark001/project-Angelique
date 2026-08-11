@@ -4,11 +4,14 @@ from unittest.mock import patch, MagicMock
 
 from brain.heuristic_engine import extract_command_heuristically
 from brain.cognitive_loop import run_cognitive_loop
+import brain.cognitive_loop as cognitive_loop
+from brain import llm_interface
 from core.tools import execute_tool
 import core.tools as core_tools
 from skills.conversation.chat_skill import save_conversation
 from skills.os_control import system_cmds
 from skills.os_control import app_discovery
+from skills.voice import voice_interface
 
 
 class ToolsTests(unittest.TestCase):
@@ -23,6 +26,116 @@ class ToolsTests(unittest.TestCase):
     def test_execute_tool_ignores_unexpected_args(self):
         result = execute_tool("run_shell_command", {"command": "echo hello", "extra": "ignored"})
         self.assertTrue("hello" in result.lower())
+
+    @patch("core.tools.call_skill", return_value="system health ok")
+    def test_execute_tool_falls_back_to_dynamic_skill_lookup(self, mock_call_skill):
+        result = execute_tool("system_monitor", {})
+        self.assertEqual(result, "system health ok")
+        mock_call_skill.assert_called_once_with("system_monitor", {})
+
+    def test_system_monitor_direct_tool_returns_health_dict_without_recursing(self):
+        result = execute_tool("system_monitor.get_system_health", {})
+        self.assertIsInstance(result, dict)
+        self.assertIn("cpu_percent", result)
+
+    @patch("brain.llm_interface.requests.post")
+    def test_query_llm_prefers_remote_models_before_local(self, mock_post):
+        original_priority = llm_interface.config.API_PRIORITY
+        original_ollama_candidates = llm_interface.config.OLLAMA_MODEL_CANDIDATES
+        original_openrouter_key = llm_interface.config.OPENROUTER_API_KEY
+        try:
+            llm_interface.config.API_PRIORITY = ["openrouter", "ollama"]
+            llm_interface.config.OLLAMA_MODEL_CANDIDATES = ["qwen2.5:3b"]
+            llm_interface.config.OPENROUTER_API_KEY = "remote-key"
+
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"choices": [{"message": {"content": "remote answer"}}]}
+            mock_post.return_value = response
+
+            result = llm_interface.query_llm([{"role": "user", "content": "hi"}])
+            self.assertEqual(result, "remote answer")
+            self.assertTrue(mock_post.call_args_list[0][0][0].startswith("https://openrouter.ai"))
+        finally:
+            llm_interface.config.API_PRIORITY = original_priority
+            llm_interface.config.OLLAMA_MODEL_CANDIDATES = original_ollama_candidates
+            llm_interface.config.OPENROUTER_API_KEY = original_openrouter_key
+
+    @patch("brain.llm_interface.requests.post")
+    def test_query_llm_falls_back_to_ollama_when_remote_is_unavailable(self, mock_post):
+        original_priority = llm_interface.config.API_PRIORITY
+        original_ollama_candidates = llm_interface.config.OLLAMA_MODEL_CANDIDATES
+        original_openrouter_key = llm_interface.config.OPENROUTER_API_KEY
+        original_nvidia_key = llm_interface.config.NVIDIA_API_KEY
+        try:
+            llm_interface.config.API_PRIORITY = ["openrouter", "ollama"]
+            llm_interface.config.OLLAMA_MODEL_CANDIDATES = ["qwen2.5:3b"]
+            llm_interface.config.OPENROUTER_API_KEY = ""
+            llm_interface.config.NVIDIA_API_KEY = ""
+
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"message": {"content": "local answer"}}
+            mock_post.return_value = response
+
+            result = llm_interface.query_llm([{"role": "user", "content": "hi"}])
+            self.assertEqual(result, "local answer")
+            self.assertTrue(mock_post.call_args_list[0][0][0].endswith("/api/chat"))
+        finally:
+            llm_interface.config.API_PRIORITY = original_priority
+            llm_interface.config.OLLAMA_MODEL_CANDIDATES = original_ollama_candidates
+            llm_interface.config.OPENROUTER_API_KEY = original_openrouter_key
+            llm_interface.config.NVIDIA_API_KEY = original_nvidia_key
+
+    @patch("brain.cognitive_loop.query_llm")
+    @patch("brain.cognitive_loop.execute_tool", return_value="balance ok")
+    def test_resolve_user_query_dispatches_direct_tool_commands(self, mock_execute_tool, mock_query_llm):
+        result = cognitive_loop.resolve_user_query("what is my mt5 account balance")
+        self.assertEqual(result["answer"], "balance ok")
+        self.assertEqual(result["source"], "tool")
+        mock_execute_tool.assert_called_once_with("get_account_balance", {})
+        mock_query_llm.assert_not_called()
+
+    @patch("brain.cognitive_loop.query_llm")
+    @patch("brain.cognitive_loop.execute_tool", return_value="folder created")
+    def test_resolve_user_query_dispatches_folder_creation(self, mock_execute_tool, mock_query_llm):
+        result = cognitive_loop.resolve_user_query("create a folder named feck on my desktop")
+        self.assertEqual(result["answer"], "folder created")
+        self.assertEqual(result["source"], "tool")
+        mock_execute_tool.assert_called_once()
+        self.assertEqual(mock_execute_tool.call_args.args[0], "manage_files")
+        self.assertEqual(mock_execute_tool.call_args.args[1]["action"], "mkdir")
+        mock_query_llm.assert_not_called()
+
+    @patch("skills.voice.voice_interface._play_audio_file")
+    @patch("skills.voice.voice_interface._generate_edge_tts")
+    def test_speech_toggle_blocks_speak_when_disabled(self, mock_generate_edge_tts, mock_play_audio_file):
+        original_state = voice_interface.is_speech_enabled()
+        try:
+            voice_interface.set_speech_enabled(False)
+            with patch("skills.voice.voice_interface._is_online", return_value=True):
+                voice_interface.speak("hello")
+        finally:
+            voice_interface.set_speech_enabled(original_state)
+
+        mock_generate_edge_tts.assert_not_called()
+        mock_play_audio_file.assert_not_called()
+
+    def test_heuristic_routes_generic_skill_call(self):
+        tool_name, args = extract_command_heuristically("use the system monitor skill")
+        self.assertEqual(tool_name, "call_skill")
+        self.assertEqual(args.get("skill_name"), "system monitor")
+
+    def test_heuristic_routes_create_folder_command(self):
+        tool_name, args = extract_command_heuristically("create a folder named feck on my desktop")
+        self.assertEqual(tool_name, "manage_files")
+        self.assertEqual(args.get("action"), "mkdir")
+        self.assertTrue(str(args.get("path", "")).endswith("/Desktop/feck") or str(args.get("path", "")).endswith("\\Desktop\\feck"))
+
+    def test_heuristic_routes_browser_open_command(self):
+        tool_name, args = extract_command_heuristically("open a browser on my pc")
+        self.assertEqual(tool_name, "open_app")
+        self.assertEqual(args.get("app_name"), "firefox")
 
     def test_execute_tool_preserves_kwargs_for_recall_memory(self):
         original_function = core_tools.TOOL_REGISTRY["recall_memory"]["function"]

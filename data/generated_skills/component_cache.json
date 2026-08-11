@@ -33,5 +33,26 @@
     "metadata": {},
     "created_at": "2026-08-10T19:00:26.357489Z",
     "usage_count": 0
+  },
+  "provide:d42a4ff8b527": {
+    "name": "provide",
+    "code": "def main(**kwargs):\n    if 'provide' in kwargs:\n        if kwargs['provide'] == 'help':\n            print(\"This script provides help on how to use it.\")\n        elif kwargs['provide'] == 'information':\n            print(\"This script provides information on a given topic.\")\n        else:\n            print(\"Invalid option. Please use 'help' or 'information'.\")\n    else:\n        print(\"Please provide an option to use this script.\")\n\nif __name__ == \"__main__\":\n    main()",
+    "metadata": {},
+    "created_at": "2026-08-11T17:41:47.443179Z",
+    "usage_count": 0
+  },
+  "a:6e40c37301a8": {
+    "name": "a",
+    "code": "def main(**kwargs):\n    if 'a' in kwargs:\n        print(\"You chose option a\")",
+    "metadata": {},
+    "created_at": "2026-08-11T17:42:24.225862Z",
+    "usage_count": 0
+  },
+  "a:90daea6e9a5b": {
+    "name": "a",
+    "code": "def main(**kwargs):\n    if kwargs.get('a'):\n        print(\"Instruction 'a' received\")",
+    "metadata": {},
+    "created_at": "2026-08-11T17:49:54.260192Z",
+    "usage_count": 0
   }
 }

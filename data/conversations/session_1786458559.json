@@ -1,0 +1,12 @@
+[
+  {
+    "timestamp": "2026-08-11T14:30:30.053284Z",
+    "user": "hey you welcome wagwan",
+    "agent": "[{\"entity\": \"User\", \"type\": \"fact\", \"key\": \"abilities\", \"context\": \"introducing myself\", \"importance\": 4, \"value\": \"to the best of my abilities\"}, {\"importance\": 4, \"key\": \"willingness to share name\", \"value\": \"happy to chat\", \"context\": \"introducing themselves\", \"entity\": \"User\", \"type\": \"fact\"}, {\"context\": \"introducing self\", \"value\": \"Large Language Model Meta AI\", \"entity\": \"User\", \"importance\": 4, \"key\": \"nickname meaning\", \"type\": \"fact\"}]"
+  },
+  {
+    "timestamp": "2026-08-11T15:13:31.060454Z",
+    "user": "hey hey hey hey hey hey hey hey",
+    "agent": "Hey, I'm here! What's up?"
+  }
+]

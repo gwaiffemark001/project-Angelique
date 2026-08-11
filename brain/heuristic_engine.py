@@ -3,6 +3,7 @@
 Comprehensive heuristic engine for deterministic command routing.
 Maps natural language to tool actions without LLM dependency for critical commands.
 """
+import os
 import re
 from core import config
 
@@ -70,6 +71,38 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
         return 'analyze_camera', {}
 
     # ============================================================
+    # APP DISCOVERY & OPENING
+    # ============================================================
+    browser_match = re.search(r'\b(?:open|launch|start|run|execute)\s+(?:a|an|the)??\s*(?:browser|chrome|firefox|web browser)\b', normalized)
+    if browser_match:
+        return 'open_app', {'app_name': 'firefox'}
+
+    open_app_match = re.search(r'\b(?:open|launch|start|run|execute)\s+(?:the\s+)?([a-zA-Z0-9\s\-]+?)(?:\s+(?:app|application|program|browser|editor))?\b', normalized)
+    if open_app_match:
+        app_name = open_app_match.group(1).strip().lower()
+        if app_name in {'a', 'an', 'the'}:
+            return None, {}
+        return 'open_app', {'app_name': app_name}
+
+    # ============================================================
+    # GENERIC SKILL DISPATCH
+    # ============================================================
+    skill_call_patterns = [
+        r'\b(?:use|call|run|invoke)\s+(?:the\s+)?(.+?)\s+skill\b',
+        r'\b(?:use|call|run|invoke)\s+(?:the\s+)?([a-zA-Z0-9_\.\-]+)\b',
+        r'\b(?:activate|start|open)\s+(?:the\s+)?([a-zA-Z0-9_\.\-]+)\b',
+    ]
+    for pattern in skill_call_patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            name = match.group(1).strip()
+            if name.lower() not in {"app", "browser", "terminal", "command"}:
+                return 'call_skill', {'skill_name': name, 'args': {}}
+
+    if re.search(r'\b(?:system\s+monitor|diagnostics|health check|pc health|system health)\b', normalized):
+        return 'call_skill', {'skill_name': 'system_monitor.get_system_health', 'args': {}}
+
+    # ============================================================
     # SYSTEM MONITORING
     # ============================================================
     install_check_patterns = [
@@ -100,18 +133,22 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
         return 'get_system_health', {}
 
     # ============================================================
-    # APP DISCOVERY & OPENING
-    # ============================================================
-    open_app_match = re.search(r'\b(?:open|launch|start|run|execute)\s+(?:the\s+)?([a-zA-Z0-9\s\-]+?)(?:\s+(?:app|application|program|browser|editor))?\b', normalized)
-    if open_app_match:
-        app_name = open_app_match.group(1).strip().title()
-        return 'open_app', {'app_name': app_name}
-
-    # ============================================================
     # FILE MANAGEMENT
     # ============================================================
+    create_folder_patterns = [
+        r'\b(?:create|make)\s+(?:a|an)?\s*(?:folder|directory)\s+(?:named|called)?\s*([\w\-\. ]+)',
+        r'\b(?:create|make)\s+(?:a|an)?\s*(?:folder|directory)\s+on\s+(?:my\s+)?(?:desktop|computer|pc)\b',
+    ]
+    for pattern in create_folder_patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            folder_name = match.group(1).strip() if match.groups() else 'new_folder'
+            folder_name = re.sub(r'\s+(?:on|in|for|at|to)\b.*$', '', folder_name).strip()
+            folder_name = re.sub(r'\s+', '_', folder_name).strip(' ._') or 'new_folder'
+            desktop_root = getattr(config, 'DESKTOP_PATH', None) or os.path.expanduser('~/Desktop')
+            return 'manage_files', {'action': 'mkdir', 'path': os.path.join(desktop_root, folder_name)}
+
     file_patterns = [
-        (r'\b(?:create|write|save)\s+(?:file|document).*?(?:at|to)\s+([/\w\-\. ]+)', 'create'),
         (r'\b(?:read|open|view|show|display)\s+(?:file|document)\s+([/\w\-\. ]+)', 'read'),
         (r'\b(?:delete|remove)\s+(?:file|document)\s+([/\w\-\. ]+)', 'delete'),
         (r'\b(?:move|copy)\s+([/\w\-\. ]+)\s+(?:to|into)\s+([/\w\-\. ]+)', 'move'),

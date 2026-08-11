@@ -12,7 +12,7 @@ from tkinter import simpledialog, messagebox, scrolledtext
 from pathlib import Path
 
 from core import config
-
+#[main 44abb76] restore point
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -102,6 +102,15 @@ class AngeliqueDesktopApp(tk.Tk):
         self._scanner_dot = None
         self._avatar_canvas_id = None
         self._avatar_text_id = None
+        self._ring_animation_job = None
+        self._button_hover_cache = {}
+        self._ring_particles = []
+        self._ring_arc_ids = []
+        self._ring_arc_config = []
+        self._avatar_status_text_id = None
+        self._avatar_status_blink_job = None
+        self._avatar_status_mode = None
+        self._avatar_status_dot_count = 0
         # Ensure commonly-referenced GUI attributes exist to avoid
         # AttributeError when parts of the UI reference them before
         # they are created during runtime. Only set if not already present.
@@ -122,6 +131,10 @@ class AngeliqueDesktopApp(tk.Tk):
             "_bg_overlay_id": None,
             "_is_online": None,
             "_network_status_locked": False,
+            "_avatar_status_text_id": None,
+            "_avatar_status_blink_job": None,
+            "_avatar_status_mode": None,
+            "_avatar_status_dot_count": 0,
             "_trading_chart_view_count": 80,
             "_trading_chart_view_offset": 0,
             "_chart_selection_rect_id": None,
@@ -133,6 +146,12 @@ class AngeliqueDesktopApp(tk.Tk):
             "_trading_monitor_popup_open": False,
             "_trading_monitor_status_var": None,
             "_trading_monitor_scan_active": False,
+            "_trading_refresh_pending": False,
+            "_trading_refresh_generation": 0,
+            "_command_in_progress": False,
+            "_speak_enabled": True,
+            "_voice_listener_thread": None,
+            "_stop_listening": None,
             "_trading_status_var": None,
             "_trading_detail_var": None,
             "_ticker_index": 0,
@@ -155,6 +174,9 @@ class AngeliqueDesktopApp(tk.Tk):
         self._mode_label = None
         self._avatar_size_cached = 0
         self._active_center_view = "home"
+        self._speak_enabled = True
+        self._voice_listener_thread = None
+        self._stop_listening = None
         self.center_title_label = None
         self.center_status_label = None
         self.ring_canvas = None
@@ -235,6 +257,44 @@ class AngeliqueDesktopApp(tk.Tk):
         self._create_title_bar_button(button_frame, "❐", self._toggle_maximize)
         self._create_title_bar_button(button_frame, "✕", self.on_close)
 
+    def _apply_button_style(self, button, active=False, hover=False):
+        bg = self._theme("button_active") if active else self._theme("button_bg")
+        if hover:
+            bg = self._theme("button_active")
+        button.configure(
+            fg=self._theme("accent") if hover or active else self._theme("text"),
+            bg=bg,
+            activebackground=self._theme("button_active"),
+            activeforeground=self._theme("accent"),
+            highlightthickness=0,
+            cursor="hand2",
+        )
+
+    def _bind_button_feedback(self, button, command=None):
+        def _run():
+            if command is not None:
+                self.after_idle(command)
+
+        def _enter(event):
+            self._apply_button_style(button, hover=True)
+
+        def _leave(event):
+            self._apply_button_style(button, active=False, hover=False)
+
+        def _press(event):
+            self._apply_button_style(button, active=True)
+
+        def _release(event):
+            self._apply_button_style(button, active=False, hover=False)
+
+        button.bind("<Enter>", _enter)
+        button.bind("<Leave>", _leave)
+        button.bind("<ButtonPress-1>", _press)
+        button.bind("<ButtonRelease-1>", _release)
+        if command is not None:
+            button.configure(command=_run)
+        return button
+
     def _create_title_bar_button(self, parent, symbol, command):
         button = tk.Button(
             parent,
@@ -247,8 +307,11 @@ class AngeliqueDesktopApp(tk.Tk):
             padx=10,
             pady=4,
             font=("Consolas", 10, "bold"),
-            command=command,
+            relief="flat",
+            highlightthickness=0,
+            cursor="hand2",
         )
+        self._bind_button_feedback(button, command)
         button.pack(side="right", padx=(4, 0))
         return button
 
@@ -669,6 +732,21 @@ class AngeliqueDesktopApp(tk.Tk):
 
         self._trade_action_button = None
 
+        self._manual_exit_trade_button = tk.Button(
+            button_row,
+            text="EXIT ACTIVE TRADE",
+            command=self._manual_exit_trade,
+            fg=self._theme("text"),
+            bg="#7f1d1d",
+            activebackground="#991b1b",
+            activeforeground="#ffffff",
+            bd=0,
+            padx=16,
+            pady=10,
+            font=("Consolas", 10, "bold"),
+        )
+        self._manual_exit_trade_button.pack(side="left", padx=(0, 12))
+
         self._back_to_home_button = tk.Button(
             button_row,
             text="BACK TO HOME",
@@ -725,14 +803,23 @@ class AngeliqueDesktopApp(tk.Tk):
         self._refresh_trading_view()
 
     def _refresh_trading_view(self):
+        if self._trading_refresh_pending:
+            return
+        self._trading_refresh_pending = True
+        self.after(100, self._begin_trading_view_refresh)
+
+    def _begin_trading_view_refresh(self):
+        self._trading_refresh_pending = False
         symbol, timeframe = self._get_selected_symbol_and_timeframe()
         account_mode = self._get_selected_account_mode()
+        self._trading_refresh_generation += 1
+        generation = self._trading_refresh_generation
         self.trading_status_var.set(
             f"{symbol} • {timeframe} • bridge checking • balance $0.00"
         )
         self.trading_detail_var.set(f"Loading trading data for {symbol} {timeframe}...")
         self._draw_trading_placeholder_chart()
-        threading.Thread(target=self._refresh_trading_view_data, args=(symbol, timeframe, account_mode), daemon=True).start()
+        threading.Thread(target=self._refresh_trading_view_data, args=(symbol, timeframe, account_mode, generation), daemon=True).start()
 
     def _start_trading_monitor(self):
         if self._trading_monitor_running:
@@ -757,6 +844,7 @@ class AngeliqueDesktopApp(tk.Tk):
     def _monitor_trading_opportunity_worker(self, account_mode):
         try:
             from skills.trading_skill.service import monitor_universe
+            self.after(0, lambda: self._trading_monitor_status_var.set("ANGELIQUE MONITOR: CANDIDATE FOUND | ANGELIQUE IS REVIEWING MARKET CONTEXT AND PRIOR TRADES..."))
             scan = monitor_universe(account_mode)
             candidates = scan.get("candidates", [])
             if scan.get("state") != "OPPORTUNITY_FOUND":
@@ -803,7 +891,7 @@ class AngeliqueDesktopApp(tk.Tk):
             pass
         self._gui_settings = settings
 
-    def _refresh_trading_view_data(self, symbol: str, timeframe: str, account_mode: str):
+    def _refresh_trading_view_data(self, symbol: str, timeframe: str, account_mode: str, generation: int):
         bridge_error = None
         account = {}
         market_data = {}
@@ -828,10 +916,15 @@ class AngeliqueDesktopApp(tk.Tk):
             except Exception:
                 pass
 
-            self.after(0, lambda: self._apply_trading_view_data(symbol, account, market_data, active, bridge_error, account_mode))
+            self.after(0, lambda: self._apply_trading_view_data_if_current(generation, symbol, account, market_data, active, bridge_error, account_mode))
         except Exception as exc:
             bridge_error = str(exc)
-            self.after(0, lambda: self._apply_trading_view_data(symbol, {}, {}, False, bridge_error, account_mode))
+            self.after(0, lambda: self._apply_trading_view_data_if_current(generation, symbol, {}, {}, False, bridge_error, account_mode))
+
+    def _apply_trading_view_data_if_current(self, generation, *args):
+        if generation != self._trading_refresh_generation:
+            return
+        self._apply_trading_view_data(*args)
 
     def _apply_trading_view_data(self, symbol: str, account: dict, market_data: dict, active: bool, bridge_error: str | None, account_mode: str):
         status = "connected" if active else "disconnected"
@@ -937,6 +1030,19 @@ class AngeliqueDesktopApp(tk.Tk):
         timeframe = getattr(self, '_timeframe_var', None)
         timeframe = timeframe.get() if timeframe is not None else None
         return symbol or config.DEFAULT_TRADING_SYMBOL, timeframe or config.DEFAULT_TRADING_TIMEFRAME
+
+    def _get_manual_exit_payload(self) -> dict | None:
+        symbol, timeframe = self._get_selected_symbol_and_timeframe()
+        account_mode = self._get_selected_account_mode()
+        if not symbol:
+            self._append_console("TRADING-ERR", "Manual exit failed: no trading symbol selected.")
+            self.trading_detail_var.set("Manual exit failed: no symbol selected.")
+            return None
+        if account_mode not in {"demo", "real", "live"}:
+            self._append_console("TRADING-ERR", f"Manual exit failed: invalid account mode '{account_mode}'.")
+            self.trading_detail_var.set(f"Manual exit failed: invalid account mode '{account_mode}'.")
+            return None
+        return {"symbol": symbol, "account_mode": account_mode, "timeframe": timeframe}
 
     def _swap_display_mode(self, mode: str | None) -> str:
         mode = (mode or "demo").lower()
@@ -1486,6 +1592,15 @@ class AngeliqueDesktopApp(tk.Tk):
             return "-" if value is None else value
 
         rationale = plan.get("rationale", []) if isinstance(plan, dict) else plan.rationale
+        agree = []
+        disagree = []
+        for item in rationale:
+            if not isinstance(item, str):
+                continue
+            if item.startswith("AGREES:"):
+                agree.append(item)
+            elif item.startswith("DISAGREES:"):
+                disagree.append(item)
         account = result.get("account") if isinstance(result, dict) else None
         market = result.get("market") if isinstance(result, dict) else None
         if account is not None and not isinstance(account, dict):
@@ -1497,6 +1612,7 @@ class AngeliqueDesktopApp(tk.Tk):
         body = "\n".join([
             "ANGELIQUE - TRADE PLAN",
             "STATUS: READY FOR YOUR APPROVAL",
+            f"Brain review: {(result.get('brain_review') or {}).get('response', 'Completed deterministic review.') if isinstance(result, dict) else 'Completed deterministic review.'}",
             "",
             "MARKET",
             f"{get_value('mt5_symbol')} | {get_value('direction')} | {get_value('order_type')}",
@@ -1514,6 +1630,7 @@ class AngeliqueDesktopApp(tk.Tk):
             f"Risk: {get_value('risk_percent')}% | Maximum loss: ${risk_amount:.2f}",
             f"Estimated profit: ${potential_profit:.2f}",
             f"Used margin before: ${(account or {}).get('used_margin', (account or {}).get('margin', '-'))}",
+            f"Leverage: {(account or {}).get('leverage', '-')}",
             f"Margin required: ${get_value('margin_required')}",
             f"Free margin after: ${get_value('free_margin_after')}",
             f"Projected margin level: {get_value('projected_margin_level'):.1f}%" if isinstance(get_value('projected_margin_level'), (int, float)) else f"Projected margin level: {get_value('projected_margin_level')}",
@@ -1521,6 +1638,13 @@ class AngeliqueDesktopApp(tk.Tk):
             "",
             "SETUP EVIDENCE",
             "",
+            "AGREED SIGNALS",
+            *(agree or ["No agreement markers were captured."]),
+            "",
+            "DISAGREED SIGNALS",
+            *(disagree or ["No conflicting markers were captured."]),
+            "",
+            "FULL RATIONALE",
             *rationale,
             "",
             "INVALIDATION",
@@ -1550,6 +1674,27 @@ class AngeliqueDesktopApp(tk.Tk):
         result = execute_trade(confirmation_phrase)
         self.trading_detail_var.set(result.message)
         self._append_console("TRADING", result.message)
+
+    def _manual_exit_trade(self):
+        try:
+            payload = self._get_manual_exit_payload()
+            if not payload:
+                return
+            from skills.trading.engine.mt5_bridge import bridge
+            self._append_console("TRADING", f"Manual exit requested for {payload['symbol']} on account {payload['account_mode']}.")
+            self._append_console("DEBUG", f"Exit payload: {payload}")
+            response = bridge.send_command("close_position", payload)
+            self._append_console("DEBUG", f"Bridge response: {response}")
+            message = response.get("message") or response.get("error") or response.get("status") or "Manual exit attempted."
+            if response.get("success") is True or response.get("status") == "closed":
+                self.trading_detail_var.set(f"Manual exit successful: {message}")
+                self._append_console("TRADING", f"Manual exit successful: {message}")
+            else:
+                self.trading_detail_var.set(f"Manual exit failed: {message}")
+                self._append_console("TRADING-ERR", f"Manual exit failed: {message}")
+        except Exception as exc:
+            self._append_console("TRADING-ERR", f"Manual exit failed: {exc}")
+            self.trading_detail_var.set(f"Manual exit failed: {exc}")
 
     def _update_avatar(self):
         # Ensure canvas layout is settled before measuring
@@ -1620,10 +1765,8 @@ class AngeliqueDesktopApp(tk.Tk):
 
         self._build_mission_ticker()
         self._create_command_button(self.right_panel, "TRADING HUB", command=self._enter_trading_view)
-        self._create_command_button(self.right_panel, "VOICE ASSIST", command=self._on_voice_command)
-        self._create_command_button(self.right_panel, "SYSTEM DIAGNOSTICS")
-        # Debug bridge button for quick diagnostics
-        self._create_command_button(self.right_panel, "BRIDGE DEBUG", command=self._show_bridge_debug)
+        self._create_command_button(self.right_panel, "VOICE ASSIST", command=self._toggle_audio_mode)
+        self._create_command_button(self.right_panel, "SYSTEM DIAGNOSTICS", command=self._show_system_diagnostics)
         self._create_command_button(self.right_panel, "EXIT ANGELIQUE", command=self._exit_angelique)
 
         divider = tk.Frame(self.right_panel, bg=self._theme("border"), height=1)
@@ -1639,49 +1782,46 @@ class AngeliqueDesktopApp(tk.Tk):
         )
         self._mode_label.pack(anchor="nw", padx=20, pady=(0, 12))
 
-    def _show_bridge_debug(self):
+    def _show_system_diagnostics(self):
+        self._append_console("SYSTEM", "Running local system diagnostics.")
         try:
-            from skills.trading.engine.connection_manager import bridge_manager
-            from skills.trading.engine.mt5_bridge import bridge
-            import socket
+            from core.tools import call_skill
+            health = call_skill("system_monitor.get_system_health", {})
+            if isinstance(health, str):
+                try:
+                    import json
+                    health = json.loads(health)
+                except Exception:
+                    health = {"error": health}
+            top_processes = call_skill("get_running_processes", {"limit": 8})
+            online = self._check_online()
+            mode = "REMOTE MODE ENABLED" if online else "LOCAL MODE ENABLED"
 
-            connected = bridge_manager.get_status()
-            last_err = bridge_manager.get_last_error()
-            host = getattr(bridge_manager, 'host', '127.0.0.1')
-            port = getattr(bridge_manager, 'port', config.MT5_BRIDGE_PORT)
+            if isinstance(health, dict) and health.get("error"):
+                raise RuntimeError(health["error"])
 
-            # Try to find local pid listening on port (best-effort)
-            pid_info = 'unknown'
-            try:
-                import subprocess
-                out = subprocess.check_output(['ss', '-ltnp']).decode('utf-8')
-                lines = [l for l in out.splitlines() if f":{port} " in l or f":{port}\n" in l]
-                pid_info = '\n'.join(lines) if lines else 'none'
-            except Exception:
-                pid_info = 'ss lookup failed'
-
-            demo_info = bridge.get_account_info('demo')
-            live_info = bridge.get_account_info('live')
-
-            msg = (
-                f"Connected: {connected}\n"
-                f"Last error: {last_err}\n"
-                f"Host: {host}\nPort: {port}\nPID info: {pid_info}\n\n"
-                f"DEMO account info: {demo_info}\n\n"
-                f"LIVE account info: {live_info}\n"
-            )
-            try:
-                messagebox.showinfo("Bridge Debug", msg)
-            except Exception:
-                # fallback to appending to transcript
-                self._append_trading_transcript(msg)
-        except Exception as e:
-            try:
-                messagebox.showerror("Bridge Debug Error", f"Failed to collect bridge debug: {e}")
-            except Exception:
-                self._append_trading_transcript(f"Bridge debug failed: {e}")
-
-        self._update_mission_ticker()
+            payload = [
+                "ANGELIQUE SYSTEM DIAGNOSTICS",
+                "",
+                f"Runtime mode: {mode}",
+                f"Internet check: {'online' if online else 'offline'}",
+                f"Hostname: {health.get('hostname', 'unknown')}",
+                f"Platform: {health.get('platform', 'unknown')}",
+                f"CPU: {health.get('cpu_percent', 0)}%",
+                f"CPU cores: {health.get('cpu_cores', 'unknown')}",
+                f"Memory: {health.get('memory_percent', 0)}% ({health.get('memory_used_gb', 0)} / {health.get('memory_total_gb', 0)} GB)",
+                f"Disk: {health.get('disk_percent', 0)}% ({health.get('disk_used_gb', 0)} / {health.get('disk_total_gb', 0)} GB)",
+                f"Uptime: {health.get('uptime_seconds', 0):.1f} seconds",
+                f"Boot time: {health.get('boot_time', 'unknown')}",
+                f"Network sent: {health.get('network_sent_mb', 0)} MB | received: {health.get('network_recv_mb', 0)} MB",
+                "",
+                "TOP PROCESSES",
+                str(top_processes),
+            ]
+            for part in payload:
+                self._append_console("SYSTEM", str(part))
+        except Exception as exc:
+            self._append_console("SYSTEM", f"Failed to gather PC health: {exc}")
 
     def _create_command_button(self, parent, label, command=None):
         button = tk.Button(
@@ -1696,8 +1836,11 @@ class AngeliqueDesktopApp(tk.Tk):
             relief="flat",
             padx=14,
             pady=12,
-            command=command if command is not None else lambda: self._send_command(label),
+            highlightthickness=0,
+            cursor="hand2",
+            command=(lambda: self._send_command(label)) if command is None else command,
         )
+        self._bind_button_feedback(button, command if command is not None else (lambda: self._send_command(label)))
         button.pack(fill="x", padx=20, pady=8)
 
     def _build_bottom_panel(self):
@@ -1934,11 +2077,14 @@ class AngeliqueDesktopApp(tk.Tk):
         self._glow_items = []
         self._scanner_item: int | None = None
         self._scanner_dot: int | None = None
+        self._ring_particles = []
+        self._ring_arc_ids = []
+        self._ring_arc_config = []
 
         theme = self._themes.get(self._theme_name, self._themes["blue"])
-        ring_offsets = [int(size * 0.08), int(size * 0.05), 0, -int(size * 0.08)]
-        ring_lines = [2, 2, 3, 2]
-        ring_colors = [theme["border"], theme["accent"], theme["accent"], theme["border"]]
+        ring_offsets = [int(size * 0.08), int(size * 0.05), 0, -int(size * 0.08), -int(size * 0.12)]
+        ring_lines = [1, 2, 2, 2, 1]
+        ring_colors = [theme["border"], theme["border"], theme["accent"], theme["accent"], theme["border"]]
 
         for offset, width_line, color in zip(ring_offsets, ring_lines, ring_colors):
             ring = radius + offset
@@ -1952,20 +2098,56 @@ class AngeliqueDesktopApp(tk.Tk):
                 tags=("ring",),
             )
 
-        for idx, angle in enumerate(range(0, 360, 30)):
+        for idx, angle in enumerate(range(0, 360, 24)):
             radians = math.radians(angle)
             x = center_x + (radius + int(size * 0.03)) * math.cos(radians)
             y = center_y + (radius + int(size * 0.03)) * math.sin(radians)
             dot = self.ring_canvas.create_oval(
-                x - max(4, int(size * 0.012)),
-                y - max(4, int(size * 0.012)),
-                x + max(4, int(size * 0.012)),
-                y + max(4, int(size * 0.012)),
+                x - max(3, int(size * 0.01)),
+                y - max(3, int(size * 0.01)),
+                x + max(3, int(size * 0.01)),
+                y + max(3, int(size * 0.01)),
                 fill=self._theme("accent"),
                 outline="",
                 tags=("ring",),
             )
             self._glow_items.append(dot)
+
+        for config_idx, (start, extent, radius_offset, stroke) in enumerate([
+            (30, 90, 15, 2),
+            (140, 85, 30, 2),
+            (250, 110, 42, 2),
+        ]):
+            arc_id = self.ring_canvas.create_arc(
+                center_x - (radius + radius_offset),
+                center_y - (radius + radius_offset),
+                center_x + (radius + radius_offset),
+                center_y + (radius + radius_offset),
+                start=start,
+                extent=extent,
+                style="arc",
+                outline=self._theme("accent"),
+                width=stroke,
+                tags=("ring",),
+            )
+            self._ring_arc_ids.append(arc_id)
+            self._ring_arc_config.append((start, extent, radius_offset, stroke, config_idx * 1.7 + 0.6))
+
+        for idx in range(18):
+            angle = (idx / 18) * (2 * math.pi)
+            orbit = radius * 0.88
+            x = center_x + orbit * math.cos(angle)
+            y = center_y + orbit * math.sin(angle)
+            particle = self.ring_canvas.create_oval(
+                x - 2,
+                y - 2,
+                x + 2,
+                y + 2,
+                fill=self._theme("accent"),
+                outline="",
+                tags=("ring",),
+            )
+            self._ring_particles.append((particle, idx * 0.5, orbit, angle, 3))
 
         self._scanner_item = self.ring_canvas.create_line(
             center_x,
@@ -1989,9 +2171,9 @@ class AngeliqueDesktopApp(tk.Tk):
         self.ring_canvas.create_text(
             center_x,
             center_y + int(size * 0.18),
-            text="CORE ONLINE",
+            text="SYNTHESIS CORE",
             fill=self._theme("accent"),
-            font=("Consolas", max(8, int(size * 0.02))),
+            font=("Consolas", max(8, int(size * 0.022))),
             tags=("ring",),
         )
         # Reposition avatar after drawing ring elements to guarantee exact center.
@@ -2010,14 +2192,65 @@ class AngeliqueDesktopApp(tk.Tk):
         except Exception:
             pass
 
+    def _set_avatar_status(self, mode: str | None, text: str | None = None):
+        if self._avatar_status_blink_job is not None:
+            self.after_cancel(self._avatar_status_blink_job)
+            self._avatar_status_blink_job = None
+
+        if mode is None:
+            if self._avatar_status_text_id is not None:
+                try:
+                    self.ring_canvas.delete(self._avatar_status_text_id)
+                except Exception:
+                    pass
+                self._avatar_status_text_id = None
+            self._avatar_status_mode = None
+            self._avatar_status_dot_count = 0
+            return
+
+        if self.ring_canvas is None:
+            return
+
+        if self._avatar_status_text_id is None:
+            width = self.ring_canvas.winfo_width() or 520
+            height = self.ring_canvas.winfo_height() or 520
+            center_x = width // 2
+            center_y = height // 2
+            self._avatar_status_text_id = self.ring_canvas.create_text(
+                center_x,
+                int(center_y + min(width, height) * 0.28),
+                text="",
+                fill=self._theme("accent"),
+                font=("Consolas", max(10, int(min(width, height) * 0.024)), "bold"),
+                tags=("ring",),
+            )
+
+        self._avatar_status_mode = mode
+        self._avatar_status_dot_count = 0
+        self._animate_avatar_status()
+
+    def _animate_avatar_status(self):
+        if self._avatar_status_text_id is None or self.ring_canvas is None:
+            self._avatar_status_blink_job = None
+            return
+        try:
+            self._avatar_status_dot_count = (self._avatar_status_dot_count + 1) % 4
+            dots = "." * self._avatar_status_dot_count
+            label = "THINKING" if self._avatar_status_mode == "PROCESSING" else "LISTENING"
+            self.ring_canvas.itemconfigure(self._avatar_status_text_id, text=f"{label}{dots}")
+            self.ring_canvas.tag_raise(self._avatar_status_text_id)
+        except Exception:
+            pass
+        self._avatar_status_blink_job = self.after(400, self._animate_avatar_status)
+
     def _animate_ring(self):
-        self._animation_phase += 0.12
+        self._ring_animation_job = None
+        self._animation_phase += 0.16
         self._scanner_angle = (self._scanner_angle + 3) % 360
 
-        for idx, item in enumerate(self._glow_items):
-            intensity = (math.sin(self._animation_phase + idx * 0.8) + 1) / 2
-            color = self._theme("accent")
-            self.ring_canvas.itemconfigure(item, fill=color)
+        if self._glow_items:
+            for idx, item in enumerate(self._glow_items):
+                self.ring_canvas.itemconfigure(item, fill=self._theme("accent"))
 
         try:
             self.ring_canvas.update_idletasks()
@@ -2049,17 +2282,35 @@ class AngeliqueDesktopApp(tk.Tk):
                 fill=self._theme("accent"),
                 outline="",
             )
-        # Keep avatar above animated elements
+
+        for particle, phase_offset, orbit_radius, base_angle, radius_delta in self._ring_particles:
+            orbit_radians = base_angle + self._animation_phase * 0.9 + phase_offset
+            px = center_x + (orbit_radius * 0.9 + math.sin(self._animation_phase + phase_offset) * 22) * math.cos(orbit_radians)
+            py = center_y + (orbit_radius * 0.9 + math.sin(self._animation_phase + phase_offset) * 22) * math.sin(orbit_radians)
+            self.ring_canvas.coords(particle, px - radius_delta, py - radius_delta, px + radius_delta, py + radius_delta)
+
+        for idx, arc_id in enumerate(self._ring_arc_ids):
+            start, extent, radius_offset, stroke, speed = self._ring_arc_config[idx]
+            new_start = (start + self._animation_phase * 18 * speed) % 360
+            new_extent = extent + int(12 * math.sin(self._animation_phase * 1.3 + idx))
+            self.ring_canvas.itemconfigure(arc_id, start=new_start, extent=new_extent)
+
         avatar_canvas_id = getattr(self, "_avatar_canvas_id", None)
         if avatar_canvas_id is not None:
             try:
                 self.ring_canvas.tag_raise(avatar_canvas_id)
-                # ensure precise center alignment while animating
                 self.ring_canvas.coords(avatar_canvas_id, int(center_x), int(center_y))
             except Exception:
                 pass
 
-        self.after(80, self._animate_ring)
+        if self._avatar_status_text_id is not None:
+            try:
+                self.ring_canvas.coords(self._avatar_status_text_id, int(center_x), int(center_y + size * 0.28))
+                self.ring_canvas.tag_raise(self._avatar_status_text_id)
+            except Exception:
+                pass
+
+        self._ring_animation_job = self.after(40, self._animate_ring)
 
     def _build_mission_ticker(self):
         ticker_frame = tk.Frame(self.right_panel, bg=self._theme("panel_alt"), bd=1, relief="solid")
@@ -2264,8 +2515,13 @@ class AngeliqueDesktopApp(tk.Tk):
         self._append_console("SYSTEM", "Trading hub opened in the center panel.")
 
     def _send_command(self, label: str):
+        if self._command_in_progress:
+            self._append_console("SYSTEM", "Angelique is still processing the previous request.")
+            return
+        self._command_in_progress = True
         self._append_console("USER", label)
         self._append_console("ANGELIQUE", "Processing your request...")
+        self._set_avatar_status("PROCESSING")
         self.footer_label.configure(text=self._footer_text("PROCESSING"))
         threading.Thread(target=self._process_command, args=(label,), daemon=True).start()
 
@@ -2279,34 +2535,7 @@ class AngeliqueDesktopApp(tk.Tk):
         return normalized
 
     def _on_voice_command(self):
-        if self._listen is None:
-            self._append_console("SYSTEM", "Voice interface is unavailable.")
-            return
-
-        self._append_console("SYSTEM", "Listening for voice input...")
-        self.footer_label.configure(text=self._footer_text("LISTENING"))
-
-        def voice_thread():
-            spoken = self._listen() if self._listen is not None else ""
-            if not spoken:
-                self.after(0, lambda: self._append_console("SYSTEM", "No speech detected."))
-                self.after(0, lambda: self.footer_label.configure(text=self._footer_text("READY")))
-                return
-
-            cleaned = self._normalize_voice_command(spoken)
-            if cleaned:
-                spoken = cleaned
-
-            self.after(0, lambda: self.input_entry.delete(0, tk.END))
-            self.after(0, lambda: self.input_entry.insert(0, spoken))
-            self.after(0, lambda: setattr(self, "_input_placeholder_active", False))
-            self.after(0, lambda: self.input_entry.config(fg=self._theme("text")))
-            self.after(0, lambda: self._append_console("USER", spoken))
-            self.after(0, lambda: self._append_console("ANGELIQUE", "Processing your spoken command..."))
-            self.after(0, lambda: self.footer_label.configure(text=self._footer_text("PROCESSING")))
-            self._process_command(spoken)
-
-        threading.Thread(target=voice_thread, daemon=True).start()
+        self._toggle_audio_mode()
 
     def _toggle_audio_mode(self):
         self._audio_enabled = not getattr(self, "_audio_enabled", False)
@@ -2316,11 +2545,19 @@ class AngeliqueDesktopApp(tk.Tk):
         except Exception:
             pass
         if self._audio_enabled:
-            self._append_console("SYSTEM", "Voice mode enabled. Starting continuous listening...")
+            if self._listen is None:
+                self._append_console("SYSTEM", "Voice interface is unavailable. Cannot start listening.")
+                self._audio_enabled = False
+                self.mic_button.configure(text="⌨️")
+                self._input_mode_label.configure(text="TEXT MODE")
+                return
+            self._append_console("SYSTEM", "Voice assist activated. Listening continuously...")
+            self._set_avatar_status("LISTENING")
             self.footer_label.configure(text=self._footer_text("LISTENING"))
             self._start_voice_listener()
         else:
-            self._append_console("SYSTEM", "Text mode enabled. Voice listening stopped.")
+            self._append_console("SYSTEM", "Voice assist deactivated. Listening stopped.")
+            self._set_avatar_status(None)
             self.footer_label.configure(text=self._footer_text("READY"))
             self._stop_voice_listener()
 
@@ -2339,12 +2576,16 @@ class AngeliqueDesktopApp(tk.Tk):
             return
         if self._voice_listener_thread is not None and self._voice_listener_thread.is_alive():
             return
+        if self._stop_listening is None:
+            self._stop_listening = threading.Event()
+        else:
+            self._stop_listening = threading.Event()
         self._stop_listening.clear()
         self._voice_listener_thread = threading.Thread(target=self._voice_listener_loop, daemon=True)
         self._voice_listener_thread.start()
 
     def _stop_voice_listener(self):
-        if getattr(self, "_stop_listening", None):
+        if getattr(self, "_stop_listening", None) is not None:
             self._stop_listening.set()
         if self._voice_listener_thread is not None:
             self._voice_listener_thread.join(timeout=0.5)
@@ -2365,14 +2606,23 @@ class AngeliqueDesktopApp(tk.Tk):
             self.after(0, lambda text=spoken: self.input_entry.insert(0, text))
             self.after(0, lambda: self._append_console("USER", spoken))
             self.after(0, lambda: self._append_console("ANGELIQUE", "Processing voice command..."))
+            self.after(0, lambda: self._set_avatar_status("PROCESSING"))
             self.after(0, lambda: self.footer_label.configure(text=self._footer_text("PROCESSING")))
             self._process_command(spoken)
             time.sleep(0.2)
+        self.after(0, lambda: self._set_avatar_status(None))
         self.after(0, lambda: self.footer_label.configure(text=self._footer_text("READY")))
 
     def _footer_text(self, status=None):
         status_text = status if status is not None else self._system_stats.get("status", "READY")
-        return f"CPU {self._system_stats.get('cpu', 0)}%  |  MEMORY {self._system_stats.get('memory', 0)}%  |  NETWORK {self._system_stats.get('network_mbps', 0.0):.1f} Mbps  | STATUS: {status_text}"
+        detail = ""
+        if status_text == "PROCESSING":
+            detail = " • THINKING..."
+        elif status_text == "LISTENING":
+            detail = " • LISTENING..."
+        elif status_text == "READY":
+            detail = " • READY"
+        return f"CPU {self._system_stats.get('cpu', 0)}%  |  MEMORY {self._system_stats.get('memory', 0)}%  |  NETWORK {self._system_stats.get('network_mbps', 0.0):.1f} Mbps  | STATUS: {status_text}{detail}"
 
     def _on_send(self, event=None):
         if getattr(self, "_input_placeholder_active", False):
@@ -2380,11 +2630,16 @@ class AngeliqueDesktopApp(tk.Tk):
         text = self.input_entry.get().strip()
         if not text:
             return
+        if self._command_in_progress:
+            self._append_console("SYSTEM", "Angelique is still processing the previous request.")
+            return
+        self._command_in_progress = True
         self.input_entry.delete(0, tk.END)
         if getattr(self, "_training_mode_enabled", False):
             text = f"[[TRAINING_MODE]] {text}"
         self._append_console("USER", text)
         self._append_console("ANGELIQUE", "Command received. Processing locally in the desktop interface.")
+        self._set_avatar_status("PROCESSING")
         self.footer_label.configure(text=self._footer_text("PROCESSING"))
         threading.Thread(target=self._process_command, args=(text,), daemon=True).start()
 
@@ -2754,6 +3009,8 @@ class AngeliqueDesktopApp(tk.Tk):
 
         normalized = text.strip().lower()
         if self._handle_local_control_command(normalized):
+            self._command_in_progress = False
+            self.after(0, lambda: self._set_avatar_status(None))
             self.after(0, lambda: self.footer_label.configure(text=self._footer_text("READY")))
             return
         if self.backend is None:
@@ -3031,11 +3288,18 @@ class AngeliqueDesktopApp(tk.Tk):
         self.speech_toggle.configure(text=label)
         status = "enabled" if self._speak_enabled else "disabled"
         self._append_console("SYSTEM", f"Voice output {status}.")
+        try:
+            from skills.voice.voice_interface import set_speech_enabled
+            set_speech_enabled(self._speak_enabled)
+        except Exception:
+            pass
 
     def _finish_response(self, response: str):
         if getattr(self, "_shutting_down", False):
             return
         self._append_console("ANGELIQUE", response)
+        self._command_in_progress = False
+        self._set_avatar_status(None)
         self.footer_label.configure(text=self._footer_text("READY"))
 
     def _start_move(self, event):

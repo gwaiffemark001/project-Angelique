@@ -28,7 +28,17 @@ ELEVENLABS_MODEL = config.ELEVENLABS_MODEL
 EDGE_TTS_VOICE = config.EDGE_TTS_VOICE
 
 IS_SPEAKING = False
+SPEECH_ENABLED = True
 speech_lock = threading.Lock()
+
+
+def is_speech_enabled() -> bool:
+    return SPEECH_ENABLED
+
+
+def set_speech_enabled(enabled: bool):
+    global SPEECH_ENABLED
+    SPEECH_ENABLED = bool(enabled)
 
 
 def _is_online() -> bool:
@@ -59,6 +69,10 @@ def _play_audio_file(file_path: str):
 
 def speak(text: str):
     global IS_SPEAKING
+
+    if not SPEECH_ENABLED:
+        print("⚠️ [Voice] Speech output disabled by user.")
+        return
 
     if not _is_online():
         print("⚠️ [Voice] Offline mode: speech output disabled.")
@@ -141,6 +155,9 @@ def speak(text: str):
 
 def listen() -> str:
     global IS_SPEAKING
+
+    if not SPEECH_ENABLED:
+        return ""
 
     if not _is_online():
         return ""

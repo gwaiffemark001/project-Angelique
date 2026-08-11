@@ -12,6 +12,7 @@ DEFAULT_ELIGIBLE_BASES = (
     "AUDUSD",
     "NZDUSD",
     "XAUUSD",
+    "AUDCAD",
 )
 
 

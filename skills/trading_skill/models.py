@@ -16,6 +16,9 @@ class WorkflowState(str, Enum):
     EXECUTED = "EXECUTED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
+    NO_SETUP = "NO_SETUP"
+    WAITING_FOR_CONFIRMATION = "WAITING_FOR_CONFIRMATION"
+    TRADE_READY = "TRADE_READY"
 
 
 @dataclass(frozen=True)

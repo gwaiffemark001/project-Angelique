@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .compat import build_default_workflow
 from .universe import eligible_symbols
+from .journal import record_trade
 
 _workflow = None
 
@@ -34,7 +35,10 @@ def approve_trade(confirmation_phrase: str):
 
 
 def execute_trade(confirmation_phrase: str):
-    return workflow().execute(confirmation_phrase)
+    result = workflow().execute(confirmation_phrase)
+    if result.state.value == "EXECUTED" and result.plan is not None:
+        record_trade(result.plan.as_dict(), result.details)
+    return result
 
 
 def monitor_universe(account_mode: str = "demo"):
@@ -46,5 +50,11 @@ def monitor_universe(account_mode: str = "demo"):
         result = active.prepare(symbol, account_mode)
         results.append({"symbol": symbol, "state": result.state.value, "message": result.message, "result": result})
         if result.plan is not None:
-            return {"state": "OPPORTUNITY_FOUND", "candidates": candidates, "scanned": len(results), "opportunity": {"state": result.state.value, "message": result.message, "plan": result.plan.as_dict(), "account": result.account, "market": result.market, "details": result.details}}
+            from brain.cognitive_loop import review_market_opportunity
+            candidate = {"symbol": symbol, "plan": result.plan.as_dict(), "market": result.market, "analysis": result.details.get("analysis", {})}
+            review = review_market_opportunity(candidate)
+            if review["decision"] != "PLAN":
+                results[-1]["brain_review"] = review
+                continue
+            return {"state": "OPPORTUNITY_FOUND", "candidates": candidates, "scanned": len(results), "opportunity": {"state": result.state.value, "message": result.message, "plan": result.plan.as_dict(), "account": result.account, "market": result.market, "details": result.details, "brain_review": review}}
     return {"state": "WAITING", "candidates": candidates, "scanned": len(results), "results": results}

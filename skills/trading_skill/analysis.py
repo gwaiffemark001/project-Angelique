@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from typing import Any
-from .indicators import snapshot
+
+from .context import build_market_context
+from .confluence import evaluate_confluence
 
 
 def _trend(candles: list[dict[str, Any]]) -> str:
@@ -16,32 +18,47 @@ def _trend(candles: list[dict[str, Any]]) -> str:
 
 
 def analyze_structure(timeframes: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    trends = {timeframe: _trend(candles) for timeframe, candles in timeframes.items()}
-    indicator_data = {timeframe: snapshot(candles) for timeframe, candles in timeframes.items()}
+    context = build_market_context(timeframes)
+    trends = context.trends
+    indicator_data = context.indicators
+    smc_data = context.smc
     higher = trends.get("H4", "unknown")
     intermediate = trends.get("H1", "unknown")
     setup = trends.get("M15", "unknown")
     confirmation = trends.get("M5", "unknown")
     if "unknown" in trends.values():
-        return {"valid": False, "reason": "Insufficient candles for the required multi-timeframe analysis.", "trends": trends, "indicators": indicator_data}
+        return {"valid": False, "reason": "Insufficient candles for the required multi-timeframe analysis.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
     if higher not in {"bullish", "bearish"}:
-        return {"valid": False, "reason": "Higher-timeframe market structure is not directional.", "trends": trends, "indicators": indicator_data}
+        return {"valid": False, "reason": "Higher-timeframe market structure is not directional.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
     if intermediate != higher or setup != higher or confirmation != higher:
-        return {"valid": False, "reason": "The required timeframes conflict; no aligned setup exists.", "trends": trends, "indicators": indicator_data}
+        return {"valid": False, "reason": "The required timeframes conflict; no aligned setup exists.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
+
     direction = "BUY" if higher == "bullish" else "SELL"
     indicator_reasons = []
     for timeframe, values in indicator_data.items():
         if values.get("status") != "ready":
-            return {"valid": False, "reason": f"Indicators are unavailable on {timeframe}.", "trends": trends, "indicators": indicator_data}
+            return {"valid": False, "reason": f"Indicators are unavailable on {timeframe}.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
         last_close = float(values["last_close"])
         ema_ok = last_close >= float(values["ema_20"]) >= float(values["ema_50"]) if direction == "BUY" else last_close <= float(values["ema_20"]) <= float(values["ema_50"])
         macd_ok = float(values["macd"]) >= 0 if direction == "BUY" else float(values["macd"]) <= 0
         rsi_ok = float(values["rsi_14"]) >= 50 if direction == "BUY" else float(values["rsi_14"]) <= 50
-        last_close = float(values["last_close"])
         middle = float(values["bollinger_middle"])
         upper = float(values["bollinger_upper"])
         lower = float(values["bollinger_lower"])
         band_position = "upper half" if last_close >= middle else "lower half"
         band_valid = lower <= last_close <= upper
         indicator_reasons.append(f"{timeframe}: EMA {'aligned' if ema_ok else 'mixed'}, RSI {float(values['rsi_14']):.1f} {'aligned' if rsi_ok else 'mixed'}, MACD {'aligned' if macd_ok else 'mixed'}, Bollinger {band_position} {'inside bands' if band_valid else 'outside bands'}, ATR {float(values['atr_14']):.6f}")
-    return {"valid": True, "direction": direction, "trends": trends, "indicators": indicator_data, "reason": f"H4, H1, M15, and M5 structure align {higher}.", "indicator_reasons": indicator_reasons}
+
+    smc_reasons = []
+    for timeframe, values in smc_data.items():
+        sweep = values.get("liquidity_sweep") or "none"
+        shift = values.get("structure_shift") or "none"
+        gaps = len(values.get("fair_value_gaps", []))
+        block = values.get("order_block")
+        smc_reasons.append(f"{timeframe}: liquidity={sweep}, shift={shift}, FVGs={gaps}, order_block={block.get('type') if isinstance(block, dict) else 'none'}, location={values.get('location', 'unknown')}")
+
+    confluence = evaluate_confluence(direction, trends, indicator_data, smc_data)
+    if not confluence["ready"]:
+        return {"valid": False, "reason": "The setup lacks enough confluence; indicators and SMC are not aligned strongly enough to plan a trade.", "trends": trends, "indicators": indicator_data, "smc": smc_data, "confluence": confluence}
+
+    return {"valid": True, "direction": direction, "trends": trends, "indicators": indicator_data, "smc": smc_data, "reason": f"H4, H1, M15, and M5 structure align {higher}.", "indicator_reasons": indicator_reasons, "smc_reasons": smc_reasons, "confluence": confluence}

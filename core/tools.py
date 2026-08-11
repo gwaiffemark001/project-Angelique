@@ -1,6 +1,10 @@
 # core/tools.py
 import inspect
+import json
 import subprocess
+from pathlib import Path
+import pkgutil
+import importlib
 from skills.os_control.app_discovery import open_app, get_installed_apps, close_app, list_apps as list_all_apps, check_installed
 from skills.memory.memory_tools import save_fact, recall_facts
 from skills.os_control.system_cmds import (
@@ -18,6 +22,59 @@ from skills.self_evolution.code_generator import (
 from skills.vision.image_generator import generate_image
 from skills.vision.file_analyzer import analyze_file, analyze_directory
 from skills.web.search_tools import search_web
+
+def _discover_skill_functions():
+    """Discover callable skill functions across the project dynamically."""
+    discovered = {}
+    try:
+        root = Path(__file__).resolve().parent.parent / "skills"
+        if not root.exists():
+            return discovered
+        for module_info in pkgutil.walk_packages([str(root)], prefix="skills."):
+            try:
+                module = importlib.import_module(module_info.name)
+            except Exception:
+                continue
+            for name in dir(module):
+                value = getattr(module, name)
+                if callable(value):
+                    key = getattr(value, "__name__", name)
+                    discovered[name.lower()] = value
+                    discovered[key.lower()] = value
+                    discovered[(module_info.name + "." + key).lower()] = value
+                    discovered[(module_info.name).lower()] = value
+    except Exception:
+        pass
+    return discovered
+
+
+def call_skill(skill_name: str, args: dict | None = None):
+    """Invoke a skill by name, module path, or function name when it is not already registered as a direct tool."""
+    if not skill_name:
+        return "Error: no skill name provided."
+    if args is None:
+        args = {}
+
+    registry = globals().get("TOOL_REGISTRY", {})
+    normalized = str(skill_name).strip()
+    if normalized in registry:
+        return registry[normalized]["function"](**args)
+
+    lookup = normalized.lower().replace("-", "_").replace(" ", "_")
+    candidates = _discover_skill_functions()
+    for candidate_key in (lookup, normalized.lower(), normalized.lower().replace(".", "_")):
+        if candidate_key in candidates:
+            return candidates[candidate_key](**args)
+
+    for key, func in candidates.items():
+        if lookup in key or normalized.lower() in key:
+            try:
+                return func(**args)
+            except TypeError:
+                return func()
+
+    return f"Error: skill '{skill_name}' not found or could not be invoked."
+
 
 # Lazy-import vision screen/camera tools to avoid X11/display failures when optional GUI dependencies are unavailable.
 _screen_tools = None
@@ -309,6 +366,16 @@ TOOL_REGISTRY = {
     # ============================================================
     # TRADING ENGINE TOOLS
     # ============================================================
+    "call_skill": {
+        "description": "Invoke a skill dynamically by name, module path, or function name when the user asks for a capability not already mapped to a direct tool.",
+        "parameters": {"skill_name": "Skill name or module path, e.g. 'system_cmds.get_system_health' or 'system health'", "args": "Optional keyword arguments to pass to the skill"},
+        "function": lambda skill_name, args=None: call_skill(skill_name, args or {}),
+    },
+    "system_monitor.get_system_health": {
+        "description": "Directly invoke the PC system health skill.",
+        "parameters": {},
+        "function": lambda: sys_health(),
+    },
     "check_mt5_status": {
         "description": "Check if MT5 Bridge is connected and terminal running.",
         "parameters": {},
@@ -320,7 +387,7 @@ TOOL_REGISTRY = {
         "function": lambda: bridge.get_account_info(),
     },
     "analyze_market_and_recommend": {
-        "description": "Prepare a deterministic multi-timeframe trade plan. Never executes; returns a plan requiring exact user approval.",
+        "description": "Prepare a deterministic multi-timeframe trade plan with confluence scoring, safety validation, and exact user approval required before execution.",
         "parameters": {
             "symbol": "Trading pair (e.g., 'EURUSD', 'XAUUSD')",
             "timeframe": "Chart timeframe (e.g., 'M15', 'H1', 'H4')",
@@ -355,7 +422,14 @@ import json
 
 def execute_tool(tool_name: str, args: dict) -> str:
     if tool_name not in TOOL_REGISTRY:
+        try:
+            fallback = call_skill(tool_name, args or {})
+        except Exception:
+            fallback = None
+        if fallback is not None and not str(fallback).startswith("Error: skill "):
+            return fallback
         return f"Error: Tool '{tool_name}' not found."
+
     tool = TOOL_REGISTRY[tool_name]
     func = tool["function"]
     try:

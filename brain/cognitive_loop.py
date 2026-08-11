@@ -15,6 +15,26 @@ from skills.conversation.chat_skill import (
 )
 
 
+def review_market_opportunity(opportunity: dict) -> dict:
+    """Ask Angelique's main loop to review a deterministic market candidate.
+
+    The brain decides whether the candidate deserves a plan; the deterministic
+    trading workflow remains responsible for prices, volume, margin, and safety.
+    """
+    from skills.trading_skill.journal import read_trades
+
+    recent_trades = read_trades(limit=10)
+    prompt = json.dumps({
+        "internal_event": "market_opportunity_review",
+        "instruction": "Review this candidate using prior trades. Reply with PLAN or WAIT first, then a concise reason. Do not invent prices or execute anything.",
+        "candidate": opportunity,
+        "recent_trades": recent_trades,
+    }, default=str)
+    response = run_cognitive_loop(prompt)
+    decision = "PLAN" if response.strip().upper().startswith("PLAN") else "WAIT"
+    return {"decision": decision, "response": response, "recent_trades": recent_trades}
+
+
 def _is_short_followup_reply(user_input: str) -> bool:
     normalized = (user_input or "").strip().lower()
     if not normalized:
@@ -160,21 +180,52 @@ def _is_identity_question(user_input: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in legacy_patterns)
 
 
+def _looks_like_action_request(user_input: str) -> bool:
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return False
+    action_prefixes = (
+        "open", "close", "launch", "start", "stop", "create", "make", "delete", "remove",
+        "move", "rename", "save", "write", "search", "find", "check", "show", "list",
+        "run", "execute", "use", "call", "invoke", "send", "text", "message", "toggle",
+        "copy", "install", "uninstall", "browse", "look", "speak", "play"
+    )
+    if normalized.startswith(action_prefixes):
+        return True
+    return bool(re.search(r"\b(?:please|now|for me|on the desktop|on my computer|on whatsapp|in the browser)\b", normalized))
+
+
 def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
     """High-level coordinated query resolver.
 
     Steps:
     1. "Think": silently extract facts from the user's input and persist them.
-    2. Check conversation memory when appropriate.
-    3. Check fact/knowledge memory when appropriate.
-    4. If nothing is found, query external LLMs (and other models) via `query_llm`.
-    5. Persist any new facts discovered from external answers.
+    2. Check for direct tool/skill dispatch first for actionable requests.
+    3. Check conversation memory when appropriate.
+    4. Check fact/knowledge memory when appropriate.
+    5. If nothing is found, query external LLMs (and other models) via `query_llm`.
+    6. Persist any new facts discovered from external answers.
 
-    Returns a dict with keys: `source` (one of 'conversation','fact','llm'), `answer`, and `details`.
+    Returns a dict with keys: `source` (one of 'conversation','fact','tool','llm'), `answer`, and `details`.
     """
     text = _strip_training_mode_prefix(user_input)
 
-    # 1) Think: extract facts silently and persist them
+    tool_name, args = nlp_to_tool_mapping(text)
+    if tool_name:
+        try:
+            result = execute_tool(tool_name, args)
+            return {"source": "tool", "answer": result, "details": {"tool": tool_name, "args": args}}
+        except Exception as exc:
+            return {"source": "tool", "answer": f"Tool execution failed: {exc}", "details": {"tool": tool_name, "args": args, "error": str(exc)}}
+
+    if _looks_like_action_request(text) and not _is_simple_question(text):
+        try:
+            action_response = run_cognitive_loop(text)
+            return {"source": "tool", "answer": action_response, "details": {"action_loop": True}}
+        except Exception as exc:
+            return {"source": "error", "answer": f"Action routing failed: {exc}", "details": {"error": str(exc)}}
+
+    # 1) Think: silently extract facts and persist them for non-action requests
     try:
         extract_facts_silently(text)
     except Exception:
