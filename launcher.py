@@ -80,9 +80,20 @@ def _to_windows_path(path: str) -> str:
 
 
 def _get_wine_bridge_command() -> list[str] | None:
-    for exe in ("wine", "wine64"):
-        if shutil.which(exe):
-            return [exe, "cmd", "/c", "python"]
+    candidates = [
+        "wine64 cmd /c python",
+        "wine cmd /c python",
+        "wine64 python",
+        "wine python",
+        "wine64 cmd /c python.exe",
+        "wine cmd /c python.exe",
+    ]
+    for candidate in candidates:
+        parts = shlex.split(candidate)
+        if not parts:
+            continue
+        if shutil.which(parts[0]):
+            return parts
     return None
 
 
@@ -123,7 +134,12 @@ if __name__ == "__main__":
                 print("Wine is not available; cannot launch MT5 bridge.")
                 raise SystemExit(1)
             windows_bridge_script = _to_windows_path(bridge_script)
-            subprocess.run(wine_cmd + [windows_bridge_script], cwd=ROOT)
+            result = subprocess.run(wine_cmd + [windows_bridge_script], cwd=ROOT, capture_output=True, text=True)
+            print(result.stdout or "", end="")
+            print(result.stderr or "", end="")
+            if result.returncode != 0:
+                print(f"MT5 bridge launcher exited with code {result.returncode}")
+                raise SystemExit(result.returncode)
         elif sys.argv[1] == "--start-bridge-bg":
             # Start the demo MT5 bridge server in background and return via Wine
             bridge_script = os.path.join(ROOT, "skills", "trading_skill", "wine_server.py")

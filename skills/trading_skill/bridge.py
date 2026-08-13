@@ -32,12 +32,17 @@ class WineBridgeClient:
             "symbols": "list_instruments",
             "market": "get_rates",
             "execute": "place_order",
+            "positions": "positions",
+            "get_positions": "positions",
             "ping": "ping",
         }
         request = {"operation": operation, "action": legacy_actions.get(operation, operation), **payload}
         if operation == "market":
-            timeframes = payload.get("timeframes") or [payload.get("timeframe", "H1")]
-            request["timeframe"] = timeframes[0]
+            timeframes = payload.get("timeframes")
+            if timeframes:
+                request["timeframes"] = timeframes
+            else:
+                request["timeframe"] = payload.get("timeframe", "H1")
         client = websocket.create_connection(self.url, timeout=self.timeout)
         client.send(json.dumps(request))
         response = json.loads(client.recv())
@@ -45,17 +50,11 @@ class WineBridgeClient:
         response = response if isinstance(response, dict) else {"data": response}
         if operation == "symbols" and "symbols" not in response and "instruments" in response:
             response["symbols"] = response["instruments"]
+        if operation == "positions" and "positions" not in response and "data" in response:
+            response["positions"] = response["data"]
         if operation == "market" and "timeframes" not in response:
             candles = response.get("candles") or response.get("rates") or []
             timeframe = request.get("timeframe", "H1")
             response["timeframes"] = {timeframe: candles}
             response.setdefault("status", "connected" if candles else "error")
-            requested_timeframes = list(payload.get("timeframes") or [])
-            for extra_timeframe in requested_timeframes[1:]:
-                extra_payload = {**payload, "timeframe": extra_timeframe}
-                extra_payload.pop("timeframes", None)
-                extra = self._request_once("market", extra_payload)
-                response["timeframes"][extra_timeframe] = (extra.get("candles") or extra.get("rates") or extra.get("timeframes", {}).get(extra_timeframe, []))
-                if extra.get("error") and not response.get("error"):
-                    response["error"] = extra["error"]
         return response

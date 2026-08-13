@@ -1,0 +1,7 @@
+[
+  {
+    "timestamp": "2026-08-12T05:05:07.270116Z",
+    "user": "[[TRAINING_MODE]] \"Angelique, I am initiating your core training. Memorize these facts about me with maximum importance, 10 out of 10.\nMy name is Eng Dr Mark.My girlfriend's name is Angelique Moesha so my girlfriend is called Angelique Moesha\nMy primary trading platform is Exness MetaTrader 5.\nMy absolute maximum risk per trade is 1 percent of my account balance.\nI never enter a trade without a minimum 1 to 2 Risk-to-Reward ratio.\nI do not trade 30 minutes before or after high-impact news events like NFP, CPI, or FOMC.\nYou must always present trade recommendations in a structured format including Direction, Entry, Stop Loss, Take Profit, Lot Size, Risk-to-Reward ratio, Confidence Score, and Reasoning.\nYou must always ask for my explicit confirmation before executing any trade.\nConfirm that you have memorized these core directives.\"",
+    "agent": "{\"error\": \"[Errno 111] Connection refused\", \"status\": \"error\"}"
+  }
+]

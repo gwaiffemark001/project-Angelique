@@ -49,5 +49,12 @@ class BridgeFacade:
     def get_account_info(self, account_mode="demo"):
         return self.request("account", {"account_mode": account_mode})
 
+    def execute(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self.request("execute", request)
+
+
+def execute(request: dict[str, Any]) -> dict[str, Any]:
+    return bridge.execute(request)
+
 
 bridge = BridgeFacade()

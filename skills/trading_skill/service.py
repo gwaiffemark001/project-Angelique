@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from .account_manager import account_manager
 from .compat import build_default_workflow
-from .universe import eligible_symbols
 from .journal import record_trade
+from .event_logging import log_event
+from .position_monitor import position_monitor
+from .universe import eligible_symbols
 
 _workflow = None
 
@@ -14,14 +17,29 @@ def workflow():
     return _workflow
 
 
+def get_account_snapshot(account_mode: str = "demo", force_refresh: bool = False):
+    authorized, message, snapshot = account_manager.validate_authorization(account_mode)
+    if force_refresh:
+        snapshot = account_manager.get_snapshot(account_mode, True)
+    return {"authorized": authorized, "message": message, "snapshot": snapshot}
+
+
+def get_open_positions(account_mode: str = "demo", symbol: str | None = None):
+    return position_monitor.get_open_positions(account_mode, symbol)
+
+
 def prepare_trade(symbol: str, account_mode: str = "demo"):
     return workflow().prepare(symbol, account_mode)
 
 
 def prepare_trade_payload(symbol: str, account_mode: str = "demo", risk_percent: float = 1.0):
     active = workflow()
+    previous_risk = active.risk_percent
     active.risk_percent = risk_percent
-    result = active.prepare(symbol, account_mode)
+    try:
+        result = active.prepare(symbol, account_mode)
+    finally:
+        active.risk_percent = previous_risk
     return {
         "state": result.state.value,
         "message": result.message,
@@ -41,20 +59,63 @@ def execute_trade(confirmation_phrase: str):
     return result
 
 
-def monitor_universe(account_mode: str = "demo"):
+def scan_universe(account_mode: str = "demo"):
     active = workflow()
     available = active.adapter.symbols(account_mode)
     candidates = eligible_symbols(available)
     results = []
     for symbol in candidates:
         result = active.prepare(symbol, account_mode)
-        results.append({"symbol": symbol, "state": result.state.value, "message": result.message, "result": result})
+        entry = {
+            "symbol": symbol,
+            "state": result.state.value,
+            "message": result.message,
+            "result": result,
+        }
+        results.append(entry)
         if result.plan is not None:
-            from brain.cognitive_loop import review_market_opportunity
-            candidate = {"symbol": symbol, "plan": result.plan.as_dict(), "market": result.market, "analysis": result.details.get("analysis", {})}
-            review = review_market_opportunity(candidate)
-            if review["decision"] != "PLAN":
-                results[-1]["brain_review"] = review
-                continue
-            return {"state": "OPPORTUNITY_FOUND", "candidates": candidates, "scanned": len(results), "opportunity": {"state": result.state.value, "message": result.message, "plan": result.plan.as_dict(), "account": result.account, "market": result.market, "details": result.details, "brain_review": review}}
+            return {
+                "state": "OPPORTUNITY_FOUND",
+                "candidates": candidates,
+                "scanned": len(results),
+                "opportunity": {
+                    "state": result.state.value,
+                    "message": result.message,
+                    "plan": result.plan.as_dict(),
+                    "account": result.account,
+                    "market": result.market,
+                    "details": result.details,
+                    "candidate": entry,
+                },
+            }
     return {"state": "WAITING", "candidates": candidates, "scanned": len(results), "results": results}
+
+
+def monitor_universe(account_mode: str = "demo"):
+    scan = scan_universe(account_mode)
+    if scan["state"] != "OPPORTUNITY_FOUND":
+        log_event(20, "service.monitor_universe.waiting", account_mode=account_mode, scanned=scan["scanned"])
+        return scan
+
+    opportunity = scan["opportunity"]
+    from brain.cognitive_loop import review_market_opportunity
+
+    candidate = {
+        "symbol": opportunity["candidate"]["symbol"],
+        "plan": opportunity["plan"],
+        "market": opportunity["market"],
+        "analysis": opportunity["details"].get("analysis", {}),
+    }
+    review = review_market_opportunity(candidate)
+    if review["decision"] != "PLAN":
+        log_event(20, "service.monitor_universe.review_rejected", account_mode=account_mode, symbol=candidate["symbol"], decision=review["decision"])
+        opportunity["brain_review"] = review
+        return {**scan, "state": "WAITING", "opportunity": opportunity}
+
+    log_event(20, "service.monitor_universe.opportunity_confirmed", account_mode=account_mode, symbol=candidate["symbol"], decision=review["decision"])
+    return {
+        "state": "OPPORTUNITY_FOUND",
+        "candidates": scan["candidates"],
+        "scanned": scan["scanned"],
+        "opportunity": {**opportunity, "brain_review": review},
+    }

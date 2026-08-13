@@ -90,22 +90,24 @@ class ToolsTests(unittest.TestCase):
     @patch("brain.cognitive_loop.query_llm")
     @patch("brain.cognitive_loop.execute_tool", return_value="balance ok")
     def test_resolve_user_query_dispatches_direct_tool_commands(self, mock_execute_tool, mock_query_llm):
+        mock_query_llm.return_value = '{"tool": "get_account_balance", "args": {}}'
         result = cognitive_loop.resolve_user_query("what is my mt5 account balance")
         self.assertEqual(result["answer"], "balance ok")
         self.assertEqual(result["source"], "tool")
         mock_execute_tool.assert_called_once_with("get_account_balance", {})
-        mock_query_llm.assert_not_called()
+        self.assertEqual(mock_query_llm.call_count, 1)
 
     @patch("brain.cognitive_loop.query_llm")
     @patch("brain.cognitive_loop.execute_tool", return_value="folder created")
     def test_resolve_user_query_dispatches_folder_creation(self, mock_execute_tool, mock_query_llm):
+        mock_query_llm.return_value = '{"tool": "manage_files", "args": {"action": "mkdir", "path": "/home/user/Desktop/feck"}}'
         result = cognitive_loop.resolve_user_query("create a folder named feck on my desktop")
         self.assertEqual(result["answer"], "folder created")
         self.assertEqual(result["source"], "tool")
         mock_execute_tool.assert_called_once()
         self.assertEqual(mock_execute_tool.call_args.args[0], "manage_files")
         self.assertEqual(mock_execute_tool.call_args.args[1]["action"], "mkdir")
-        mock_query_llm.assert_not_called()
+        self.assertEqual(mock_query_llm.call_count, 1)
 
     @patch("skills.voice.voice_interface._play_audio_file")
     @patch("skills.voice.voice_interface._generate_edge_tts")
@@ -136,6 +138,22 @@ class ToolsTests(unittest.TestCase):
         tool_name, args = extract_command_heuristically("open a browser on my pc")
         self.assertEqual(tool_name, "open_app")
         self.assertEqual(args.get("app_name"), "firefox")
+
+    @patch("brain.heuristic_engine._normalize_path_candidate")
+    def test_heuristic_routes_open_projects_folder(self, mock_normalize):
+        mock_normalize.return_value = ("/home/user/Desktop/Projects", True)
+        tool_name, args = extract_command_heuristically("open projects")
+        self.assertEqual(tool_name, "run_shell_command")
+        self.assertIn("xdg-open", args.get("command", ""))
+        self.assertIn("Projects", args.get("command", ""))
+
+    @patch("brain.heuristic_engine._normalize_path_candidate")
+    def test_heuristic_routes_open_projects_on_desktop(self, mock_normalize):
+        mock_normalize.return_value = ("/home/user/Desktop/Projects", True)
+        tool_name, args = extract_command_heuristically("open Projects on my desktop")
+        self.assertEqual(tool_name, "run_shell_command")
+        self.assertIn("xdg-open", args.get("command", ""))
+        self.assertIn("Desktop/Projects", args.get("command", ""))
 
     def test_execute_tool_preserves_kwargs_for_recall_memory(self):
         original_function = core_tools.TOOL_REGISTRY["recall_memory"]["function"]

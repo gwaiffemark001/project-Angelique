@@ -1,0 +1,12 @@
+[
+  {
+    "timestamp": "2026-08-12T00:21:48.277235Z",
+    "user": "check why the trading bridge is not initialised",
+    "agent": "{\"error\": \"[Errno 111] Connection refused\", \"status\": \"error\"}"
+  },
+  {
+    "timestamp": "2026-08-12T00:22:45.808561Z",
+    "user": "what does that mean",
+    "agent": "I'm having a little trouble connecting to my brain right now."
+  }
+]

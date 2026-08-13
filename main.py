@@ -205,21 +205,43 @@ def _to_windows_path(path: str) -> str:
 
 
 def _get_bridge_launch_command() -> list[str]:
-    launcher = getattr(config, "MT5_BRIDGE_LAUNCHER", "wine cmd /c python")
-    parts = shlex.split(str(launcher))
-    if not parts:
-        raise RuntimeError("MT5 bridge launcher command is not configured.")
+    launcher = str(getattr(config, "MT5_BRIDGE_LAUNCHER", "wine cmd /c python")).strip()
+    candidates = [launcher] if launcher else []
+    candidates.extend([
+        "wine64 cmd /c python",
+        "wine cmd /c python",
+        "wine64 python",
+        "wine python",
+        "wine64 cmd /c python.exe",
+        "wine cmd /c python.exe",
+    ])
 
-    executable = parts[0]
-    if shutil.which(executable) is None:
-        raise RuntimeError(f"MT5 bridge launcher command not found: {executable}")
+    seen = set()
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parts = shlex.split(candidate)
+        except ValueError:
+            continue
+        if not parts:
+            continue
+        if shutil.which(parts[0]) is None:
+            continue
+        executable = parts[0]
+        if executable.startswith("wine"):
+            script_path = _to_windows_path(BRIDGE_SCRIPT)
+        else:
+            script_path = BRIDGE_SCRIPT
+        print(f"🔧 [Bootstrap] Selected MT5 bridge launcher: {' '.join(parts)}")
+        return parts + [script_path]
 
-    if executable.startswith("wine"):
-        script_path = _to_windows_path(BRIDGE_SCRIPT)
-    else:
-        script_path = BRIDGE_SCRIPT
-
-    return parts + [script_path]
+    raise RuntimeError(
+        "MT5 bridge launcher command is not configured or available. "
+        "Install wine/wine64 or set ANGELIQUE_MT5_BRIDGE_LAUNCHER to a valid command."
+    )
 
 
 def _launch_bridge_process(bridge_env: dict[str, str], cmd: list[str], pass_fds=()):
@@ -308,8 +330,16 @@ def launch_mt5_bridge_if_needed() -> bool:
             return True
         print(f"⏳ [Bootstrap] MT5 Bridge not responsive yet on {BRIDGE_HOST}:{BRIDGE_PORT}; retrying...")
         time.sleep(config.MT5_BRIDGE_RECONNECT_INTERVAL)
-        
+    
     print(f"⚠️ [Bootstrap] MT5 Bridge did not start in time on {BRIDGE_HOST}:{BRIDGE_PORT}.")
+    if bridge_process.stdout is not None:
+        try:
+            bridge_output = bridge_process.stdout.read().strip()
+            if bridge_output:
+                print("--- MT5 Bridge stdout/stderr ---")
+                print(bridge_output)
+        except Exception:
+            pass
     print(f"    If this port is already used by another app, set {config.MT5_BRIDGE_PORT_ENV} to a free port and restart.")
     return False
 

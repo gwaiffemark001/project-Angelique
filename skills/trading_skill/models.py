@@ -2,28 +2,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 
 class WorkflowState(str, Enum):
-    REQUESTED = "REQUESTED"
-    DATA_READY = "DATA_READY"
-    ANALYZED = "ANALYZED"
-    PLANNED = "PLANNED"
+    WAITING = "WAITING"
+    DETECTED = "DETECTED"
+    ANALYZING = "ANALYZING"
+    VALIDATING_SETUP = "VALIDATING_SETUP"
+    RISK_CHECK = "RISK_CHECK"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     APPROVED = "APPROVED"
+    AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
+    EXECUTING = "EXECUTING"
     EXECUTED = "EXECUTED"
+    OPEN = "OPEN"
+    MONITORING = "MONITORING"
+    CLOSED = "CLOSED"
+    EXPIRED = "EXPIRED"
     REJECTED = "REJECTED"
+    REFUSED = "REFUSED"
     CANCELLED = "CANCELLED"
     NO_SETUP = "NO_SETUP"
-    WAITING_FOR_CONFIRMATION = "WAITING_FOR_CONFIRMATION"
     TRADE_READY = "TRADE_READY"
 
 
 @dataclass(frozen=True)
 class AccountSnapshot:
     requested_mode: str
+    actual_mode: str
     connected: bool
     login: int | None
     balance: float = 0.0
@@ -65,9 +73,11 @@ class TradePlan:
     projected_margin_level: float
     reward_to_risk: float
     account_mode: str
+    opportunity_id: str
     rationale: tuple[str, ...]
     confirmation_phrase: str
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    expires_at: str = field(default_factory=lambda: (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat())
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -87,9 +97,11 @@ class TradePlan:
             "projected_margin_level": self.projected_margin_level,
             "reward_to_risk": self.reward_to_risk,
             "account_mode": self.account_mode,
+            "opportunity_id": self.opportunity_id,
             "rationale": list(self.rationale),
             "confirmation_phrase": self.confirmation_phrase,
             "created_at": self.created_at,
+            "expires_at": self.expires_at,
         }
 
 

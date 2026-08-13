@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +13,7 @@ CONVERSATION_HISTORY.mkdir(parents=True, exist_ok=True)
 
 SESSION_CONTEXT = {}
 SESSION_CLOSED = set()
+SESSION_MESSAGE_LOCK = threading.Lock()
 
 
 def _session_is_closed(session_id: str) -> bool:
@@ -194,7 +196,8 @@ def handle_user_message(session_id: str, user_message: str) -> dict:
     except Exception:
         return {"error": "Cognitive resolver unavailable"}
 
-    result = resolve_user_query(user_message, session_id=session_id)
+    with SESSION_MESSAGE_LOCK:
+        result = resolve_user_query(user_message, session_id=session_id)
     # Save conversation (best-effort)
     try:
         agent_text = result.get("answer") if isinstance(result, dict) else str(result)

@@ -1,0 +1,12 @@
+[
+  {
+    "timestamp": "2026-08-12T06:42:39.727976Z",
+    "user": "uninstall cmatrix",
+    "agent": "To uninstall cmatrix, you can use the following command in your terminal, depending on your operating system:\n\nFor Ubuntu/Debian-based systems:\n```bash\nsudo apt-get remove cmatrix\n```\n\nFor Red Hat/Fedora-based systems:\n```bash\nsudo dnf remove cmatrix\n```\n\nFor Arch Linux-based systems:\n```bash\nsudo pacman -R cmatrix\n```\n\nFor macOS (using Homebrew):\n```bash\nbrew uninstall cmatrix\n```\n\nFor other systems, you can try using the package manager or the installation method you used to install cmatrix.\n\nAfter running the uninstall command, you can verify that cmatrix has been removed by checking if it's still listed in your package manager or by trying to run the command `cmatrix` in your terminal. If it's no longer installed, you should see an error message."
+  },
+  {
+    "timestamp": "2026-08-12T06:43:00.442582Z",
+    "user": "create a folder named face on my desktop",
+    "agent": "[{\"value\": \"desktop\", \"entity\": \"User\", \"type\": \"fact\", \"context\": \"creating a folder\", \"key\": \"location\", \"importance\": 4}]"
+  }
+]

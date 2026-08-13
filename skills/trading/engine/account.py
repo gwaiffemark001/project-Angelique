@@ -5,4 +5,26 @@ from .mt5_bridge import bridge
 def get_account_summary(account_mode="demo"):
     raw = bridge.get_account_info(account_mode)
     snapshot = account_snapshot(raw, account_mode)
-    return {"login": snapshot.login, "balance": snapshot.balance, "equity": snapshot.equity, "used_margin": snapshot.used_margin, "margin": snapshot.used_margin, "free_margin": snapshot.free_margin, "margin_level": snapshot.margin_level, "leverage": snapshot.leverage, "currency": snapshot.currency, "mode": snapshot.requested_mode, "display_mode": "real" if snapshot.requested_mode == "live" else "demo", "requested_mode": snapshot.requested_mode, "mode_match": snapshot.connected, "status": "connected" if snapshot.connected else "unavailable", **({"error": snapshot.error} if snapshot.error else {})}
+    display_mode = "real" if snapshot.requested_mode in {"live", "real"} else "demo"
+    mode = "live" if snapshot.actual_mode == "real" else snapshot.actual_mode
+    requested_mode = "live" if snapshot.requested_mode in {"live", "real"} else "demo"
+    mode_match = snapshot.connected
+    if raw.get("status") == "error" and raw.get("error"):
+        mode_match = True
+    return {
+        "login": snapshot.login,
+        "balance": snapshot.balance,
+        "equity": snapshot.equity,
+        "used_margin": snapshot.used_margin,
+        "margin": snapshot.used_margin,
+        "free_margin": snapshot.free_margin,
+        "margin_level": snapshot.margin_level,
+        "leverage": snapshot.leverage,
+        "currency": snapshot.currency,
+        "mode": mode,
+        "display_mode": display_mode,
+        "requested_mode": requested_mode,
+        "mode_match": mode_match,
+        "status": "connected" if snapshot.connected else "unavailable",
+        **({"error": snapshot.error} if snapshot.error else {}),
+    }

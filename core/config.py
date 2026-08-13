@@ -35,6 +35,10 @@ API_PRIORITY = os.getenv("API_PRIORITY", "openrouter,nvidia,bluesminds,gemini,ol
 FOREX_FACTORY_URLS = [s.strip() for s in os.getenv("FOREX_FACTORY_URLS", "https://www.forexfactory.com/ffcal/calendar.php,https://www.forexfactory.com/calendar/").split(",") if s.strip()]
 FOREX_FACTORY_BASE_URL = os.getenv("FOREX_FACTORY_BASE_URL", "https://www.forexfactory.com")
 WHATSAPP_WEB_URL = os.getenv("WHATSAPP_WEB_URL", "https://web.whatsapp.com")
+WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "")
+WHATSAPP_API_TOKEN = os.getenv("WHATSAPP_API_TOKEN", "")
+# By default do not use Playwright automation unless explicitly enabled
+WHATSAPP_USE_PLAYWRIGHT = os.getenv("WHATSAPP_USE_PLAYWRIGHT", "false").lower() in ("1", "true", "yes")
 
 # --- MT5 Bridge / Trading Configuration ---
 MT5_BRIDGE_HOST_ENV = os.getenv("ANGELIQUE_MT5_BRIDGE_HOST_ENV", "ANGELIQUE_MT5_BRIDGE_HOST")
@@ -50,7 +54,7 @@ MT5_BRIDGE_HEALTH_CHECK_INTERVAL = float(os.getenv("ANGELIQUE_MT5_HEALTH_CHECK_I
 
 TRADING_MIN_FREE_MARGIN = float(os.getenv("ANGELIQUE_TRADING_MIN_FREE_MARGIN", "100.0"))
 TRADING_MIN_RR_RATIO = float(os.getenv("ANGELIQUE_TRADING_MIN_RR_RATIO", "2.0"))
-TRADING_MAX_SPREAD = float(os.getenv("ANGELIQUE_TRADING_MAX_SPREAD", "3.0"))
+TRADING_MAX_SPREAD = float(os.getenv("ANGELIQUE_TRADING_MAX_SPREAD", "10.0"))
 TRADING_CONFIDENCE_THRESHOLD = float(os.getenv("ANGELIQUE_TRADING_CONFIDENCE_THRESHOLD", "80.0"))
 TRADING_RSI_MIN = float(os.getenv("ANGELIQUE_TRADING_RSI_MIN", "30.0"))
 TRADING_RSI_MAX = float(os.getenv("ANGELIQUE_TRADING_RSI_MAX", "70.0"))

@@ -1,6 +1,7 @@
 # brain/cognitive_loop.py
 import json
 import re
+import threading
 from brain.llm_interface import query_llm, extract_json_from_text
 from brain import memory_manager as memory_manager
 from brain.memory_manager import save_fact_to_db
@@ -200,36 +201,22 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
 
     Steps:
     1. "Think": silently extract facts from the user's input and persist them.
-    2. Check for direct tool/skill dispatch first for actionable requests.
-    3. Check conversation memory when appropriate.
-    4. Check fact/knowledge memory when appropriate.
-    5. If nothing is found, query external LLMs (and other models) via `query_llm`.
-    6. Persist any new facts discovered from external answers.
+    2. Check conversation memory when appropriate.
+    3. Check fact/knowledge memory when appropriate.
+    4. Use the LLM to decide whether to answer naturally or issue a tool request.
+    5. Persist any new facts discovered from external answers.
 
     Returns a dict with keys: `source` (one of 'conversation','fact','tool','llm'), `answer`, and `details`.
     """
     text = _strip_training_mode_prefix(user_input)
 
-    tool_name, args = nlp_to_tool_mapping(text)
-    if tool_name:
+    with _REQUEST_LOCK:
+        # 1) Think: silently extract facts and persist them for non-action requests
         try:
-            result = execute_tool(tool_name, args)
-            return {"source": "tool", "answer": result, "details": {"tool": tool_name, "args": args}}
-        except Exception as exc:
-            return {"source": "tool", "answer": f"Tool execution failed: {exc}", "details": {"tool": tool_name, "args": args, "error": str(exc)}}
-
-    if _looks_like_action_request(text) and not _is_simple_question(text):
-        try:
-            action_response = run_cognitive_loop(text)
-            return {"source": "tool", "answer": action_response, "details": {"action_loop": True}}
-        except Exception as exc:
-            return {"source": "error", "answer": f"Action routing failed: {exc}", "details": {"error": str(exc)}}
-
-    # 1) Think: silently extract facts and persist them for non-action requests
-    try:
-        extract_facts_silently(text)
-    except Exception:
-        pass
+            if not _looks_like_action_request(text):
+                extract_facts_silently(text)
+        except Exception:
+            pass
 
     # 2) Conversation memory check
     if _should_query_conversation_memory(text):
@@ -248,6 +235,48 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
         if _should_use_orchestration(text):
             orchestration = orchestrate_models(text, session_id=session_id)
             final_answer = orchestration.get("final_answer") if isinstance(orchestration, dict) else orchestration
+
+            # If the orchestration output contains a tool request, execute it.
+            tool_name = None
+            args = {}
+            if isinstance(final_answer, str):
+                decision = extract_json_from_text(final_answer)
+                if isinstance(decision, dict) and decision:
+                    if "tool" in decision:
+                        tool_name = decision["tool"]
+                        args = decision.get("args", {})
+                    else:
+                        for t in TOOL_REGISTRY.keys():
+                            if t in decision:
+                                tool_name = t
+                                args = decision[t]
+                                break
+                else:
+                    refined_decision, clarified_response = _extract_tool_decision(final_answer, text, session_id=session_id)
+                    if isinstance(refined_decision, dict) and refined_decision:
+                        if "tool" in refined_decision:
+                            tool_name = refined_decision["tool"]
+                            args = refined_decision.get("args", {})
+                        else:
+                            for t in TOOL_REGISTRY.keys():
+                                if t in refined_decision:
+                                    tool_name = t
+                                    args = refined_decision[t]
+                                    break
+                    elif clarified_response is not None:
+                        final_answer = clarified_response
+
+            if args is None:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+
+            if tool_name:
+                # Let execute_tool handle alias mapping and skill discovery/fallbacks.
+                tool_result = execute_tool(tool_name, args)
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": tool_name, "args": args}}
+
             # Save any extracted facts from the final answer silently
             try:
                 extract_facts_silently(final_answer)
@@ -263,6 +292,46 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
                 text,
                 session_id=session_id,
             ), temperature=0.2)
+            if response is None:
+                return {"source": "llm", "answer": "I'm having a little trouble connecting to my brain right now.", "details": {"orchestrated": False}}
+
+            decision = extract_json_from_text(response)
+            tool_name = None
+            args = {}
+            if isinstance(decision, dict) and decision:
+                if "tool" in decision:
+                    tool_name = decision["tool"]
+                    args = decision.get("args", {})
+                else:
+                    for t in TOOL_REGISTRY.keys():
+                        if t in decision:
+                            tool_name = t
+                            args = decision[t]
+                            break
+            else:
+                    refined_decision, clarified_response = _extract_tool_decision(response, text, session_id=session_id)
+                    if isinstance(refined_decision, dict) and refined_decision:
+                        if "tool" in refined_decision:
+                            tool_name = refined_decision["tool"]
+                            args = refined_decision.get("args", {})
+                        else:
+                            for t in TOOL_REGISTRY.keys():
+                                if t in refined_decision:
+                                    tool_name = t
+                                    args = refined_decision[t]
+                                    break
+                    elif clarified_response is not None:
+                        response = clarified_response
+            if args is None:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+
+            if tool_name and tool_name in TOOL_REGISTRY:
+                tool_result = execute_tool(tool_name, args)
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": tool_name, "args": args}}
+
             try:
                 extract_facts_silently(response)
             except Exception:
@@ -427,12 +496,14 @@ def _looks_like_general_query(user_input: str) -> bool:
     return normalized.startswith(question_starters)
 
 
+_REQUEST_LOCK = threading.Lock()
+
 def _should_use_orchestration(user_input: str) -> bool:
     """Decide whether to run multi-LLM orchestration for a given input.
 
     Heuristics:
     - Disabled via `core.config.ENABLE_MULTI_LLM_ORCHESTRATION`.
-    - Never for identity or simple questions.
+    - Never for identity, simple questions, or explicit action requests.
     - Use for inputs with at least `ORCHESTRATION_MIN_WORDS` words or containing
       one of the `ORCHESTRATION_KEYWORDS`.
     """
@@ -454,7 +525,7 @@ def _should_use_orchestration(user_input: str) -> bool:
     if not user_input or not user_input.strip():
         return False
 
-    if _is_identity_question(user_input) or _is_simple_question(user_input):
+    if _is_identity_question(user_input) or _is_simple_question(user_input) or _looks_like_action_request(user_input):
         return False
 
     words = re.findall(r"\b[\w']+\b", user_input)
@@ -466,6 +537,31 @@ def _should_use_orchestration(user_input: str) -> bool:
         return True
 
     return False
+
+
+def _extract_tool_decision(raw_response: str, user_input: str, session_id: str | None = None) -> tuple[dict | None, str | None]:
+    decision = extract_json_from_text(raw_response)
+    if isinstance(decision, dict) and decision:
+        return decision, None
+
+    clarification_prompt = (
+        "You are Angelique. The user may have requested an action. "
+        "If the user wants to perform a tool action, respond with ONLY a single valid JSON object like ``{\"tool\": \"tool_name\", \"args\": { ... }}.`` "
+        "If the user is asking a normal question or chatting, answer naturally without JSON. "
+        f"User request: '{user_input}'\n"
+        f"Previous assistant output: '{raw_response}'\n"
+        "Return only valid JSON if an action is required, otherwise return a natural answer."
+    )
+    clarified = query_llm(_build_messages_with_history(
+        "You are a reasoning assistant tasked with producing a strict JSON tool request when appropriate.",
+        clarification_prompt,
+        session_id=session_id,
+    ), temperature=0.0)
+
+    refined = extract_json_from_text(clarified or "")
+    if isinstance(refined, dict) and refined:
+        return refined, None
+    return None, clarified or None
 
 
 def extract_facts_silently(user_input: str):
@@ -584,6 +680,17 @@ def run_cognitive_loop(user_input: str) -> str:
     if _is_retry_request(user_input) and last_user_input:
         user_input = last_user_input
 
+    # Require explicit confirmation for potentially-destructive install/uninstall
+    normalized = (user_input or "").strip().lower()
+    if re.search(r"\binstall\b|\buninstall\b", normalized):
+        # If the user asked as a question or requested instructions, allow normal flow
+        if not normalized.endswith("?") and "how" not in normalized and "how to" not in normalized:
+            # If there's no clear confirmation keyword, ask for clarification
+            if not any(k in normalized for k in ("confirm", "perform", "yes", "do it", "proceed")):
+                clarification = "Do you want me to perform this install/uninstall now? Reply 'yes' to proceed or 'instructions' for step-by-step guidance."
+                conv_save(session_id, user_input, clarification)
+                return clarification
+
     if _assistant_is_waiting_for_followup(last_response) and _is_followup_continuation(user_input):
         followup_prompt = (
             "You are Angelique continuing a previous exchange. The user has replied to your last question. "
@@ -680,6 +787,25 @@ def run_cognitive_loop(user_input: str) -> str:
     if not _is_identity_question(user_input):
         extract_facts_silently(user_input)
 
+    # Deterministic handlers for common system queries to avoid LLM hallucination
+    normalized = (user_input or "").strip().lower()
+    if re.search(r"\b(date|time|what's the time|what is the time)\b", normalized):
+        from datetime import datetime
+        now = datetime.now()
+        resp = now.strftime("%A, %B %d, %Y %I:%M:%S %p")
+        conv_save(session_id, user_input, resp)
+        return resp
+
+    if re.search(r"\b(system diagnostics|system diagnostics|system status|system configuration|system info|system diagnostic)\b", normalized):
+        try:
+            from skills.os_control.system_cmds import get_system_health
+            info = get_system_health()
+            resp = json.dumps(info, indent=2)
+            conv_save(session_id, user_input, resp)
+            return resp
+        except Exception:
+            pass
+
     # 2. Avoid preloading memory for plain questions. Let the model reason first,
     #    and only use memory later when the response clearly needs it.
     if _should_query_memory(user_input):
@@ -707,12 +833,11 @@ def run_cognitive_loop(user_input: str) -> str:
         f"{training_memory_text}\n\n"
         f"RELEVANT MEMORY ABOUT THE USER (Sorted by emotional importance):\n{memory_text}\n\n"
         "CORE DIRECTIVES:\n"
-        "1. ACTION REQUESTS: If the user asks you to do something, you MUST reply with ONLY a JSON object for the tool.\n"
-        "   Format: {\"tool\": \"tool_name\", \"args\": {\"param1\": \"value1\"}}\n"
-        "2. CONVERSATION: If the user is just chatting, reply naturally. DO NOT output JSON.\n"
-        "3. MEMORY USAGE: Use the RELEVANT MEMORY to personalize your responses. Notice the importance scores (🔥 is high, 📌 is low). Prioritize highly important facts.\n"
-        "4. NEVER hallucinate facts. Only use facts present in RELEVANT MEMORY.\n"
-        "5. TRADING NEWS: When the user asks about forex news, market events, or the economic calendar, use the get_forex_news and get_market_calendar tools immediately.\n\n"
+        "1. Think carefully before you answer. Determine whether the user is asking a question or asking you to perform an action.\n"
+        "2. If the user requests an action, respond with ONLY one JSON object: {\"tool\": \"tool_name\", \"args\": { ... }}.\n"
+        "3. If the user is asking a question or having a conversation, answer naturally without JSON.\n"
+        "4. Avoid hardcoded keyword matching; infer intent from the user's full request.\n"
+        "5. Use the tool schema above to choose the best tool when an action is required.\n\n"
         "EXAMPLES:\n"
         "User: open Firefox\n"
         "Assistant: {\"tool\": \"open_app\", \"args\": {\"app_name\": \"Firefox\"}}\n\n"
@@ -742,15 +867,20 @@ def run_cognitive_loop(user_input: str) -> str:
     decision = extract_json_from_text(raw_response)
     tool_name = None
     args = {}
+    natural_answer = None
 
     # Handle LLM responses that return empty or invalid JSON
     if not decision or not isinstance(decision, dict) or len(decision) == 0:
         if _is_identity_question(user_input):
             conv_save(session_id, user_input, raw_response)
             return raw_response
-        tool_name, args = nlp_to_tool_mapping(user_input)
-        if not tool_name:
-            tool_name, args = nlp_to_tool_mapping(raw_response or "")
+
+        refined_decision, clarified_response = _extract_tool_decision(raw_response, user_input, session_id=session_id)
+        if isinstance(refined_decision, dict) and len(refined_decision) > 0:
+            decision = refined_decision
+        elif clarified_response is not None:
+            natural_answer = clarified_response
+
     if isinstance(decision, dict) and len(decision) > 0:
         if "tool" in decision:
             tool_name = decision["tool"]
@@ -761,6 +891,15 @@ def run_cognitive_loop(user_input: str) -> str:
                     tool_name = t
                     args = decision[t]
                     break
+    else:
+        if not _is_identity_question(user_input):
+            # Always attempt deterministic heuristic mapping from the user input
+            # or the LLM raw response. This ensures retry requests still execute
+            # previously-intended actions even when a clarified natural answer
+            # was also produced by the LLM.
+            tool_name, args = nlp_to_tool_mapping(user_input)
+            if not tool_name:
+                tool_name, args = nlp_to_tool_mapping(raw_response or "")
 
     # Ensure args is always a valid dict
     if args is None:
@@ -768,43 +907,17 @@ def run_cognitive_loop(user_input: str) -> str:
     if not isinstance(args, dict):
         args = {}
 
-    if tool_name and tool_name in TOOL_REGISTRY:
+    if tool_name:
         print(f"🧠 [Thought] Using tool: {tool_name} with args {args}")
         tool_result = execute_tool(tool_name, args)
         print(f"🔍 [DEBUG] Tool Result: {repr(tool_result)}")
+        # Persist the tool result in the conversation history
+        conv_save(session_id, user_input, tool_result)
+        # Prefer any clarified natural answer; otherwise return the tool result as a string
+        if natural_answer is not None:
+            return natural_answer
+        return tool_result if isinstance(tool_result, str) else json.dumps(tool_result, ensure_ascii=False)
 
-        direct_return_tools = {
-            'get_system_health',
-            'get_running_processes',
-            'get_account_balance',
-            'check_mt5_status',
-            'recall_memory',
-            'create_and_execute_skill',
-            'execute_generated_code',
-            'list_apps',
-            'get_installed_apps',
-            'list_directory',
-            'disk_usage',
-            'get_network_info',
-            'get_network_interfaces',
-            'get_logs',
-            'get_forex_news',
-            'get_market_calendar',
-        }
-
-        if tool_name in direct_return_tools:
-            conv_save(session_id, user_input, tool_result)
-            return tool_result
-
-        reflection_messages = messages + [
-            {"role": "assistant", "content": raw_response},
-            {"role": "user", "content": f"[System Output from {tool_name}]: {tool_result}. Now reply naturally to the user based on this result."}
-        ]
-        final_response = query_llm(reflection_messages, temperature=0.7)
-        if final_response is None:
-            final_response = "I have the result, but I need another moment to explain it clearly."
-        conv_save(session_id, user_input, final_response)
-        return final_response
-
-    conv_save(session_id, user_input, raw_response)
-    return raw_response
+    final = natural_answer or raw_response
+    conv_save(session_id, user_input, final)
+    return final

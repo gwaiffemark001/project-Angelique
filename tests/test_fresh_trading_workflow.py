@@ -1,5 +1,7 @@
 from skills.trading_skill.account import account_snapshot
+from skills.trading_skill.account_manager import account_manager
 from skills.trading_skill.models import WorkflowState
+from skills.trading_skill.position_monitor import position_monitor
 from skills.trading_skill.symbols import resolve
 from skills.trading_skill.workflow import TradingWorkflow
 
@@ -66,3 +68,25 @@ def test_conflicting_timeframe_is_rejected():
     result = TradingWorkflow(adapter).prepare("EURUSD")
     assert result.state is WorkflowState.REJECTED
     assert "conflict" in result.message.lower()
+
+
+def test_live_authorization_rejects_unmatched_mode(monkeypatch):
+    monkeypatch.setattr(
+        account_manager,
+        "get_snapshot",
+        lambda requested_mode, force_refresh=False: account_snapshot({"mode": "demo", "mode_match": False, "login": None, "error": "Mode mismatch"}, requested_mode),
+    )
+    result = TradingWorkflow(Adapter()).prepare("EURUSD", "live")
+    assert result.state is WorkflowState.NO_SETUP
+    assert "authorization" in result.message.lower()
+
+
+def test_position_monitor_returns_positions(monkeypatch):
+    monkeypatch.setattr(
+        position_monitor,
+        "get_open_positions",
+        lambda account_mode, symbol=None: {"positions": [{"ticket": 1, "symbol": "EURUSD", "volume": 0.1}], "status": "connected"},
+    )
+    positions = position_monitor.get_open_positions("demo", "EURUSD")
+    assert positions["status"] == "connected"
+    assert positions["positions"][0]["symbol"] == "EURUSD"

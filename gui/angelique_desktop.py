@@ -13,6 +13,7 @@ from pathlib import Path
 
 from core import config
 #[main 44abb76] restore point
+#[main 53c3b9b] new restore
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -2599,6 +2600,9 @@ class AngeliqueDesktopApp(tk.Tk):
             if not spoken:
                 time.sleep(0.2)
                 continue
+            if self._command_in_progress:
+                time.sleep(0.2)
+                continue
             cleaned = self._normalize_voice_command(spoken)
             if cleaned:
                 spoken = cleaned
@@ -2608,6 +2612,7 @@ class AngeliqueDesktopApp(tk.Tk):
             self.after(0, lambda: self._append_console("ANGELIQUE", "Processing voice command..."))
             self.after(0, lambda: self._set_avatar_status("PROCESSING"))
             self.after(0, lambda: self.footer_label.configure(text=self._footer_text("PROCESSING")))
+            self._command_in_progress = True
             self._process_command(spoken)
             time.sleep(0.2)
         self.after(0, lambda: self._set_avatar_status(None))
@@ -2648,12 +2653,16 @@ class AngeliqueDesktopApp(tk.Tk):
             event.widget = None
         if getattr(self, "_terminal_placeholder_active", False):
             return
+        if self._command_in_progress:
+            self._append_console("SYSTEM", "Angelique is still processing the previous request.")
+            return
         command = self.terminal_text.get("1.0", tk.END).strip()
         if not command:
             return
         self.terminal_text.delete("1.0", tk.END)
         self._append_console("TERMINAL", command)
         self.footer_label.configure(text=self._footer_text("PROCESSING"))
+        self._command_in_progress = True
         if self._terminal_backend_enabled:
             self._append_console("ANGELIQUE", "Processing terminal command through Angelique backend.")
             threading.Thread(target=self._process_command, args=(command,), daemon=True).start()

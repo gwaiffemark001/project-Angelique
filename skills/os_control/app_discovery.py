@@ -2,6 +2,10 @@ import os
 import subprocess
 import platform
 import psutil
+import re
+import shlex
+import shutil
+import time
 
 
 def _normalize_version(version: str | None) -> str | None:
@@ -219,30 +223,92 @@ def open_app(app_name: str) -> str:
             "vlc": "vlc.desktop", "gimp": "gimp.desktop",
         }
 
+        # First, try to find a matching .desktop Exec line and run it directly
+        apps = get_installed_apps()
+        lookup = app_name.lower().strip()
+        chosen = None
+        for key, info in apps.items():
+            if lookup == key or lookup in key or lookup in str(info.get("name", "")).lower() or lookup in str(info.get("exec", "")).lower():
+                chosen = info
+                break
+
+        if chosen:
+            exec_line = chosen.get("exec")
+            desktop_file = chosen.get("desktop_file")
+            if exec_line:
+                # Clean Exec line: remove placeholders like %u %U %f %F %i %c
+                cleaned = re.sub(r"\s+%[uUfFic]", "", exec_line)
+                try:
+                    parts = shlex.split(cleaned)
+                except Exception:
+                    parts = cleaned.split()
+
+                if parts:
+                    try:
+                        proc = subprocess.Popen(parts, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                        # Give the process a short moment to appear
+                        time.sleep(0.5)
+                        if proc and proc.pid and psutil.pid_exists(proc.pid):
+                            return f"✅ Launched '{app_name}' via Exec from {desktop_file} (PID {proc.pid})."
+                        return f"⚠️ Attempted to launch '{app_name}' via Exec from {desktop_file}, but process did not appear."
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        pass
+
+        # Try common desktop-file map fallback using xdg-open for compatibility
         if app_name.lower() in desktop_file_map:
             desktop_file = desktop_file_map[app_name.lower()]
-            try:
-                subprocess.Popen(
-                    ["xdg-open", f"/usr/share/applications/{desktop_file}"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                return f"✅ Launched '{app_name}' via desktop file."
-            except Exception:
-                pass
+            desktop_path = f"/usr/share/applications/{desktop_file}"
+            if os.path.exists(desktop_path):
+                try:
+                    proc = subprocess.Popen(
+                        ["xdg-open", desktop_path],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    time.sleep(0.5)
+                    matches = []
+                    for p in psutil.process_iter(['pid', 'name', 'exe']):
+                        try:
+                            pname = (p.info.get('name') or '').lower()
+                            pexe = (p.info.get('exe') or '').lower()
+                            if app_name.lower() in pname or app_name.lower() in pexe:
+                                matches.append((p.info.get('pid'), pname))
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    if matches:
+                        pid_list = ','.join(str(m[0]) for m in matches)
+                        return f"✅ Launched '{app_name}' via desktop file (PIDs: {pid_list})."
+                    return f"⚠️ Attempted to launch '{app_name}' via desktop file, but target process not detected yet."
+                except Exception:
+                    pass
 
+        # Try running the app name directly (e.g., 'firefox')
         try:
-            subprocess.Popen([app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return f"✅ Launched '{app_name}'."
+            proc = subprocess.Popen([app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            time.sleep(0.5)
+            if proc and proc.pid and psutil.pid_exists(proc.pid):
+                return f"✅ Launched '{app_name}' (PID {proc.pid})."
         except FileNotFoundError:
             pass
+        except Exception:
+            pass
 
+        # Fallback: try resolving via which and run resolved path
         try:
             result = subprocess.run(
                 ["which", app_name], capture_output=True, text=True, timeout=5,
             )
-            if result.returncode == 0:
-                subprocess.Popen([app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return f"✅ Launched '{app_name}' (found at {result.stdout.strip()})."
+            if result.returncode == 0 and result.stdout.strip():
+                resolved = result.stdout.strip()
+                try:
+                    proc = subprocess.Popen([resolved], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                    time.sleep(0.5)
+                    if proc and proc.pid and psutil.pid_exists(proc.pid):
+                        return f"✅ Launched '{app_name}' (found at {resolved}, PID {proc.pid})."
+                    return f"⚠️ Launched '{app_name}' (found at {resolved}), but process did not appear."
+                except Exception:
+                    pass
         except Exception:
             pass
 

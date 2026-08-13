@@ -12,8 +12,9 @@ from skills.os_control.system_cmds import (
     manage_files, get_network_info, disk_usage, list_directory,
     get_network_interfaces, schedule_task, get_logs,
 )
+from skills.os_control.cli_file_manager import list_files as cli_list_files, open_file as cli_open_file, cat_file as cli_cat_file, search_files as cli_search_files
 from skills.os_control.system_monitor import get_system_health as sys_health, get_running_processes as sys_procs
-from skills.file_management.file_ops import manage_files
+from skills.file_management.file_ops import manage_files, save_text_pdf
 from skills.self_evolution.code_generator import (
     save_new_skill, execute_generated_code, create_and_execute_skill,
     think_about_problem, store_component, retrieve_component,
@@ -21,6 +22,7 @@ from skills.self_evolution.code_generator import (
 )
 from skills.vision.image_generator import generate_image
 from skills.vision.file_analyzer import analyze_file, analyze_directory
+from skills.web.browser_tools import open_browser_and_search
 from skills.web.search_tools import search_web
 
 def _discover_skill_functions():
@@ -178,6 +180,26 @@ TOOL_REGISTRY = {
         "parameters": {"path": "Directory path (default: current dir)", "recursive": "List recursively (true/false)"},
         "function": lambda path=".", recursive=False: list_directory(path, recursive),
     },
+    "cli_ls": {
+        "description": "CLI-style list files (ls).",
+        "parameters": {"path": "Directory path (default: current dir)"},
+        "function": cli_list_files,
+    },
+    "cli_open": {
+        "description": "Open/preview a file (first N lines).",
+        "parameters": {"file_path": "Path to file", "lines": "Number of lines to preview (default 50)"},
+        "function": cli_open_file,
+    },
+    "cli_cat": {
+        "description": "Return file contents (size-limited).",
+        "parameters": {"file_path": "Path to file", "max_size": "Maximum bytes to return (default 200000)"},
+        "function": cli_cat_file,
+    },
+    "search_files": {
+        "description": "Search for files and folders by name or path under a root directory.",
+        "parameters": {"query": "Search text", "root": "Root directory to search (default: home)", "max_results": "Maximum results to return", "max_depth": "Maximum folder depth to traverse"},
+        "function": cli_search_files,
+    },
     "disk_usage": {
         "description": "Show disk usage for a path.",
         "parameters": {"path": "Directory path (default: /)"},
@@ -333,6 +355,16 @@ TOOL_REGISTRY = {
         "parameters": {"query": "Search query"},
         "function": search_web,
     },
+    "open_browser_and_search": {
+        "description": "Opens the default browser and performs a web search for the given query.",
+        "parameters": {"query": "Search query"},
+        "function": open_browser_and_search,
+    },
+    "save_text_pdf": {
+        "description": "Create a plain text PDF at the given path.",
+        "parameters": {"path": "Output PDF path", "text": "Text content to save", "title": "Optional document title"},
+        "function": lambda path, text, title='Document': save_text_pdf(path, text),
+    },
 
     # ============================================================
     # MESSAGING
@@ -341,6 +373,11 @@ TOOL_REGISTRY = {
         "description": "Send a WhatsApp message to a contact directly.",
         "parameters": {"contact_name": "Contact name", "message": "Message to send"},
         "function": send_whatsapp,
+    },
+    "prepare_whatsapp_message": {
+        "description": "Prepare a WhatsApp message (search contact + draft) using Playwright when available.",
+        "parameters": {"contact_name": "Contact name", "message": "Message to send"},
+        "function": lambda contact_name, message=None: __import__('skills.messaging.whatsapp_playwright', fromlist=['prepare_whatsapp_message_sync']).prepare_whatsapp_message_sync(contact_name, message or ""),
     },
     "draft_whatsapp": {
         "description": "Draft a WhatsApp message for a contact (does not send).",
@@ -351,6 +388,11 @@ TOOL_REGISTRY = {
         "description": "Send WhatsApp message with explicit confirmation required.",
         "parameters": {"contact_name": "Contact name", "message": "Message to send", "confirm": "Must be True to send"},
         "function": send_whatsapp_approved,
+    },
+    "execute_whatsapp_send": {
+        "description": "Execute previously prepared WhatsApp send (requires confirmation).",
+        "parameters": {},
+        "function": lambda: __import__('skills.messaging.whatsapp_playwright', fromlist=['execute_whatsapp_send_sync']).execute_whatsapp_send_sync(),
     },
     "check_messaging_status": {
         "description": "Check availability of messaging services.",
@@ -421,7 +463,30 @@ TOOL_REGISTRY = {
 import json
 
 def execute_tool(tool_name: str, args: dict) -> str:
+    # Normalize tool name
+    normalized_tool = (tool_name or "").strip().lower()
+
+    # Alias mappings for common tool names that LLMs sometimes emit
+    alias_map = {
+        "bash": "run_shell_command",
+        "sh": "run_shell_command",
+        "shell": "run_shell_command",
+        "xdg-open": "run_shell_command",
+        "open": "open_browser_and_search",
+        "mkdir": "manage_files",
+        "rmdir": "manage_files",
+        "rm": "manage_files",
+        "search": "search_files",
+        "find": "search_files",
+        "ls": "cli_ls",
+    }
+
+    if normalized_tool in alias_map:
+        mapped = alias_map[normalized_tool]
+        tool_name = mapped
+
     if tool_name not in TOOL_REGISTRY:
+        # Try calling by skill discovery as a last resort
         try:
             fallback = call_skill(tool_name, args or {})
         except Exception:
@@ -436,7 +501,42 @@ def execute_tool(tool_name: str, args: dict) -> str:
         if args is None: args = {}
         sig = inspect.signature(func)
         accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
+        # If we remapped common aliases, massage args for the target function
         valid_args = args if accepts_kwargs else {k: v for k, v in args.items() if k in sig.parameters}
+
+        # Special-case: mapped bash/xdg-open -> run_shell_command
+        if normalized_tool in ("bash", "sh", "shell"):
+            # Accept either 'commands' list or 'command' string
+            if isinstance(args, dict) and "commands" in args and isinstance(args["commands"], (list, tuple)):
+                cmd = " && ".join(str(c) for c in args["commands"] if c)
+                return run_shell_command(cmd)
+            if isinstance(args, dict) and "command" in args:
+                return run_shell_command(str(args["command"]))
+
+        if normalized_tool in ("xdg-open",) and isinstance(args, dict) and args:
+            # xdg-open <url>
+            # if single arg provided, run xdg-open via shell
+            first = None
+            if "url" in args:
+                first = args["url"]
+            else:
+                # pick first arg value
+                for v in args.values():
+                    first = v
+                    break
+            if first:
+                return run_shell_command(f"xdg-open \"{first}\"")
+
+        # Special-case: mkdir/rm -> manage_files
+        if normalized_tool in ("mkdir", "rmdir") and isinstance(args, dict):
+            path = args.get("path") or args.get("dir") or args.get("directory") or args.get("target")
+            if path:
+                return manage_files("mkdir", path)
+        if normalized_tool == "rm" and isinstance(args, dict):
+            path = args.get("path") or args.get("target") or args.get("file")
+            if path:
+                return manage_files("delete", path)
+
         return func(**valid_args)
     except Exception as e:
         return f"Error executing {tool_name}: {str(e)}"

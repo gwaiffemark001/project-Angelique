@@ -1,13 +1,22 @@
 from __future__ import annotations
 
-import asyncio
 import importlib
 import json
 import os
 import socket
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+for path_entry in [SCRIPT_DIR, ""]:
+    while path_entry in sys.path:
+        sys.path.remove(path_entry)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+import asyncio
 from core import config
 
 TIMEFRAMES = {
@@ -24,7 +33,7 @@ TIMEFRAMES = {
 
 
 def _mode(value: str | None) -> str:
-    return "live" if str(value or "demo").lower() in {"live", "real"} else "demo"
+    return "real" if str(value or "demo").lower() in {"live", "real"} else "demo"
 
 
 def _raw(value: Any) -> dict[str, Any]:
@@ -170,6 +179,48 @@ def execute(request: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
+def positions(request: dict[str, Any]) -> dict[str, Any]:
+    requested_mode = _mode(request.get("account_mode"))
+    symbol = str(request.get("symbol") or "").strip()
+
+    def _normalize(value: str) -> str:
+        return "".join(char for char in value.upper() if char.isalnum())
+
+    try:
+        mt5 = importlib.import_module("MetaTrader5")
+        if not _connect(mt5, requested_mode):
+            return {"status": "error", "error": "MT5 initialization failed", "positions": []}
+
+        if symbol:
+            resolved_symbol = _resolve(mt5, symbol) or symbol
+            positions_result = mt5.positions_get(symbol=resolved_symbol) or []
+            if not positions_result:
+                all_positions = mt5.positions_get() or []
+                normalized_target = _normalize(symbol)
+                positions_result = [pos for pos in all_positions if _normalize(str(getattr(pos, "symbol", ""))) == normalized_target]
+        else:
+            positions_result = mt5.positions_get() or []
+
+        return {
+            "status": "connected",
+            "positions": [
+                {
+                    "ticket": int(getattr(pos, "ticket", 0)),
+                    "symbol": str(getattr(pos, "symbol", "")),
+                    "type": "BUY" if getattr(pos, "type", None) == mt5.POSITION_TYPE_BUY else "SELL",
+                    "volume": float(getattr(pos, "volume", 0) or 0),
+                    "price_open": float(getattr(pos, "price_open", 0) or 0),
+                    "sl": float(getattr(pos, "sl", 0) or 0),
+                    "tp": float(getattr(pos, "tp", 0) or 0),
+                    "profit": float(getattr(pos, "profit", 0) or 0),
+                }
+                for pos in positions_result
+            ],
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "positions": []}
+
+
 def close_position(request: dict[str, Any]) -> dict[str, Any]:
     requested_mode = _mode(request.get("account_mode"))
     symbol = str(request.get("symbol") or "").strip()
@@ -236,6 +287,7 @@ async def handle(websocket, path=None):
                 "get_symbols": "symbols",
                 "get_rates": "market",
                 "place_order": "execute",
+                "get_positions": "positions",
             }.get(payload.get("action"))
         if operation == "ping":
             await websocket.send(json.dumps({"status": "pong"}))
@@ -248,6 +300,8 @@ async def handle(websocket, path=None):
             result = market(payload)
         elif operation == "execute":
             result = execute(payload)
+        elif operation == "positions":
+            result = positions(payload)
         elif operation == "close_position":
             result = close_position(payload)
         else:

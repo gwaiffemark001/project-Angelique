@@ -5,7 +5,112 @@ Maps natural language to tool actions without LLM dependency for critical comman
 """
 import os
 import re
+import shutil
+from pathlib import Path
 from core import config
+
+
+def _find_case_insensitive_child(base_dir: str, name: str) -> str | None:
+    if not os.path.isdir(base_dir):
+        return None
+    lower_name = name.lower()
+    try:
+        for child in os.listdir(base_dir):
+            if child.lower() == lower_name:
+                return os.path.join(base_dir, child)
+    except Exception:
+        pass
+    return None
+
+
+def _normalize_path_candidate(candidate: str, desktop_only: bool = False, allow_desktop_fallback: bool = False) -> tuple[str, bool]:
+    candidate = (candidate or '').strip()
+    if not candidate:
+        return candidate, False
+
+    desktop_root = getattr(config, 'DESKTOP_PATH', os.path.expanduser('~/Desktop'))
+    if desktop_only:
+        desktop_path = os.path.join(desktop_root, candidate)
+        if os.path.exists(desktop_path):
+            return desktop_path, True
+        case_path = _find_case_insensitive_child(desktop_root, candidate)
+        if case_path:
+            return case_path, True
+        return desktop_path, False
+
+    expanded = os.path.expanduser(candidate)
+    if os.path.isabs(expanded) or candidate.startswith(('.', '~')):
+        return expanded, os.path.exists(expanded)
+
+    cwd_path = os.path.abspath(expanded)
+    if os.path.exists(cwd_path):
+        return cwd_path, True
+    case_path = _find_case_insensitive_child(os.path.dirname(cwd_path) or '.', os.path.basename(cwd_path))
+    if case_path:
+        return case_path, True
+
+    if not _looks_like_path(candidate):
+        current_dir = os.path.abspath(os.getcwd())
+        target_name = os.path.basename(cwd_path).lower()
+        ancestor = current_dir
+        while True:
+            if os.path.basename(ancestor).lower() == target_name:
+                return ancestor, True
+            parent = os.path.dirname(ancestor)
+            if parent == ancestor:
+                break
+            ancestor = parent
+
+        ancestor = current_dir
+        while True:
+            if os.path.basename(ancestor).lower() == candidate.lower():
+                return ancestor, True
+            parent = os.path.dirname(ancestor)
+            if parent == ancestor:
+                break
+            ancestor = parent
+
+    home_path = os.path.expanduser(expanded)
+    if os.path.exists(home_path):
+        return home_path, True
+    case_path = _find_case_insensitive_child(os.path.dirname(home_path) or os.path.expanduser('~'), os.path.basename(home_path))
+    if case_path:
+        return case_path, True
+
+    if allow_desktop_fallback:
+        desktop_path = os.path.join(desktop_root, candidate)
+        if os.path.exists(desktop_path):
+            return desktop_path, True
+        case_path = _find_case_insensitive_child(desktop_root, candidate)
+        if case_path:
+            return case_path, True
+
+    return cwd_path, False
+
+
+def _looks_like_path(candidate: str) -> bool:
+    return bool(re.search(r'[\\/]|~', candidate))
+
+
+def _looks_like_app_name(name: str) -> bool:
+    if not name:
+        return False
+    known_gui_markers = {'chrome', 'firefox', 'browser', 'code', 'vscode', 'terminal', 'nautilus', 'files', 'thunderbird', 'libreoffice', 'vlc', 'gimp'}
+    name = name.lower()
+    if any(marker in name for marker in known_gui_markers):
+        return True
+    return shutil.which(name) is not None
+
+
+def _resolve_folder_target(candidate: str, desktop_only: bool = False) -> tuple[str, bool]:
+    path, exists = _normalize_path_candidate(candidate, desktop_only=desktop_only)
+    if exists:
+        return path, True
+    if desktop_only:
+        return path, True
+    if _looks_like_path(candidate):
+        return path, False
+    return path, False
 
 
 def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, dict]:
@@ -16,6 +121,17 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     normalized = text.strip().lower()
     if not normalized:
         return None, {}
+
+    # Quick CLI-style shorthands: 'ls', 'dir', 'cat <file>'
+    if normalized == 'ls' or normalized.startswith('ls '):
+        path = normalized[3:].strip() or '.'
+        return 'cli_ls', {'path': path}
+    if normalized == 'dir' or normalized.startswith('dir '):
+        path = normalized[4:].strip() or '.'
+        return 'cli_ls', {'path': path}
+    if normalized.startswith('cat '):
+        target = text.strip()[4:].strip()
+        return 'cli_cat', {'file_path': target}
 
     def _clean_install_target(candidate: str) -> str:
         cleaned = candidate.strip()
@@ -73,16 +189,83 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     # ============================================================
     # APP DISCOVERY & OPENING
     # ============================================================
-    browser_match = re.search(r'\b(?:open|launch|start|run|execute)\s+(?:a|an|the)??\s*(?:browser|chrome|firefox|web browser)\b', normalized)
+    # Handle explicit shell commands first so 'run shell command echo hello' is not misrouted.
+    shell_command = re.search(r'\b(?:run|execute|do)\s+(?:the\s+)?(?:shell\s+command|command)\s+(.+)', normalized)
+    if shell_command:
+        return 'run_shell_command', {'command': shell_command.group(1).strip()}
+
+    browser_search_match = re.search(
+        r'\b(?:open|launch|start|run|execute)\s+(?:a|an|the)?\s*(?:browser|chrome|firefox|web browser)\b.*\b(?:search|find|look(?:\s+up)?|google)\b',
+        normalized,
+    )
+    if browser_search_match:
+        query_match = re.search(
+            r'\b(?:search|find|look(?:\s+up)?|google)\s+(?:for\s+)?(.+?)(?:\s+(?:online|on\s+web|internet|using|with)\b.*|$)',
+            normalized,
+        )
+        query = query_match.group(1).strip() if query_match else normalized
+        return 'open_browser_and_search', {'query': query}
+
+    browser_match = re.search(r'\b(?:open|launch|start|run|execute)\s+(?:a|an|the)?\s*(?:browser|chrome|firefox|web browser)\b', normalized)
     if browser_match:
         return 'open_app', {'app_name': 'firefox'}
+
+    desktop_requested = bool(re.search(r'\bon\s+my\s+desktop|\bon\s+desktop|\bdesktop\b', normalized))
+
+    # Whole laptop / home directory search intent.
+    laptop_search_match = re.search(
+        r"\b(?:search|find|locate|look(?:\s+for)?)\b.*\b(?:my\s+)?(?:whole\s+)?(?:laptop|computer|machine|filesystem|home\s+directory|home\s+folder|disk|hard\s+drive)\b",
+        normalized,
+    )
+    if laptop_search_match:
+        query_match = re.search(r"\b(?:for|about)\b\s+(.+?)(?:\s+(?:on|in|under|within)\b.*)?$", text, re.IGNORECASE)
+        query = query_match.group(1).strip() if query_match else text.strip()
+        if query:
+            return 'search_files', {'query': query, 'root': os.path.expanduser('~')}
+
+    # Natural language listing: 'what files are in X', 'show me the files in X'
+    nl_list_match = re.search(r"\b(?:what\s+files\s+are\s+in|show\s+me\s+the\s+files\s+in|what's\s+in|what\s+is\s+in|show\s+me\s+what\s+is\s+in)\s+(?:the\s+)?([\w\-\. ]+?)(?:\s+on\s+my\s+desktop|\s+on\s+desktop)?(?:\s|$)", normalized)
+    if nl_list_match:
+        folder = nl_list_match.group(1).strip()
+        folder = re.sub(r'\s+(?:folder|directory)$', '', folder).strip()
+        path, exists = _normalize_path_candidate(folder, desktop_only=desktop_requested, allow_desktop_fallback=True)
+        if exists:
+            return 'list_directory', {'path': path}
+
+    # Open file requests: route file paths before generic app launch handling.
+    file_open_match = re.search(r"\b(?:open|read|view|show|display)\s+([\w\-\.\~/\\ ]+\.[a-zA-Z0-9]+)\b", text)
+    if file_open_match:
+        return 'cli_open', {'file_path': file_open_match.group(1).strip()}
+
+    if re.search(r"\b(?:open|show|launch|browse)\s+(?:the\s+)?(?:file\s+manager|file\s+explorer|file\s+browser)\b", normalized):
+        return 'open_app', {'app_name': 'files'}
+
+    # Open folder requests with explicit folder/directory phrasing.
+    folder_match = re.search(r"\b(?:open|show|launch|display|browse)\s+(?:the\s+)?([\w\-\. ]+?)\s*(?:folder|directory)(?:\s+on\s+my\s+desktop|\s+on\s+desktop)?(?:\s|$)", normalized)
+    if folder_match:
+        folder = folder_match.group(1).strip()
+        path, exists = _normalize_path_candidate(folder, desktop_only=desktop_requested, allow_desktop_fallback=desktop_requested)
+        if desktop_requested and not exists:
+            path = os.path.join(getattr(config, 'DESKTOP_PATH', os.path.expanduser('~/Desktop')), folder)
+        return 'run_shell_command', {'command': f'xdg-open "{path}"'}
+
+    # Attempt to open a named folder from the desktop or current context.
+    plain_folder_match = re.search(r"\b(?:open|show|browse|launch)\s+(.+?)(?:\s+on\s+my\s+desktop|\s+on\s+desktop|$)", text, re.IGNORECASE)
+    if plain_folder_match:
+        folder = plain_folder_match.group(1).strip()
+        if folder.lower() not in {'a', 'an', 'the', 'browser', 'file', 'folder', 'directory', 'app', 'application', 'program', 'terminal', 'command'}:
+            path, exists = _normalize_path_candidate(folder, desktop_only=desktop_requested, allow_desktop_fallback=desktop_requested)
+            if exists or not _looks_like_app_name(folder):
+                return 'run_shell_command', {'command': f'xdg-open "{path}"'}
 
     open_app_match = re.search(r'\b(?:open|launch|start|run|execute)\s+(?:the\s+)?([a-zA-Z0-9\s\-]+?)(?:\s+(?:app|application|program|browser|editor))?\b', normalized)
     if open_app_match:
         app_name = open_app_match.group(1).strip().lower()
-        if app_name in {'a', 'an', 'the'}:
+        if app_name in {'a', 'an', 'the'} or 'folder' in normalized or 'directory' in normalized or 'file' in normalized or 'command' in normalized:
             return None, {}
-        return 'open_app', {'app_name': app_name}
+        if 'browser' in app_name or 'chrome' in app_name or 'firefox' in app_name or _looks_like_app_name(app_name):
+            return 'open_app', {'app_name': app_name}
+        return None, {}
 
     # ============================================================
     # GENERIC SKILL DISPATCH
@@ -90,7 +273,6 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     skill_call_patterns = [
         r'\b(?:use|call|run|invoke)\s+(?:the\s+)?(.+?)\s+skill\b',
         r'\b(?:use|call|run|invoke)\s+(?:the\s+)?([a-zA-Z0-9_\.\-]+)\b',
-        r'\b(?:activate|start|open)\s+(?:the\s+)?([a-zA-Z0-9_\.\-]+)\b',
     ]
     for pattern in skill_call_patterns:
         match = re.search(pattern, normalized)
@@ -135,9 +317,33 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     # ============================================================
     # FILE MANAGEMENT
     # ============================================================
+    # Natural language listing: "what files are in X", "show me the files in X"
+    nl_list_match = re.search(r"\b(?:what\s+files\s+are\s+in|show\s+me\s+the\s+files\s+in|what's\s+in|what\s+is\s+in)\s+(?:the\s+)?([\w\-\. ]+?)(?:\s+on\s+my\s+desktop|\s+on\s+desktop)?\b", normalized)
+    if nl_list_match:
+        folder = nl_list_match.group(1).strip()
+        # If user referred to 'projects' on desktop
+        if 'desktop' in normalized or 'on my desktop' in text.lower() or 'on desktop' in text.lower():
+            path = os.path.expanduser(f"~/Desktop/{folder}")
+        else:
+            path = folder
+        return 'list_directory', {'path': path}
+
+    # Open folder requests: prefer xdg-open via run_shell_command for GUI
+    nl_open_match = re.search(r"\b(?:open|show|launch|display)\s+(?:the\s+)?([\w\-\. ]+?)(?:\s+folder|\s+directory)?(?:\s+on\s+my\s+desktop|\s+on\s+desktop)?\b", normalized)
+    if nl_open_match:
+        folder = nl_open_match.group(1).strip()
+        if 'desktop' in normalized or 'on my desktop' in text.lower() or 'on desktop' in text.lower():
+            path = os.path.expanduser(f"~/Desktop/{folder}")
+        else:
+            path = folder
+        # Use xdg-open to open the folder in the user's file manager
+        return 'run_shell_command', {'command': f'xdg-open "{path}"'}
+
     create_folder_patterns = [
-        r'\b(?:create|make)\s+(?:a|an)?\s*(?:folder|directory)\s+(?:named|called)?\s*([\w\-\. ]+)',
-        r'\b(?:create|make)\s+(?:a|an)?\s*(?:folder|directory)\s+on\s+(?:my\s+)?(?:desktop|computer|pc)\b',
+        r'\b(?:create|make|new)\s+(?:a|an)?\s*(?:folder|directory)\s+(?:named|called)?\s*([\w\-\. ]+)',
+        r'\b(?:create|make|new)\s+(?:a|an)?\s*(?:folder|directory)\s+on\s+(?:my\s+)?(?:desktop|computer|pc)\b',
+        r'\bnew\s+folder\s+named\s+([\w\-\. ]+)(?:\s+on\s+my\s+desktop|\s+on\s+desktop)?\b',
+        r'\bnew\s+folder\s+([\w\-\. ]+)(?:\s+on\s+my\s+desktop|\s+on\s+desktop)?\b',
     ]
     for pattern in create_folder_patterns:
         match = re.search(pattern, normalized)
@@ -161,6 +367,15 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
                 return 'manage_files', {'action': action, 'path': match.group(1), 'new_path': match.group(2)}
             else:
                 return 'manage_files', {'action': action, 'path': match.group(1) if match.groups() else ''}
+
+    open_app_match = re.search(r'\b(?:open|launch|start|run|execute)\s+(?:the\s+)?([a-zA-Z0-9\s\-]+?)(?:\s+(?:app|application|program|browser|editor))?\b', normalized)
+    if open_app_match:
+        app_name = open_app_match.group(1).strip().lower()
+        if app_name in {'a', 'an', 'the'} or 'folder' in normalized or 'directory' in normalized or 'file' in normalized or 'command' in normalized:
+            return None, {}
+        if 'browser' in app_name or 'chrome' in app_name or 'firefox' in app_name or _looks_like_app_name(app_name):
+            return 'open_app', {'app_name': app_name}
+        return None, {}
 
     # ============================================================
     # WEB SEARCH
@@ -207,7 +422,7 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
         if match:
             contact = match.group(1) if match.groups().__len__() == 2 else match.group(2)
             msg = match.group(2) if match.groups().__len__() == 2 else match.group(1)
-            return 'prepare_whatsapp_message', {'contact_name': contact.strip(), 'message': msg.strip()}
+            return 'send_whatsapp', {'contact_name': contact.strip(), 'message': msg.strip()}
 
     # ============================================================
     # TRADING NEWS & MARKET CALENDAR
