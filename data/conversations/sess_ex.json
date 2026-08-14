@@ -1,0 +1,42 @@
+[
+  {
+    "timestamp": "2026-08-14T09:43:03.799759Z",
+    "user": "explode",
+    "agent": "[{\"tool\": \"test.explode\", \"success\": false, \"output\": null, \"error\": \"boom\"}]"
+  },
+  {
+    "timestamp": "2026-08-14T09:43:53.677319Z",
+    "user": "explode",
+    "agent": "[{\"tool\": \"test.explode\", \"success\": false, \"output\": null, \"error\": \"boom\"}]"
+  },
+  {
+    "timestamp": "2026-08-14T09:53:50.837330Z",
+    "user": "explode",
+    "agent": "[{\"tool\": \"test.explode\", \"success\": false, \"output\": null, \"error\": \"boom\"}]"
+  },
+  {
+    "timestamp": "2026-08-14T10:01:44.166429Z",
+    "user": "explode",
+    "agent": "[{\"tool\": \"test.explode\", \"success\": false, \"output\": null, \"error\": \"boom\"}]"
+  },
+  {
+    "timestamp": "2026-08-14T11:39:51.642805Z",
+    "user": "explode",
+    "agent": "[{\"tool\": \"test.explode\", \"success\": false, \"output\": null, \"error\": \"boom\"}]"
+  },
+  {
+    "timestamp": "2026-08-14T11:48:00.570734Z",
+    "user": "explode",
+    "agent": "[{\"tool\": \"test.explode\", \"success\": false, \"output\": null, \"error\": \"boom\"}]"
+  },
+  {
+    "timestamp": "2026-08-14T11:52:35.788018Z",
+    "user": "explode",
+    "agent": "[{\"tool\": \"test.explode\", \"success\": false, \"output\": null, \"error\": \"boom\"}]"
+  },
+  {
+    "timestamp": "2026-08-14T13:39:37.541966Z",
+    "user": "explode",
+    "agent": "[{\"tool\": \"test.explode\", \"success\": false, \"output\": null, \"error\": \"boom\"}]"
+  }
+]

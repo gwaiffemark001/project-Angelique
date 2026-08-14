@@ -12,5 +12,12 @@
     "metadata": {},
     "created_at": "2026-08-13T23:44:14.378603Z",
     "usage_count": 0
+  },
+  "compute_the_square_of_7:26f19dc21668": {
+    "name": "compute_the_square_of_7",
+    "code": "def main(**kwargs):\n    return 7 ** 2\n",
+    "metadata": {},
+    "created_at": "2026-08-14T13:39:38.476517Z",
+    "usage_count": 0
   }
 }

@@ -113,12 +113,17 @@ def run_shell_command(
 
         if auto_confirm and _is_privileged_command(command):
             stripped = command.strip()
-            if re.match(r"^(apt-get|apt)\s+", stripped, flags=re.IGNORECASE) and " -y" not in f" {stripped} ":
-                parts = stripped.split(None, 1)
-                if len(parts) == 2:
-                    command_to_run = f"{parts[0]} -y {parts[1]}"
+            # Match optional leading sudo, then apt or apt-get, capturing the remainder
+            m = re.match(r'^(?:(sudo)\s+)?(apt-get|apt)\b(.*)$', stripped, flags=re.IGNORECASE)
+            if m and " -y" not in f" {stripped} ":
+                sudo_prefix = (m.group(1) or "").strip()
+                apt_cmd = m.group(2)
+                rest = (m.group(3) or "").strip()
+                # Build command placing -y after apt/apt-get and preserving sudo if present
+                if sudo_prefix:
+                    command_to_run = f"{sudo_prefix} {apt_cmd} -y {rest}".strip()
                 else:
-                    command_to_run = f"{stripped} -y"
+                    command_to_run = f"{apt_cmd} -y {rest}".strip()
             else:
                 command_to_run = command
 

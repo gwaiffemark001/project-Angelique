@@ -1,0 +1,12 @@
+[
+  {
+    "timestamp": "2026-08-14T08:56:53.754218Z",
+    "user": "open spotify",
+    "agent": "Error executing open_app: Validation failed: ['Unknown tool: open_app']"
+  },
+  {
+    "timestamp": "2026-08-14T08:57:03.726882Z",
+    "user": "open spotify",
+    "agent": "Error executing open_app: Validation failed: ['Unknown tool: open_app']"
+  }
+]
