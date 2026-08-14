@@ -1,0 +1,12 @@
+[
+  {
+    "timestamp": "2026-08-13T23:18:47.152314Z",
+    "user": "uninstall cmatrix",
+    "agent": "Interactive command finished with exit code: 0\nIf sudo prompted, enter the password directly in the terminal where Angelique is running."
+  },
+  {
+    "timestamp": "2026-08-13T23:18:57.785956Z",
+    "user": "uninstall cmatrix",
+    "agent": "Interactive command finished with exit code: 0\nIf sudo prompted, enter the password directly in the terminal where Angelique is running."
+  }
+]

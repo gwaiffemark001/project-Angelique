@@ -1,7 +1,0 @@
-[
-  {
-    "timestamp": "2026-08-11T17:06:00.009072Z",
-    "user": "I got enough to wear something better for something good",
-    "agent": "[{\"value\": \"blue\", \"entity\": \"User\", \"context\": \"talking about personal preferences\", \"importance\": 2, \"key\": \"favorite color\", \"type\": \"fact\"}]"
-  }
-]

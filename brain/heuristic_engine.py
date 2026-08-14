@@ -122,6 +122,42 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     if not normalized:
         return None, {}
 
+    # Quick music/playback heuristics (handle before generic app opening)
+    try:
+        from core import config as _cfg
+        _debug = bool(getattr(_cfg, 'DEBUG_HEURISTICS', False))
+    except Exception:
+        _debug = False
+
+    # Examples: "play lana del rey on youtube", "play radio by lana del rey", "play lana del rey songs"
+    m = re.search(r'\bplay\s+(?:the\s+)?(?:radio\s+by\s+|song[s]?\s+by\s+|)([\w\s\-&]+?)\s*(?:on\s+youtube|on\s+spotify|on\s+youtube.com|on\s+web|$)', normalized)
+    if m:
+        artist = m.group(1).strip()
+        if 'spotify' in normalized:
+            if _debug:
+                print(f"🔍 [HEURISTIC] music -> open_app spotify (artist={artist})")
+            return 'open_app', {'app_name': 'spotify'}
+        # default to opening browser and searching YouTube for radio/playlist
+        query = f"{artist} radio site:youtube.com"
+        if _debug:
+            print(f"🔍 [HEURISTIC] music -> open_browser_and_search (query={query})")
+        return 'open_browser_and_search', {'query': query}
+
+    # Another form: "play <artist> on youtube" or "play <song> on youtube"
+    m2 = re.search(r'\bplay\s+([\w\s\-&]+?)\s+(?:on\s+)?(youtube|spotify)\b', normalized)
+    if m2:
+        target = m2.group(1).strip()
+        svc = m2.group(2).strip()
+        if svc == 'spotify':
+            if _debug:
+                print(f"🔍 [HEURISTIC] music -> open_app spotify (target={target})")
+            return 'open_app', {'app_name': 'spotify'}
+        else:
+            query = f"{target} site:youtube.com"
+            if _debug:
+                print(f"🔍 [HEURISTIC] music -> open_browser_and_search (query={query})")
+            return 'open_browser_and_search', {'query': query}
+
     # Quick CLI-style shorthands: 'ls', 'dir', 'cat <file>'
     if normalized == 'ls' or normalized.startswith('ls '):
         path = normalized[3:].strip() or '.'
@@ -352,7 +388,17 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
             folder_name = re.sub(r'\s+(?:on|in|for|at|to)\b.*$', '', folder_name).strip()
             folder_name = re.sub(r'\s+', '_', folder_name).strip(' ._') or 'new_folder'
             desktop_root = getattr(config, 'DESKTOP_PATH', None) or os.path.expanduser('~/Desktop')
-            return 'manage_files', {'action': 'mkdir', 'path': os.path.join(desktop_root, folder_name)}
+            # If the user's desktop path is not writable in this environment (e.g., sandbox),
+            # fall back to the project's data directory so file operations succeed.
+            try:
+                if not os.path.isdir(desktop_root) or not os.access(desktop_root, os.W_OK):
+                    fallback = getattr(config, 'DATA_DIR', None) or os.path.expanduser('~')
+                    target = os.path.join(str(fallback), folder_name)
+                else:
+                    target = os.path.join(desktop_root, folder_name)
+            except Exception:
+                target = os.path.join(str(getattr(config, 'DATA_DIR', os.path.expanduser('~'))), folder_name)
+            return 'manage_files', {'action': 'mkdir', 'path': target}
 
     file_patterns = [
         (r'\b(?:read|open|view|show|display)\s+(?:file|document)\s+([/\w\-\. ]+)', 'read'),
@@ -404,7 +450,9 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
         r'\b(?:remember|save|store|note|log).*?(?:that|my|me)\b',
         r'\b(?:my|i)\s+(?:am|is|have|like|love|hate|enjoy|prefer)\b',
     ]
-    if any(re.search(p, normalized) for p in save_memory_patterns):
+    # Avoid false-positive "save memory" extraction inside file creation / write commands
+    file_operation_markers = r'\b(?:file|desktop|put the text|create|write|text file|save file|open file|put text)\b'
+    if any(re.search(p, normalized) for p in save_memory_patterns) and not re.search(file_operation_markers, normalized):
         # Extract key=value patterns
         value_match = re.search(r'(?:is|am|have|like|love|hate|enjoy|prefer)\s+(.+?)(?:\?|$)', normalized)
         if value_match:

@@ -4,6 +4,17 @@ import shutil
 
 def manage_files(action: str, path: str, content: str = "", new_path: str = "") -> str:
     try:
+        action = (action or "").lower()
+        # normalize common aliases
+        if action == "write":
+            action = "create"
+        if action in ("rm", "remove"):
+            action = "delete"
+        if action == "mv":
+            action = "move"
+        if action == "cp":
+            action = "copy"
+
         if action == "create":
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:

@@ -38,6 +38,26 @@ class ToolsTests(unittest.TestCase):
         self.assertIsInstance(result, dict)
         self.assertIn("cpu_percent", result)
 
+    def test_generate_image_uses_local_diffusers_model_id_when_configured(self):
+        from types import SimpleNamespace
+        from skills.vision import image_generator
+
+        fake_image = SimpleNamespace(save=lambda path: None)
+        fake_pipe = MagicMock()
+        fake_pipe.to.return_value = fake_pipe
+        fake_pipe.return_value.images = [fake_image]
+
+        fake_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+        fake_diffusers = SimpleNamespace(StableDiffusionPipeline=SimpleNamespace(from_pretrained=MagicMock(return_value=fake_pipe)))
+
+        with patch.object(image_generator.config, "HUGGINGFACE_LOCAL", True), \
+             patch.object(image_generator.config, "HUGGINGFACE_LOCAL_MODEL_ID", "demo/local-model"), \
+             patch.dict("sys.modules", {"torch": fake_torch, "diffusers": fake_diffusers}):
+            result = image_generator._try_local_huggingface("a moonlit city", "realistic", 512, 512, "/tmp")
+
+        self.assertTrue(result.startswith("✅ Image generated locally via diffusers!"))
+        fake_diffusers.StableDiffusionPipeline.from_pretrained.assert_called_once_with("demo/local-model")
+
     @patch("brain.llm_interface.requests.post")
     def test_query_llm_prefers_remote_models_before_local(self, mock_post):
         original_priority = llm_interface.config.API_PRIORITY
@@ -269,6 +289,29 @@ class ToolsTests(unittest.TestCase):
         mock_popen.return_value = process
 
         result = system_cmds.run_shell_command("apt-get remove cmatrix", sudo_password="secret", auto_confirm=True)
+
+        mock_popen.assert_called_once()
+        command_used = mock_popen.call_args.args[0][-1]
+        self.assertIn("apt-get -y remove cmatrix", command_used)
+        self.assertIn("Exit code: 0", result)
+
+    @patch("skills.os_control.system_cmds.subprocess.Popen")
+    def test_run_shell_command_skips_apt_confirm_prompt_when_auto_yes_is_required(self, mock_popen):
+        process = MagicMock()
+        process.communicate.return_value = ("", "")
+        process.returncode = 0
+        mock_popen.return_value = process
+
+        from skills.os_control.system_cmds import set_privileged_command_callbacks
+
+        try:
+            set_privileged_command_callbacks(
+                confirm_callback=lambda command: False,
+                password_callback=lambda command: "secret",
+            )
+            result = system_cmds.run_shell_command("apt-get remove cmatrix")
+        finally:
+            set_privileged_command_callbacks(None, None, None)
 
         mock_popen.assert_called_once()
         command_used = mock_popen.call_args.args[0][-1]

@@ -1,1 +1,0 @@
-def main(**k): return "ok"

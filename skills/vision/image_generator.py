@@ -10,6 +10,11 @@ def generate_image(prompt: str, style: str = "realistic", width: int = 1024, hei
     """Generate an image using multiple AI backends with fallback."""
     output_dir = str(config.GENERATED_IMAGES_DIR)
     os.makedirs(output_dir, exist_ok=True)
+    # Prefer local HuggingFace runtime when configured
+    if getattr(config, 'HUGGINGFACE_LOCAL', False):
+        result = _try_local_huggingface(prompt, style, width, height, output_dir)
+        if result:
+            return result
 
     result = _try_huggingface(prompt, style, width, height, output_dir)
     if result:
@@ -39,6 +44,39 @@ def _try_huggingface(prompt, style, width, height, output_dir):
             return f"✅ Image generated via HuggingFace! Saved to: {file_path}"
     except Exception as e:
         print(f"⚠️ [ImageGen] HuggingFace failed: {e}")
+    return None
+
+
+def _try_local_huggingface(prompt, style, width, height, output_dir):
+    """Attempt to generate images using a locally available HuggingFace model via diffusers."""
+    if not getattr(config, 'HUGGINGFACE_LOCAL', False):
+        return None
+
+    model_id = getattr(config, 'HUGGINGFACE_LOCAL_MODEL_ID', '') or os.getenv('HUGGINGFACE_LOCAL_MODEL_ID')
+    if not model_id:
+        print("⚠️ [ImageGen] Local diffusers enabled but HUGGINGFACE_LOCAL_MODEL_ID is not set.")
+        return None
+
+    try:
+        # Lazy import heavy deps
+        import torch
+        from diffusers import StableDiffusionPipeline
+    except Exception as e:
+        print(f"⚠️ [ImageGen] Local diffusers not available: {e}")
+        return None
+
+    try:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        pipe = StableDiffusionPipeline.from_pretrained(model_id)
+        pipe = pipe.to(device)
+        images = pipe(prompt, num_inference_steps=20, height=height, width=width).images
+        if images:
+            filename = f"img_local_{hashlib.md5(prompt.encode()).hexdigest()[:8]}.png"
+            file_path = os.path.join(output_dir, filename)
+            images[0].save(file_path)
+            return f"✅ Image generated locally via diffusers! Saved to: {file_path}"
+    except Exception as e:
+        print(f"⚠️ [ImageGen] Local HuggingFace generation failed: {e}")
     return None
 
 

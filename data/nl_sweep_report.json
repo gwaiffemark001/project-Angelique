@@ -1,0 +1,23 @@
+{
+  "total": 1,
+  "tool_count": 0,
+  "non_tool_count": 1,
+  "errors": 0,
+  "misses": [
+    {
+      "text": "/home/gwaiffemark/Desktop/Projects/project-Angelique/data/local_calendar.json",
+      "reason": "llm_or_conv",
+      "result": {
+        "source": "llm",
+        "answer": "I'm having a little trouble connecting to my brain right now.",
+        "details": {
+          "thinker": "I'm having a little trouble connecting to my brain right now.",
+          "critic": "I'm having a little trouble connecting to my brain right now.",
+          "synthesizer": "I'm having a little trouble connecting to my brain right now.",
+          "orchestrated": true
+        }
+      }
+    }
+  ],
+  "suggestions": {}
+}

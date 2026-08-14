@@ -101,11 +101,24 @@ WEB_SEARCH_BASE_URL = os.getenv("WEB_SEARCH_BASE_URL", "https://www.google.com/s
 
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
 HUGGINGFACE_MODEL_URL = os.getenv("HUGGINGFACE_MODEL_URL", "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0")
+HUGGINGFACE_LOCAL_MODEL_ID = os.getenv("HUGGINGFACE_LOCAL_MODEL_ID", "")
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "98f6HmuJM9hLdz4dHpfb")
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 EDGE_TTS_VOICE = os.getenv("ANGELIQUE_EDGE_TTS_VOICE", "en-US-AriaNeural")
+
+# --- External service API keys provided by user/environment ---
+OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY", "")
+WOLFRAM_APPID = os.getenv("WOLFRAM_APPID", "")
+# Allow local HuggingFace model usage (prefer local if present)
+HUGGINGFACE_LOCAL = os.getenv("HUGGINGFACE_LOCAL", "true").lower() in ("1", "true", "yes")
+
+# WhatsApp: prefer server-side API if configured, otherwise use local libraries/browser
+WHATSAPP_FALLBACKS = os.getenv("WHATSAPP_FALLBACKS", "pywhatkit,browser").split(",")
+
+# TTS preference: 'edge' | 'elevenlabs' | 'local'
+ANGELIQUE_TTS_PREFERENCE = os.getenv("ANGELIQUE_TTS_PREFERENCE", os.getenv("ANGELIQUE_TTS_PROVIDER", "edge"))
 
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-coder-32b-instruct")
 BLUESMINDS_MODEL = os.getenv("BLUESMINDS_MODEL", "meta/llama-3.1-8b-instruct")

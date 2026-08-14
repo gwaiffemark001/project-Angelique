@@ -210,6 +210,403 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
     """
     text = _strip_training_mode_prefix(user_input)
 
+    
+
+    # 0) Deterministic heuristic routing: try to map to a tool BEFORE calling any LLM.
+    try:
+        h_tool, h_args = nlp_to_tool_mapping(text)
+        if h_tool:
+            try:
+                tool_result = execute_tool(h_tool, h_args or {})
+            except Exception as e:
+                tool_result = f"Error executing {h_tool}: {e}"
+            try:
+                conv_save(session_id, user_input, tool_result)
+            except Exception:
+                pass
+            return {"source": "tool", "answer": tool_result, "details": {"tool": h_tool, "args": h_args}}
+    except Exception:
+        # If heuristic routing fails, continue to LLM-driven paths below.
+        pass
+
+    # If the input looks like an action and heuristics didn't match, map common
+    # package manager install/uninstall intents to `run_shell_command` so the
+    # skill executes rather than falling back to an LLM conversational reply.
+    try:
+        if _looks_like_action_request(text):
+            lower = (text or "").strip().lower()
+            # package manager install/uninstall fallbacks
+            m_un = re.search(r"\b(?:uninstall|remove)\s+([a-z0-9_\-\.]+)", lower)
+            if m_un:
+                pkg = m_un.group(1)
+                cmd = f"sudo apt remove {pkg}"
+                try:
+                    tool_result = execute_tool('run_shell_command', {'command': cmd})
+                except Exception as e:
+                    tool_result = f"Error executing shell command: {e}"
+                try:
+                    conv_save(session_id, user_input, tool_result)
+                except Exception:
+                    pass
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'run_shell_command', 'args': {'command': cmd}}}
+
+            m_inst = re.search(r"\binstall\s+([a-z0-9_\-\.]+)", lower)
+            if m_inst:
+                pkg = m_inst.group(1)
+                cmd = f"sudo apt install {pkg}"
+                try:
+                    tool_result = execute_tool('run_shell_command', {'command': cmd})
+                except Exception as e:
+                    tool_result = f"Error executing shell command: {e}"
+                try:
+                    conv_save(session_id, user_input, tool_result)
+                except Exception:
+                    pass
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'run_shell_command', 'args': {'command': cmd}}}
+    except Exception:
+        pass
+
+    # Comprehensive deterministic mappings for action-like phrases.
+    # These ensure tool dispatch before LLM fallback for higher reliability.
+    try:
+        lower = (text or "").strip().lower()
+
+        # ========== MESSAGING / WHATSAPP ==========
+        msg_patterns = [
+            (r"\b(?:send|message|text|whatsapp|msg)\s+(.+?)\s+(?:to|to:)\s+(.+?)(?:\s+(?:on|via|through|using))?\s*$", lambda m: (m.group(2).strip(), m.group(1).strip())),
+            (r"\b(?:tell|message|text|say)\s+(.+?)\s+(?:that|this):\s+(.+)$", lambda m: (m.group(1).strip(), m.group(2).strip())),
+            (r"\b(?:message|text|whatsapp)\s+(.+?)\s+with\s+(.+)$", lambda m: (m.group(1).strip(), m.group(2).strip())),
+            (r"\b(?:send|write)\s+a\s+(?:message|text)\s+to\s+(.+?)\s+(?:saying|with):\s+(.+)$", lambda m: (m.group(1).strip(), m.group(2).strip())),
+            (r"\b(?:text)\s+(.+?)\s+([\w\s]+?)(?:\s+(?:this|saying|with))?\s*$", lambda m: (m.group(1).strip(), m.group(2).strip())),
+        ]
+        for pattern, extractor in msg_patterns:
+            m = re.search(pattern, lower)
+            if m:
+                contact, msg = extractor(m)
+                try:
+                    tool_result = execute_tool('send_whatsapp', {'contact_name': contact, 'message': msg})
+                except Exception as e:
+                    tool_result = f"Error sending WhatsApp: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'send_whatsapp', 'args': {'contact_name': contact, 'message': msg}}}
+
+        # ========== IMAGE GENERATION ==========
+        img_patterns = [
+            (r"\b(?:generate|create|make|draw|render|paint|sketch|illustrate|visualize)\s+(?:an?|the)?\s*image\s+(?:of\s+)?(.+?)(?: (\d{2,4}x\d{2,4}))?$", lambda m: (m.group(1).strip(), m.group(2))),
+            (r"\bimage\s+of\s+(.+?)(?: (\d{2,4}x\d{2,4}))?$", lambda m: (m.group(1).strip(), m.group(2))),
+            (r"\b(?:paint|sketch|illustrate|visualize|draw|render)\s+(?:an?|the)?\s*(.+?)(?: (\d{2,4}x\d{2,4}))?$", lambda m: (m.group(1).strip(), m.group(2))),
+        ]
+        for pattern, extractor in img_patterns:
+            m = re.search(pattern, lower)
+            if m:
+                prompt, size = extractor(m)
+                try:
+                    tool_result = execute_tool('generate_image', {'prompt': prompt, 'size': size})
+                except Exception as e:
+                    tool_result = f"Error generating image: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'generate_image', 'args': {'prompt': prompt, 'size': size}}}
+
+        # ========== VOICE / SPEECH / TTS ==========
+        speak_patterns = [
+            r"\b(?:say|speak|announce|read|tell|pronounce)\s+(.+)$",
+            r"\b(?:voice|tts|text.?to.?speech)\s+(.+)$",
+            r"\b(?:voice|say):\s*(.+)$",
+            r"speak:\s*(.+)$",
+        ]
+        for pattern in speak_patterns:
+            m = re.search(pattern, lower)
+            if m:
+                phrase = m.group(1).strip().strip('"\'')
+                try:
+                    tool_result = execute_tool('speak', {'text': phrase})
+                except Exception:
+                    tool_result = execute_tool('call_skill', {'skill_name': 'skills.voice.voice_interface.speak', 'args': {'text': phrase}})
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'speak', 'args': {'text': phrase}}}
+
+        # ========== FILE OPERATIONS ==========
+        # Open/Read file
+        file_patterns = [
+            (r"\b(?:open|show|display|view|read|cat)\s+([\w\-\.\~/:\\]+\.[a-z0-9]+)\b", 'open'),
+            (r"\b(?:open|show|view|preview)\s+the?\s+file\s+([\w\-\.\~/:\\]+)\b", 'open'),
+        ]
+        for pattern, action in file_patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                fp = m.group(1).strip()
+                try:
+                    tool_result = execute_tool('cli_open' if action == 'open' else 'cli_cat', {'file_path': fp})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'cli_open', 'args': {'file_path': fp}}}
+
+        # List/Show directory
+        list_patterns = [
+            r"\b(?:what files are in|show me (?:the )?files in|list files in|ls|dir|list)\s+(.+)$",
+            r"\b(?:show|display|list)\s+(?:the )?(?:contents|files|contents of|directory|folder)\s+(.+)$",
+            r"\b(?:what|what is)\s+in\s+(.+?)(?:\s+folder|\s+directory)?$",
+        ]
+        for pattern in list_patterns:
+            m = re.search(pattern, lower)
+            if m:
+                path = m.group(1).strip()
+                try:
+                    tool_result = execute_tool('list_directory', {'path': path})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'list_directory', 'args': {'path': path}}}
+
+        # Create folder/directory
+        mkdir_patterns = [
+            r"\b(?:create|make|new|mkdir)\s+(?:a\s+)?(?:folder|directory|dir)\s+(?:named|called)?\s*([\w\-\. ]+)\b",
+            r"\b(?:create|make)\s+directory\s+([\w\-\. ]+)\b",
+            r"\bnew\s+folder:\s*([\w\-\. ]+)\b",
+        ]
+        for pattern in mkdir_patterns:
+            m = re.search(pattern, lower)
+            if m:
+                folder = m.group(1).strip().replace(' ', '_')
+                try:
+                    tool_result = execute_tool('manage_files', {'action': 'mkdir', 'path': folder})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'manage_files', 'args': {'action': 'mkdir', 'path': folder}}}
+
+        # Delete/Remove file
+        delete_patterns = [
+            r"\b(?:delete|remove|rm|erase|trash)\s+(?:file\s+)?([\w\-\.\~/:\\]+)\b",
+            r"\b(?:delete|remove)\s+(?:the )?(?:file|folder|directory)\s+([\w\-\.\~/:\\]+)\b",
+        ]
+        for pattern in delete_patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                fp = m.group(1).strip()
+                try:
+                    tool_result = execute_tool('manage_files', {'action': 'delete', 'path': fp})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'manage_files', 'args': {'action': 'delete', 'path': fp}}}
+
+        # Move/Rename file
+        move_patterns = [
+            r"\b(?:move|rename|mv)\s+([\w\-\.\~/:\\]+)\s+(?:to|into|as)\s+([\w\-\.\~/:\\]+)\b",
+            r"\b(?:move|rename)\s+(?:file\s+)?([\w\-\.\~/:\\]+)\s+to\s+([\w\-\.\~/:\\]+)\b",
+            r"\b(?:rename)\s+([\w\-\.\~/:\\]+)\s+([\w\-\.\~/:\\]+)\b",
+        ]
+        for pattern in move_patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                src, dst = m.group(1).strip(), m.group(2).strip()
+                try:
+                    tool_result = execute_tool('manage_files', {'action': 'move', 'path': src, 'new_path': dst})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'manage_files', 'args': {'action': 'move', 'path': src, 'new_path': dst}}}
+
+        # Copy file
+        copy_patterns = [
+            r"\b(?:copy|cp|duplicate|backup)\s+([\w\-\.\~/:\\]+)\s+(?:to|into|as)\s+([\w\-\.\~/:\\]+)\b",
+            r"\b(?:copy|duplicate)\s+(?:file\s+)?([\w\-\.\~/:\\]+)\s+to\s+([\w\-\.\~/:\\]+)\b",
+        ]
+        for pattern in copy_patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                src, dst = m.group(1).strip(), m.group(2).strip()
+                try:
+                    tool_result = execute_tool('manage_files', {'action': 'copy', 'path': src, 'new_path': dst})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'manage_files', 'args': {'action': 'copy', 'path': src, 'new_path': dst}}}
+
+        # ========== APP/PROGRAM LAUNCHING ==========
+        app_patterns = [
+            r"\b(?:open|launch|start|run|execute|begin)\s+(?:the\s+)?([a-z0-9\-_ ]+?)(?:\s+(?:app|application|program))?\b",
+            r"\b(?:open|launch|start)\s+([a-z0-9\-_ ]+?)$",
+        ]
+        for pattern in app_patterns:
+            m = re.search(pattern, lower)
+            if m:
+                app = m.group(1).strip()
+                if app not in {'file', 'folder', 'directory', 'terminal', 'browser', 'chrome', 'firefox', 'code', 'editor'} and not any(x in app for x in {'the', 'a ', 'an '}):
+                    try:
+                        tool_result = execute_tool('open_app', {'app_name': app})
+                    except Exception as e:
+                        tool_result = f"Error: {e}"
+                    conv_save(session_id, user_input, tool_result)
+                    return {"source": "tool", "answer": tool_result, "details": {"tool": 'open_app', 'args': {'app_name': app}}}
+
+        # ========== SYSTEM CHECKS & MONITORING ==========
+        if re.search(r"\b(?:check|get|show|what)\b.*\b(?:status|health|performance|metrics|pc|system|computer)\b", lower):
+            try:
+                tool_result = execute_tool('get_system_health', {})
+            except Exception as e:
+                tool_result = f"Error: {e}"
+            conv_save(session_id, user_input, tool_result)
+            return {"source": "tool", "answer": tool_result, "details": {"tool": 'get_system_health'}}
+
+        # ========== WEB SEARCH ==========
+        if re.search(r"\b(?:search|google|find|look\s+up|research|query)\s+(?:for\s+|about\s+)?(.+)", lower):
+            m = re.search(r"\b(?:search|google|find|look\s+up|research|query)\s+(?:for\s+|about\s+)?(.+)", lower)
+            if m:
+                query = m.group(1).strip()
+                try:
+                    tool_result = execute_tool('search_web', {'query': query})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'search_web', 'args': {'query': query}}}
+
+        # ========== MEMORY / RECALL ==========
+        if re.search(r"\b(?:recall|remember|tell me about|remind me|what do you know about)\b", lower):
+            m = re.search(r"\b(?:recall|remember|tell me about|remind me|what do you know about)\s+(.+)$", lower)
+            if m:
+                query = m.group(1).strip()
+                try:
+                    tool_result = execute_tool('recall_memory', {'query': query})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'recall_memory', 'args': {'query': query}}}
+
+        # ========== SAVE/STORE MEMORY ==========
+        if re.search(r"\b(?:remember|save|store|note|log|record)\s+(?:that|this|my)\b", lower):
+            try:
+                tool_result = execute_tool('save_memory', {'person': 'User', 'key': 'note', 'value': text})
+            except Exception as e:
+                tool_result = f"Error: {e}"
+            conv_save(session_id, user_input, tool_result)
+            return {"source": "tool", "answer": tool_result, "details": {"tool": 'save_memory'}}
+
+        # ========== PDF CREATION ==========
+        pdf_patterns = [
+            r"\b(?:save|create|generate|make|write|export)\s+(?:as\s+)?(?:pdf|\.pdf|to pdf|a pdf|a pdf file)\b",
+            r"\b(?:convert|turn)\s+(?:this|into)\s+(?:pdf|\.pdf)\b",
+        ]
+        if any(re.search(p, lower) for p in pdf_patterns):
+            try:
+                tool_result = execute_tool('save_text_pdf', {'path': '/tmp/document.pdf', 'text': text})
+            except Exception as e:
+                tool_result = f"Error: {e}"
+            conv_save(session_id, user_input, tool_result)
+            return {"source": "tool", "answer": tool_result, "details": {"tool": 'save_text_pdf'}}
+
+        # ========== VISION / SCREENSHOT ==========
+        screenshot_patterns = [
+            r"\b(?:screenshot|screen capture|screenshot of|capture screen|take a screenshot|read screen|show screen|snap screen|grab screen|shot|sc)\b",
+        ]
+        if any(re.search(p, lower) for p in screenshot_patterns):
+            try:
+                tool_result = execute_tool('read_screen', {})
+            except Exception as e:
+                tool_result = f"Error: {e}"
+            conv_save(session_id, user_input, tool_result)
+            return {"source": "tool", "answer": tool_result, "details": {"tool": 'read_screen'}}
+
+        # ========== CAMERA / VISION ==========
+        camera_patterns = [
+            r"\b(?:camera|webcam|analyze camera|see|what.*?see|capture photo|take photo|webcam feed)\b",
+        ]
+        if any(re.search(p, lower) for p in camera_patterns):
+            try:
+                tool_result = execute_tool('analyze_camera', {})
+            except Exception as e:
+                tool_result = f"Error: {e}"
+            conv_save(session_id, user_input, tool_result)
+            return {"source": "tool", "answer": tool_result, "details": {"tool": 'analyze_camera'}}
+
+        # ========== INSTALLATION CHECKING ==========
+        install_check_patterns = [
+            r"\b(?:is|are)\s+(.+?)\s+installed\b",
+            r"\b(?:check|verify|confirm)\s+(?:if\s+)?(.+?)\s+(?:is\s+)?installed\b",
+            r"\b(?:do i have|did i install|is there)\s+(.+?)\b",
+        ]
+        for pattern in install_check_patterns:
+            m = re.search(pattern, lower)
+            if m:
+                target = m.group(1).strip()
+                try:
+                    tool_result = execute_tool('check_installation_status', {'target_name': target})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'check_installation_status', 'args': {'target_name': target}}}
+
+        # ========== TRADING / MARKET ==========
+        trading_patterns = [
+            r"\b(?:analyze|check|show|get)\s+(?:market|forex|stock|crypto)\s+(.+?)(?:\s+(?:chart|analysis|price|trend))?\b",
+            r"\b(?:chart|candle|candlestick|rsi|ema|moving average)\s+(.+?)\b",
+            r"\b(?:price|quote|rate|value)\s+(?:of\s+)?(.+?)\b",
+            r"\b(?:eurusd|gbpusd|usdjpy|btc|eth|gold)\b",
+        ]
+        for pattern in trading_patterns:
+            m = re.search(pattern, lower)
+            if m and m.groups():
+                symbol = m.group(1).strip().upper()
+                try:
+                    tool_result = execute_tool('analyze_market_and_recommend', {'symbol': symbol, 'risk_percent': 1.0})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'analyze_market_and_recommend'}}
+
+        # ========== FOREX/MARKET NEWS ==========
+        if re.search(r"\b(?:news|market news|forex news|economic news|events|calendar)\b", lower):
+            try:
+                tool_result = execute_tool('get_forex_news', {'symbol': None})
+            except Exception as e:
+                tool_result = f"Error: {e}"
+            conv_save(session_id, user_input, tool_result)
+            return {"source": "tool", "answer": tool_result, "details": {"tool": 'get_forex_news'}}
+
+        # ========== LIST APPS / SOFTWARE ==========
+        if re.search(r"\b(?:list|show|what)\s+(?:apps|applications|programs|installed software|software)\b", lower):
+            try:
+                tool_result = execute_tool('list_apps', {})
+            except Exception as e:
+                tool_result = f"Error: {e}"
+            conv_save(session_id, user_input, tool_result)
+            return {"source": "tool", "answer": tool_result, "details": {"tool": 'list_apps'}}
+
+        # ========== SKILL GENERATION & CODE ==========
+        skill_patterns = [
+            r"\b(?:generate|create|make|write|code|build)\s+(?:a\s+)?(?:script|code|skill|tool|function)\s+(?:to|that|for)?\s+(.+)$",
+            r"\b(?:can you|please|write a script|generate code)\s+(?:to\s+)?(.+)\b",
+        ]
+        for pattern in skill_patterns:
+            m = re.search(pattern, lower)
+            if m:
+                instruction = m.group(1).strip()
+                try:
+                    tool_result = execute_tool('create_and_execute_skill', {'instruction': instruction})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'create_and_execute_skill'}}
+
+        # ========== CONSOLE / TERMINAL COMMANDS ==========
+        if re.search(r"\b(?:run|execute|bash|shell|cmd|command|powershell)\s+(.+)$", lower):
+            m = re.search(r"\b(?:run|execute|bash|shell|cmd|command|powershell)\s+(.+)$", lower)
+            if m:
+                cmd = m.group(1).strip()
+                try:
+                    tool_result = execute_tool('run_shell_command', {'command': cmd})
+                except Exception as e:
+                    tool_result = f"Error: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": 'run_shell_command'}}
+
+    except Exception:
+        pass
+    except Exception:
+        pass
+
     with _REQUEST_LOCK:
         # 1) Think: silently extract facts and persist them for non-action requests
         try:
@@ -277,6 +674,20 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
                 conv_save(session_id, user_input, tool_result)
                 return {"source": "tool", "answer": tool_result, "details": {"tool": tool_name, "args": args}}
 
+            # If orchestration didn't yield a tool decision, try deterministic heuristics
+            if not tool_name:
+                try:
+                    # first try mapping from the original user input
+                    h_tool, h_args = nlp_to_tool_mapping(text)
+                    if not h_tool:
+                        # then try mapping from the LLM raw response
+                        h_tool, h_args = nlp_to_tool_mapping(final_answer or "")
+                    if h_tool:
+                        tool_name = h_tool
+                        args = h_args or {}
+                except Exception:
+                    pass
+
             # Save any extracted facts from the final answer silently
             try:
                 extract_facts_silently(final_answer)
@@ -284,6 +695,11 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
                 pass
             details = orchestration.get("details", {}) if isinstance(orchestration, dict) else {}
             details["orchestrated"] = True
+            # If we found a tool via heuristics above, execute it; otherwise return LLM answer
+            if tool_name:
+                tool_result = execute_tool(tool_name, args or {})
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": tool_name, "args": args}}
             return {"source": "llm", "answer": final_answer, "details": details}
         else:
             # Single-pass lightweight LLM call for simple queries
@@ -480,7 +896,15 @@ def nlp_to_tool_mapping(text: str):
     Comprehensive deterministic routing using heuristic engine.
     Replaces partial hardcoded mappings with full coverage.
     """
+    try:
+        from core import config as _cfg
+        _debug = bool(getattr(_cfg, 'DEBUG_HEURISTICS', False))
+    except Exception:
+        _debug = False
+
     tool_name, args = extract_command_heuristically(text)
+    if _debug:
+        print(f"🔍 [NL2TOOL] input='{text}' -> tool='{tool_name}' args={args}")
     return tool_name, args
 
 def _looks_like_general_query(user_input: str) -> bool:
@@ -552,11 +976,15 @@ def _extract_tool_decision(raw_response: str, user_input: str, session_id: str |
         f"Previous assistant output: '{raw_response}'\n"
         "Return only valid JSON if an action is required, otherwise return a natural answer."
     )
-    clarified = query_llm(_build_messages_with_history(
+    # Ensure the clarification pass contains the original user request explicitly
+    clarification_messages = _build_messages_with_history(
         "You are a reasoning assistant tasked with producing a strict JSON tool request when appropriate.",
-        clarification_prompt,
+        user_input,
         session_id=session_id,
-    ), temperature=0.0)
+    )
+    # Add the clarification prompt as an additional user message so the model sees both the original request and the clarification instructions
+    clarification_messages.append({"role": "user", "content": clarification_prompt})
+    clarified = query_llm(clarification_messages, temperature=0.0)
 
     refined = extract_json_from_text(clarified or "")
     if isinstance(refined, dict) and refined:
@@ -859,6 +1287,12 @@ def run_cognitive_loop(user_input: str) -> str:
         recent_history = []
 
     messages = _build_messages_with_history(system_prompt, user_input, session_id=session_id)
+    # Ensure the current user input is present as the final user message
+    try:
+        if not any(m.get("role") == "user" and m.get("content") == user_input for m in messages):
+            messages.append({"role": "user", "content": user_input})
+    except Exception:
+        messages.append({"role": "user", "content": user_input})
 
     raw_response = query_llm(messages, temperature=0.0)
     if raw_response is None:

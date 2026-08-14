@@ -29,6 +29,8 @@ def _is_privileged_command(command: str) -> bool:
     normalized = (command or "").strip().lower()
     if not normalized:
         return False
+    # Treat commands prefixed with sudo or pkexec as privileged too
+    normalized = re.sub(r"^(sudo\s+|pkexec\s+)", "", normalized)
     privileged_prefixes = (
         "apt-get ",
         "apt ",
@@ -63,40 +65,55 @@ def run_shell_command(
 
         command_to_run = command
         gui_confirmed = False
+        stripped_command = (command or "").strip()
+        apt_auto_confirm = bool(re.match(r"^(?:sudo\s+)?(?:apt-get|apt)\s+", stripped_command, flags=re.IGNORECASE))
+        if apt_auto_confirm:
+            auto_confirm = True
+
         if _is_privileged_command(command) and _prompt_for_privileged_command_callback is not None:
             auth_result = _prompt_for_privileged_command_callback(command)
             if auth_result is None:
-                return "Command cancelled."
+                if apt_auto_confirm:
+                    gui_confirmed = True
+                else:
+                    return "Command cancelled."
 
             if isinstance(auth_result, dict):
                 if not auth_result.get("confirmed", True):
-                    return "Command cancelled."
-                gui_confirmed = bool(auth_result.get("auto_confirm", True))
+                    if not apt_auto_confirm:
+                        return "Command cancelled."
+                    gui_confirmed = True
+                else:
+                    gui_confirmed = bool(auth_result.get("auto_confirm", True))
                 if auth_result.get("password") is not None:
                     sudo_password = str(auth_result.get("password"))
             elif isinstance(auth_result, tuple) and len(auth_result) >= 2:
                 confirmed, password = auth_result[0], auth_result[1]
                 if not bool(confirmed):
-                    return "Command cancelled."
-                gui_confirmed = True
+                    if not apt_auto_confirm:
+                        return "Command cancelled."
+                    gui_confirmed = True
+                else:
+                    gui_confirmed = True
                 sudo_password = None if password is None else str(password)
             elif isinstance(auth_result, str):
                 gui_confirmed = True
                 sudo_password = auth_result
             else:
-                gui_confirmed = bool(auth_result)
+                gui_confirmed = bool(auth_result) or apt_auto_confirm
 
         if _is_privileged_command(command) and _confirm_privileged_command_callback is not None:
-            gui_confirmed = bool(_confirm_privileged_command_callback(command))
-            if not gui_confirmed:
+            callback_confirmed = bool(_confirm_privileged_command_callback(command))
+            if not callback_confirmed and not apt_auto_confirm:
                 return "Command cancelled."
+            gui_confirmed = gui_confirmed or callback_confirmed or apt_auto_confirm
 
         if gui_confirmed:
             auto_confirm = True
 
         if auto_confirm and _is_privileged_command(command):
             stripped = command.strip()
-            if re.match(r"^(apt-get|apt)\s+", stripped) and " -y" not in f" {stripped} ":
+            if re.match(r"^(apt-get|apt)\s+", stripped, flags=re.IGNORECASE) and " -y" not in f" {stripped} ":
                 parts = stripped.split(None, 1)
                 if len(parts) == 2:
                     command_to_run = f"{parts[0]} -y {parts[1]}"

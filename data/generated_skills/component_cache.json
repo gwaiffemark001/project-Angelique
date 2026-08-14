@@ -1,58 +1,16 @@
 {
-  "test:26ad4868316e": {
-    "name": "test",
-    "code": "def main(**k): return \"ok\"",
+  "a_n:89a512168cda": {
+    "name": "a_n",
+    "code": "def main(**kwargs):\n    return 'a_n'\n",
     "metadata": {},
-    "created_at": "2026-07-28T23:07:39.908801Z",
+    "created_at": "2026-08-13T23:44:13.519302Z",
     "usage_count": 0
   },
-  "h:87afbfa4ab84": {
-    "name": "h",
-    "code": "def double(x): return x*2",
+  "i_mage:fbaa75441798": {
+    "name": "i_mage",
+    "code": "def main(**kwargs):\n    return 'i_mage'\n",
     "metadata": {},
-    "created_at": "2026-07-28T23:07:39.914605Z",
-    "usage_count": 0
-  },
-  "provide:4b6e607fb09a": {
-    "name": "provide",
-    "code": "def main(**kwargs):\n    if 'provide' in kwargs:\n        if kwargs['provide'] == 'help':\n            print(\"Available options: help, exit, example\")\n        elif kwargs['provide'] == 'exit':\n            print(\"Exiting program.\")\n            exit()\n        elif kwargs['provide'] == 'example':\n            print(\"This is an example.\")\n        else:\n            print(\"Invalid option. Please use 'help' for available options.\")\n    else:\n        print(\"Invalid instruction. Please use 'provide' to specify an action.\")",
-    "metadata": {},
-    "created_at": "2026-08-01T23:35:49.157341Z",
-    "usage_count": 0
-  },
-  "provide:e47a9dad28ea": {
-    "name": "provide",
-    "code": "def main(**kwargs):\n    if 'provide' in kwargs:\n        if kwargs['provide'] == 'help':\n            print(\"Available options: help, exit\")\n        elif kwargs['provide'] == 'exit':\n            print(\"Exiting program.\")\n            exit()\n        else:\n            print(\"Unknown option. Please use 'help' for available options.\")\n    else:\n        print(\"Unknown instruction. Please use 'help' for available options.\")\n\nif __name__ == \"__main__\":\n    main()",
-    "metadata": {},
-    "created_at": "2026-08-01T23:45:00.522036Z",
-    "usage_count": 0
-  },
-  "compute_the_square_of_7:26f19dc21668": {
-    "name": "compute_the_square_of_7",
-    "code": "def main(**kwargs):\n    return 7 ** 2\n",
-    "metadata": {},
-    "created_at": "2026-08-11T23:00:28.287519Z",
-    "usage_count": 0
-  },
-  "provide:d42a4ff8b527": {
-    "name": "provide",
-    "code": "def main(**kwargs):\n    if 'provide' in kwargs:\n        if kwargs['provide'] == 'help':\n            print(\"This script provides help on how to use it.\")\n        elif kwargs['provide'] == 'information':\n            print(\"This script provides information on a given topic.\")\n        else:\n            print(\"Invalid option. Please use 'help' or 'information'.\")\n    else:\n        print(\"Please provide an option to use this script.\")\n\nif __name__ == \"__main__\":\n    main()",
-    "metadata": {},
-    "created_at": "2026-08-11T17:41:47.443179Z",
-    "usage_count": 0
-  },
-  "a:6e40c37301a8": {
-    "name": "a",
-    "code": "def main(**kwargs):\n    if 'a' in kwargs:\n        print(\"You chose option a\")",
-    "metadata": {},
-    "created_at": "2026-08-11T17:42:24.225862Z",
-    "usage_count": 0
-  },
-  "a:90daea6e9a5b": {
-    "name": "a",
-    "code": "def main(**kwargs):\n    if kwargs.get('a'):\n        print(\"Instruction 'a' received\")",
-    "metadata": {},
-    "created_at": "2026-08-11T17:49:54.260192Z",
+    "created_at": "2026-08-13T23:44:14.378603Z",
     "usage_count": 0
   }
 }

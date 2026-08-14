@@ -146,6 +146,26 @@ def send_whatsapp(contact_name=None, message=None, **kwargs):
             # Fall through to non-Playwright fallback
             pass
 
+    # 2b) Try a local WhatsApp helper library if available (best-effort)
+    # Try configured fallbacks in order
+    fallbacks = getattr(config, "WHATSAPP_FALLBACKS", ["pywhatkit", "browser"]) or ["pywhatkit", "browser"]
+    for fallback in fallbacks:
+        if fallback == "pywhatkit":
+            try:
+                import pywhatkit as _pywhatkit
+                phone_try = _find_contact_phone(contact_name)
+                if phone_try:
+                    try:
+                        _pywhatkit.sendwhatmsg_instantly(phone_try, message or "", tab_close=True, close_time=3)
+                        return f"✅ WhatsApp (pywhatkit) attempted send to '{contact_name}'."
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        if fallback == "browser":
+            # leave to the final browser open approach below
+            break
+
     phone = _find_contact_phone(contact_name)
     if not phone:
         return f"❌ WhatsApp messaging unavailable: contact '{contact_name}' was not found in contacts.csv."

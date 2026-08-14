@@ -121,6 +121,10 @@ from skills.conversation.chat_skill import (
     remember as conv_remember, recall as conv_recall,
     clear_session, list_sessions as list_conversations, new_session,
 )
+from core.adapters import jarvis_adapter as jarvis_adapter
+from core.adapters import jarviscli_adapter as jarviscli_adapter
+from core.adapters import local_calendar_adapter as local_calendar_adapter
+from core.adapters import image_pdf_adapter as image_pdf_adapter
 
 TOOL_REGISTRY = {
     # ============================================================
@@ -275,8 +279,15 @@ TOOL_REGISTRY = {
     },
     "generate_image": {
         "description": "Generate an AI image from a text prompt.",
-        "parameters": {"prompt": "Image description", "style": "Style (realistic, artistic, etc.)"},
-        "function": generate_image,
+        "parameters": {"prompt": "Image description", "style": "Style (realistic, artistic, etc.)", "size": "Optional size like 512x512", "width": "Optional width", "height": "Optional height"},
+        "function": lambda prompt, style="realistic", size=None, width=None, height=None: (
+            generate_image(
+                prompt,
+                style,
+                int(width) if width else (int(size.split('x')[0]) if isinstance(size, str) and 'x' in size else 1024),
+                int(height) if height else (int(size.split('x')[1]) if isinstance(size, str) and 'x' in size else 1024),
+            )
+        ),
     },
     "analyze_file": {
         "description": "Comprehensive file analysis (type, metadata, content preview, code stats).",
@@ -341,6 +352,64 @@ TOOL_REGISTRY = {
         "parameters": {},
         "function": lambda: get_network_interfaces(),
     },
+    # ============================================================
+    # ADAPTERS (external project bridges)
+    # ============================================================
+    "adapter.jarvis.time": {
+        "description": "Return current time via integrated Jarvis adapter.",
+        "parameters": {},
+        "function": lambda: jarvis_adapter.time(),
+    },
+    "adapter.jarvis.date": {
+        "description": "Return current date via integrated Jarvis adapter.",
+        "parameters": {},
+        "function": lambda: jarvis_adapter.date(),
+    },
+    "adapter.jarvis.system_info": {
+        "description": "Return system stats via integrated Jarvis adapter.",
+        "parameters": {},
+        "function": lambda: jarvis_adapter.system_info(),
+    },
+    "adapter.jarviscli.list_plugins": {
+        "description": "List available Jarvis CLI plugins discovered under base projects.",
+        "parameters": {},
+        "function": lambda: jarviscli_adapter.list_plugins(),
+    },
+    "adapter.jarviscli.call": {
+        "description": "Call a Jarvis CLI plugin by name with optional text input.",
+        "parameters": {"plugin_name": "Plugin module name", "text": "Text to pass to plugin"},
+        "function": lambda plugin_name, text="": jarviscli_adapter.call_plugin(plugin_name, text),
+    },
+    "adapter.calendar.list": {
+        "description": "List available local calendars (.ics files and local store).",
+        "parameters": {},
+        "function": lambda: local_calendar_adapter.list_calendars(),
+    },
+    "adapter.calendar.get_events": {
+        "description": "Get events for a date from local calendars.",
+        "parameters": {"date": "ISO date YYYY-MM-DD", "calendar_path": "Optional calendar path"},
+        "function": lambda date=None, calendar_path=None: local_calendar_adapter.get_events(date, calendar_path),
+    },
+    "adapter.calendar.add_event": {
+        "description": "Add an event to the local calendar store.",
+        "parameters": {"title": "Event title", "start_iso": "Start ISO datetime", "end_iso": "End ISO datetime (optional)", "description": "Description (optional)"},
+        "function": lambda title, start_iso, end_iso=None, description=None: local_calendar_adapter.add_event(title, start_iso, end_iso, description),
+    },
+    "adapter.calendar.remove_event": {
+        "description": "Remove an event from the local calendar store by id.",
+        "parameters": {"event_id": "Event UUID"},
+        "function": lambda event_id: local_calendar_adapter.remove_event(event_id),
+    },
+    "adapter.img.imgtopdf": {
+        "description": "Convert images to a single PDF file.",
+        "parameters": {"image_paths": "List of image file paths", "output_path": "Output PDF path"},
+        "function": lambda image_paths, output_path: image_pdf_adapter.images_to_pdf(image_paths, output_path),
+    },
+    "adapter.screen.capture_to_pdf": {
+        "description": "Capture a screenshot and save as PDF.",
+        "parameters": {"output_path": "Output PDF path", "region": "Optional region tuple (x,y,w,h)"},
+        "function": lambda output_path, region=None: image_pdf_adapter.screenshot_to_pdf(output_path, region),
+    },
     "get_logs": {
         "description": "Read the last N lines of a log file.",
         "parameters": {"log_file": "Path to log file (optional, shows log directory)", "lines": "Number of lines (default 50)"},
@@ -362,8 +431,8 @@ TOOL_REGISTRY = {
     },
     "save_text_pdf": {
         "description": "Create a plain text PDF at the given path.",
-        "parameters": {"path": "Output PDF path", "text": "Text content to save", "title": "Optional document title"},
-        "function": lambda path, text, title='Document': save_text_pdf(path, text),
+        "parameters": {"path": "Output PDF path", "text": "Text content to save", "content": "Text content to save (alias)", "title": "Optional document title"},
+        "function": lambda **kwargs: save_text_pdf(kwargs.get('path'), kwargs.get('text', kwargs.get('content', '')), kwargs.get('title', 'Document')),
     },
 
     # ============================================================
@@ -459,6 +528,20 @@ TOOL_REGISTRY = {
         "function": lambda: "\n".join([f"🕐 {e.get('time', '')} - {e.get('event', '')} [{e.get('impact', '')}]" for e in get_market_calendar()]) or "No calendar events.",
     },
 }
+
+# Dynamically expose Jarvis CLI plugins as tools under adapter.jarviscli.<name>
+try:
+    for _p in jarviscli_adapter.list_plugins():
+        key = f"adapter.jarviscli.{_p}"
+        if key not in TOOL_REGISTRY:
+            TOOL_REGISTRY[key] = {
+                "description": f"Call Jarvis CLI plugin '{_p}'",
+                "parameters": {"text": "Optional text input"},
+                "function": (lambda plugin_name: (lambda text="": jarviscli_adapter.call_plugin(plugin_name, text)))(_p),
+            }
+except Exception:
+    # discovery failure should not prevent Angelique from starting
+    pass
 
 import json
 

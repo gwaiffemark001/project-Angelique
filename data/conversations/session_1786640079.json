@@ -1,7 +1,0 @@
-[
-  {
-    "timestamp": "2026-08-13T16:56:24.216287Z",
-    "user": "send Jerome a message saying yoooo on whatsapp",
-    "agent": "[{\"key\": \"action\", \"importance\": 4, \"value\": \"text Jerome on whatsapp\", \"entity\": \"User\", \"type\": \"fact\", \"context\": \"discussing communication\"}]"
-  }
-]

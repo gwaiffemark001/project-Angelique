@@ -39,6 +39,13 @@ def is_speech_enabled() -> bool:
 def set_speech_enabled(enabled: bool):
     global SPEECH_ENABLED
     SPEECH_ENABLED = bool(enabled)
+    try:
+        from core import config as _cfg
+        _debug = bool(getattr(_cfg, 'DEBUG_HEURISTICS', False))
+    except Exception:
+        _debug = False
+    if _debug:
+        print(f"🔊 [Voice] Speech enabled set to {SPEECH_ENABLED}")
 
 
 def _is_online() -> bool:
@@ -94,49 +101,60 @@ def speak(text: str):
     spoke_successfully = False
     temp_file_created = True
 
-    # ==========================================
-    # 1. TRY EDGE-TTS FIRST (Free & Unlimited)
-    # ==========================================
-    try:
-        asyncio.run(_generate_edge_tts(clean_text, EDGE_TTS_VOICE, temp_mp3))
-        if os.path.exists(temp_mp3) and os.path.getsize(temp_mp3) > 0:
-            spoke_successfully = True
-    except Exception as e:
-        print(f"\n⚠️ [Voice] Edge-TTS failed: {e}. Falling back to ElevenLabs...")
+    # Build preferred provider order based on config
+    pref = getattr(config, "ANGELIQUE_TTS_PREFERENCE", "edge") or "edge"
+    order = []
+    if pref == "edge":
+        order = ["edge", "eleven", "local"]
+    elif pref == "eleven":
+        order = ["eleven", "edge", "local"]
+    elif pref == "local":
+        order = ["local", "edge", "eleven"]
+    else:
+        order = ["edge", "eleven", "local"]
 
-    # ==========================================
-    # 2. FALLBACK TO ELEVENLABS (Premium Backup)
-    # ==========================================
-    if not spoke_successfully and ELEVENLABS_API_KEY:
-        try:
-            from elevenlabs.client import ElevenLabs
-            client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-            audio_stream = client.text_to_speech.convert(
-                voice_id=ELEVENLABS_VOICE_ID,
-                text=clean_text[:2000],
-                model_id=ELEVENLABS_MODEL,
-                output_format="mp3_44100_64"
-            )
-            with open(temp_mp3, "wb") as f:
-                for chunk in audio_stream:
-                    if chunk:
-                        f.write(chunk)
-            spoke_successfully = True
-        except Exception as e:
-            print(f"\n⚠️ [Voice] ElevenLabs also failed: {e}")
-
-    # ==========================================
-    # 3. LOCAL FALLBACK TTS
-    # ==========================================
-    if not spoke_successfully:
-        try:
-            import pyttsx3
-            engine = pyttsx3.init()
-            engine.say(clean_text)
-            engine.runAndWait()
-            spoke_successfully = True
-        except Exception:
-            pass
+    for provider in order:
+        print(f"🔊 [Voice] Trying provider: {provider}")
+        if provider == "edge":
+            try:
+                asyncio.run(_generate_edge_tts(clean_text, EDGE_TTS_VOICE, temp_mp3))
+                if os.path.exists(temp_mp3) and os.path.getsize(temp_mp3) > 0:
+                    spoke_successfully = True
+                    break
+            except Exception as e:
+                print(f"\n⚠️ [Voice] Edge-TTS failed: {e}.")
+        elif provider == "eleven":
+            if not ELEVENLABS_API_KEY:
+                print("⚠️ [Voice] ElevenLabs API key missing, skipping provider.")
+                continue
+            try:
+                from elevenlabs.client import ElevenLabs
+                client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+                audio_stream = client.text_to_speech.convert(
+                    voice_id=ELEVENLABS_VOICE_ID,
+                    text=clean_text[:2000],
+                    model_id=ELEVENLABS_MODEL,
+                    output_format="mp3_44100_64"
+                )
+                with open(temp_mp3, "wb") as f:
+                    for chunk in audio_stream:
+                        if chunk:
+                            f.write(chunk)
+                spoke_successfully = True
+                break
+            except Exception as e:
+                print(f"\n⚠️ [Voice] ElevenLabs failed: {e}")
+        elif provider == "local":
+            try:
+                import pyttsx3
+                engine = pyttsx3.init()
+                engine.say(clean_text)
+                engine.runAndWait()
+                spoke_successfully = True
+                break
+            except Exception:
+                print("⚠️ [Voice] local TTS failed (pyttsx3).")
+                continue
 
     # ==========================================
     # 4. PLAY AUDIO

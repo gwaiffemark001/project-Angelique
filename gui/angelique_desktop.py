@@ -4,10 +4,13 @@ import os
 import re
 import socket
 import subprocess
+import wave
+import struct
 import sys
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from tkinter import simpledialog, messagebox, scrolledtext
 from pathlib import Path
 
@@ -150,6 +153,7 @@ class AngeliqueDesktopApp(tk.Tk):
             "_trading_refresh_pending": False,
             "_trading_refresh_generation": 0,
             "_command_in_progress": False,
+            "_pending_command_queue": deque(),
             "_speak_enabled": True,
             "_voice_listener_thread": None,
             "_stop_listening": None,
@@ -208,6 +212,11 @@ class AngeliqueDesktopApp(tk.Tk):
         self._bind_events()
         self._initialize_runtime()
         self._update_system_metrics()
+        # Start mission ticker updates so the right-panel 'MISSION STATUS' shows live info
+        try:
+            self._update_mission_ticker()
+        except Exception:
+            pass
         self._refresh_trading_bridge_status()
         self._start_trading_monitor()
         self._append_console("SYSTEM", "Angelique desktop matrix initialized. Live system data is now active.")
@@ -2378,6 +2387,52 @@ class AngeliqueDesktopApp(tk.Tk):
 
         self._draw_scan_lines(width, height)
 
+    def _start_background_rotation(self):
+        # Collect candidate images from assets folder, excluding the avatar
+        try:
+            candidates = []
+            for p in ASSETS_DIR.iterdir():
+                if not p.is_file():
+                    continue
+                if p.name.lower() == AVATAR_IMAGE.name.lower():
+                    continue
+                if p.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.webp', '.bmp'):
+                    continue
+                candidates.append(p)
+            # Sort for deterministic rotation order
+            candidates.sort()
+            self._bg_images = candidates
+            self._bg_index = 0
+        except Exception:
+            self._bg_images = []
+            self._bg_index = 0
+
+        # Start rotation loop (10 minutes)
+        def _rotate():
+            try:
+                if getattr(self, '_bg_images', None):
+                    self._bg_index = (self._bg_index + 1) % len(self._bg_images)
+                    path = self._bg_images[self._bg_index]
+                    if Image is not None:
+                        try:
+                            self._background_image = Image.open(path)
+                            self._background_photo = None
+                            self._update_background()
+                        except Exception:
+                            pass
+            finally:
+                # schedule next rotation
+                try:
+                    self.after(600000, _rotate)
+                except Exception:
+                    pass
+
+        # schedule first rotation in 10 minutes (do not change immediately on startup)
+        try:
+            self.after(600000, _rotate)
+        except Exception:
+            pass
+
     def _draw_scan_lines(self, width, height):
         if hasattr(self, "_scan_line_ids") and self._scan_line_ids:
             for line_id in self._scan_line_ids:
@@ -2555,11 +2610,22 @@ class AngeliqueDesktopApp(tk.Tk):
             self._append_console("SYSTEM", "Voice assist activated. Listening continuously...")
             self._set_avatar_status("LISTENING")
             self.footer_label.configure(text=self._footer_text("LISTENING"))
+            # Ensure speech engine is enabled for listening
+            try:
+                from skills.voice.voice_interface import set_speech_enabled
+                set_speech_enabled(True)
+            except Exception:
+                pass
             self._start_voice_listener()
         else:
             self._append_console("SYSTEM", "Voice assist deactivated. Listening stopped.")
             self._set_avatar_status(None)
             self.footer_label.configure(text=self._footer_text("READY"))
+            try:
+                from skills.voice.voice_interface import set_speech_enabled
+                set_speech_enabled(False)
+            except Exception:
+                pass
             self._stop_voice_listener()
 
     def _toggle_training_mode(self):
@@ -2600,12 +2666,14 @@ class AngeliqueDesktopApp(tk.Tk):
             if not spoken:
                 time.sleep(0.2)
                 continue
-            if self._command_in_progress:
-                time.sleep(0.2)
-                continue
             cleaned = self._normalize_voice_command(spoken)
             if cleaned:
                 spoken = cleaned
+            if self._command_in_progress:
+                self.after(0, lambda: self._append_console("SYSTEM", "Command queued. Angelique will process it after the current request."))
+                self._queue_command(spoken)
+                time.sleep(0.2)
+                continue
             self.after(0, lambda: self.input_entry.delete(0, tk.END))
             self.after(0, lambda text=spoken: self.input_entry.insert(0, text))
             self.after(0, lambda: self._append_console("USER", spoken))
@@ -2617,6 +2685,74 @@ class AngeliqueDesktopApp(tk.Tk):
             time.sleep(0.2)
         self.after(0, lambda: self._set_avatar_status(None))
         self.after(0, lambda: self.footer_label.configure(text=self._footer_text("READY")))
+
+    def _notify_user_whistle(self):
+        # Try a GUI bell and play a whistle asset if present
+        try:
+            # GUI bell (cross-platform)
+            try:
+                self.bell()
+            except Exception:
+                pass
+            whistle_path = ASSETS_DIR / "whistle.wav"
+            # If missing, generate a short whistle WAV programmatically
+            if not whistle_path.exists():
+                try:
+                    whistle_path.parent.mkdir(parents=True, exist_ok=True)
+                    duration = 0.9
+                    base_freq = 900.0
+                    samplerate = 44100
+                    amplitude = 16000
+                    nframes = int(duration * samplerate)
+                    with wave.open(str(whistle_path), 'w') as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(samplerate)
+                        for i in range(nframes):
+                            t = i / samplerate
+                            # simple upward chirp with fade-out
+                            f = base_freq + 700.0 * (t / duration)
+                            val = int(amplitude * math.sin(2 * math.pi * f * t) * (1 - t / duration))
+                            wf.writeframes(struct.pack('<h', max(-32767, min(32767, val))))
+                except Exception:
+                    pass
+
+            if whistle_path.exists():
+                players = [
+                    ["mpv", "--no-video", "--quiet", str(whistle_path)],
+                    ["paplay", str(whistle_path)],
+                    ["aplay", str(whistle_path)],
+                ]
+                for cmd in players:
+                    try:
+                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                        break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    def show_trading_plan(self, plan_text: str):
+        """Display a trading plan in the Trading Hub and notify the user if not focused."""
+        try:
+            self.trading_detail_var.set(plan_text)
+            # Append to transcript
+            try:
+                ts = time.strftime('%H:%M:%S')
+                self.trading_transcript_text.configure(state='normal')
+                self.trading_transcript_text.insert('end', f"[{ts}] PLAN: {plan_text}\n")
+                self.trading_transcript_text.configure(state='disabled')
+                self.trading_transcript_text.see('end')
+            except Exception:
+                pass
+            # If the GUI is not focused, notify with whistle/bell
+            try:
+                if not self.focus_displayof():
+                    self._notify_user_whistle()
+            except Exception:
+                self._notify_user_whistle()
+        except Exception:
+            pass
 
     def _footer_text(self, status=None):
         status_text = status if status is not None else self._system_stats.get("status", "READY")
@@ -2635,13 +2771,14 @@ class AngeliqueDesktopApp(tk.Tk):
         text = self.input_entry.get().strip()
         if not text:
             return
-        if self._command_in_progress:
-            self._append_console("SYSTEM", "Angelique is still processing the previous request.")
-            return
-        self._command_in_progress = True
         self.input_entry.delete(0, tk.END)
         if getattr(self, "_training_mode_enabled", False):
             text = f"[[TRAINING_MODE]] {text}"
+        if self._command_in_progress:
+            self._queue_command(text)
+            self._append_console("SYSTEM", "Command queued. Angelique will process it after the current request.")
+            return
+        self._command_in_progress = True
         self._append_console("USER", text)
         self._append_console("ANGELIQUE", "Command received. Processing locally in the desktop interface.")
         self._set_avatar_status("PROCESSING")
@@ -2653,13 +2790,14 @@ class AngeliqueDesktopApp(tk.Tk):
             event.widget = None
         if getattr(self, "_terminal_placeholder_active", False):
             return
-        if self._command_in_progress:
-            self._append_console("SYSTEM", "Angelique is still processing the previous request.")
-            return
         command = self.terminal_text.get("1.0", tk.END).strip()
         if not command:
             return
         self.terminal_text.delete("1.0", tk.END)
+        if self._command_in_progress:
+            self._queue_command(command)
+            self._append_console("SYSTEM", "Command queued. Angelique will process it after the current request.")
+            return
         self._append_console("TERMINAL", command)
         self.footer_label.configure(text=self._footer_text("PROCESSING"))
         self._command_in_progress = True
@@ -2701,6 +2839,38 @@ class AngeliqueDesktopApp(tk.Tk):
         self.terminal_text.insert("1.0", self._terminal_placeholder_text)
         self.terminal_text.config(fg="#6f9bbd")
         self._terminal_placeholder_active = True
+
+    def _queue_command(self, text: str) -> bool:
+        if not text or not str(text).strip():
+            return False
+        pending = getattr(self, "_pending_command_queue", None)
+        if pending is None:
+            pending = deque()
+            self._pending_command_queue = pending
+        pending.append(str(text).strip())
+        if not self._command_in_progress:
+            self.after(0, self._process_next_queued_command)
+        return True
+
+    def _process_next_queued_command(self):
+        if self._command_in_progress:
+            return
+        pending = getattr(self, "_pending_command_queue", None)
+        if not pending:
+            return
+        text = pending.popleft()
+        if not text or not str(text).strip():
+            if pending:
+                self.after(0, self._process_next_queued_command)
+            return
+
+        text = str(text).strip()
+        self._command_in_progress = True
+        self._append_console("USER", text)
+        self._append_console("ANGELIQUE", "Command received. Processing locally in the desktop interface.")
+        self._set_avatar_status("PROCESSING")
+        self.footer_label.configure(text=self._footer_text("PROCESSING"))
+        threading.Thread(target=self._process_command, args=(text,), daemon=True).start()
 
     def _is_privileged_command(self, command: str) -> bool:
         normalized = (command or "").strip().lower()
@@ -2756,6 +2926,15 @@ class AngeliqueDesktopApp(tk.Tk):
         self.after(0, ask_password_async)
         prompt_done.wait()
         return password
+
+    def _confirm_privileged_command(self, command: str) -> bool:
+        # Show a concise confirmation dialog for privileged actions.
+        try:
+            title = "Authorize privileged command"
+            message = f"This action requires elevated privileges.\n\nCommand:\n{command}\n\nProceed?"
+            return self._confirm_dialog(title, message, confirm_text="Yes", cancel_text="No")
+        except Exception:
+            return False
 
     def _prompt_for_trade_symbol(self) -> str | None:
         result = {"symbol": None}
@@ -2993,8 +3172,9 @@ class AngeliqueDesktopApp(tk.Tk):
     def _register_shell_callbacks(self):
         try:
             from skills.os_control.system_cmds import set_privileged_command_callbacks
-
             set_privileged_command_callbacks(
+                confirm_callback=self._confirm_privileged_command,
+                password_callback=self._prompt_for_sudo_password,
                 privileged_callback=self._prompt_for_privileged_command,
             )
         except Exception:
@@ -3291,6 +3471,12 @@ class AngeliqueDesktopApp(tk.Tk):
             self._speak_available = False
             self._append_console("SYSTEM", "Offline mode detected. Voice input/output disabled; using text-only mode.")
 
+        # Start background rotation (assets) and other runtime decorators
+        try:
+            self._start_background_rotation()
+        except Exception:
+            pass
+
     def _toggle_voice_output(self):
         self._speak_enabled = not self._speak_enabled
         label = "VOICE OUTPUT ON" if self._speak_enabled else "VOICE OUTPUT OFF"
@@ -3310,6 +3496,7 @@ class AngeliqueDesktopApp(tk.Tk):
         self._command_in_progress = False
         self._set_avatar_status(None)
         self.footer_label.configure(text=self._footer_text("READY"))
+        self.after(0, self._process_next_queued_command)
 
     def _start_move(self, event):
         self._drag_x = event.x

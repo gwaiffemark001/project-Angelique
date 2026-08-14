@@ -142,7 +142,7 @@ def remember(context: dict, key: str, value: str, importance: int = 5):
 
 def recall(context: dict, query: str) -> str:
     try:
-        from brain.memory_manager import recall_facts
+        from skills.memory.memory_tools import recall_facts
         return recall_facts(query=query)
     except Exception as e:
         return f"⚠️ Recall failed: {e}"

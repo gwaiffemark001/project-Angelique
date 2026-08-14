@@ -4,6 +4,7 @@ Real WhatsApp automation using Playwright.
 Two-step protocol: Draft → Confirm → Send (safety first)
 """
 import asyncio
+import os
 from pathlib import Path
 from typing import Optional
 from core import config
@@ -22,17 +23,44 @@ except ImportError:
     async_playwright = None
 
 
-async def initialize_whatsapp(headless: bool = False) -> tuple[Browser, BrowserContext, Page] | tuple[None, None, None]:
+def _parse_bool_env(val: str | None) -> bool | None:
+    if val is None:
+        return None
+    v = str(val).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+async def initialize_whatsapp(headless: bool | None = None) -> tuple[Browser, BrowserContext, Page] | tuple[None, None, None]:
     """Initialize Playwright browser for WhatsApp Web."""
     if not async_playwright:
         return None, None, None
     
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=headless)
-            context = await browser.new_context()
-            page = await context.new_page()
-            
+            # Use a persistent user-data directory so login/session can be preserved
+            profile_dir = Path(os.getenv('WHATSAPP_PLAYWRIGHT_PROFILE') or (Path(config.DATA_DIR) / 'playwright_whatsapp'))
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            # Determine headless default: env var overrides; otherwise prefer headful when a profile exists
+            env_val = _parse_bool_env(os.getenv('WHATSAPP_HEADLESS'))
+            if headless is None:
+                if env_val is not None:
+                    headless = env_val
+                else:
+                    try:
+                        has_profile_files = any(profile_dir.iterdir())
+                    except Exception:
+                        has_profile_files = False
+                    # If profile dir contains files, default to headful to allow QR reuse/scan
+                    headless = False if has_profile_files else True
+            browser_context = await p.chromium.launch_persistent_context(str(profile_dir), headless=headless)
+            # Try to reuse an existing page or create a new one
+            pages = browser_context.pages
+            page = pages[0] if pages else await browser_context.new_page()
+
             # Navigate to WhatsApp Web
             await page.goto(config.WHATSAPP_WEB_URL, timeout=30000)
             
@@ -41,10 +69,14 @@ async def initialize_whatsapp(headless: bool = False) -> tuple[Browser, BrowserC
             try:
                 await page.wait_for_selector('[data-testid="chat-list-container"]', timeout=60000)
                 print("✅ [WhatsApp] Successfully logged in!")
-                return browser, context, page
+                # Return the context as the first two values to preserve close() semantics
+                return browser_context, browser_context, page
             except Exception as e:
                 print(f"⚠️ [WhatsApp] Login timeout: {e}")
-                await browser.close()
+                try:
+                    await browser_context.close()
+                except Exception:
+                    pass
                 return None, None, None
     except Exception as e:
         print(f"❌ [WhatsApp] Initialization failed: {e}")
@@ -135,8 +167,8 @@ async def whatsapp_send_2step(contact_name: str, message_text: str) -> dict:
     
     browser, context, page = None, None, None
     try:
-        # Initialize browser
-        browser, context, page = await initialize_whatsapp(headless=True)
+        # Initialize browser (headless decision handled by env/profile)
+        browser, context, page = await initialize_whatsapp()
         if not page:
             return {"error": "Failed to initialize WhatsApp Web", "step": "initialization"}
         
@@ -195,8 +227,8 @@ async def whatsapp_confirm_and_send() -> dict:
     
     browser, context, page = None, None, None
     try:
-        # Re-initialize for sending
-        browser, context, page = await initialize_whatsapp(headless=True)
+        # Re-initialize for sending (headless decision handled by env/profile)
+        browser, context, page = await initialize_whatsapp()
         if not page:
             return {"error": "Failed to initialize WhatsApp Web for send", "step": "reinitialization"}
         

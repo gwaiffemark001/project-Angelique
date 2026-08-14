@@ -31,8 +31,13 @@ def search_web(query: str) -> str:
             return f"Web search failed due to a network error: {str(e)}. Please try again in a moment."
 
     try:
-        url = f"{config.WEB_SEARCH_BASE_URL}{urllib.parse.quote(query)}"
-        webbrowser.open(url)
-        return f"🌐 Opened browser with search for '{query}'."
+            # If running headless without browser, return the URL; otherwise open default browser
+            url = config.WEB_SEARCH_BASE_URL + urllib.parse.quote(query)
+            try:
+                import webbrowser
+                webbrowser.open(url)
+                return f"Search opened in browser: {url}"
+            except Exception:
+                return f"Search URL: {url}"
     except Exception as e:
         return f"Web search fallback failed: {e}."

@@ -1,106 +1,11 @@
 [
   {
-    "timestamp": "2026-08-12T06:23:35.780165Z",
+    "timestamp": "2026-08-13T23:56:15.663876Z",
     "user": "what is my mt5 account balance",
     "agent": "balance ok"
   },
   {
-    "timestamp": "2026-08-12T06:29:54.874282Z",
-    "user": "what is my mt5 account balance",
-    "agent": "balance ok"
-  },
-  {
-    "timestamp": "2026-08-12T06:29:57.479085Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "{\"tool\": \"manage_files\", \"args\": {\"action\": \"mkdir\", \"path\": \"/home/user/Desktop/feck\"}}"
-  },
-  {
-    "timestamp": "2026-08-12T06:32:13.366751Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "{\"tool\": \"manage_files\", \"args\": {\"action\": \"mkdir\", \"path\": \"/home/user/Desktop/feck\"}}"
-  },
-  {
-    "timestamp": "2026-08-12T06:34:54.725357Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "{\"tool\": \"manage_files\", \"args\": {\"action\": \"mkdir\", \"path\": \"/home/user/Desktop/feck\"}}"
-  },
-  {
-    "timestamp": "2026-08-12T06:37:12.132951Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "{\"tool\": \"manage_files\", \"args\": {\"action\": \"mkdir\", \"path\": \"/home/user/Desktop/feck\"}}"
-  },
-  {
-    "timestamp": "2026-08-12T06:40:27.506507Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "folder created"
-  },
-  {
-    "timestamp": "2026-08-12T06:44:25.449243Z",
-    "user": "what is my mt5 account balance",
-    "agent": "balance ok"
-  },
-  {
-    "timestamp": "2026-08-12T06:44:28.083859Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "folder created"
-  },
-  {
-    "timestamp": "2026-08-12T07:02:35.683561Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "File operation failed: [Errno 30] Read-only file system: '/home/user'"
-  },
-  {
-    "timestamp": "2026-08-12T07:06:53.257762Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "File operation failed: [Errno 30] Read-only file system: '/home/user'"
-  },
-  {
-    "timestamp": "2026-08-12T07:07:48.597919Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "folder created"
-  },
-  {
-    "timestamp": "2026-08-12T07:11:10.922933Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "folder created"
-  },
-  {
-    "timestamp": "2026-08-12T07:12:27.913855Z",
-    "user": "what is my mt5 account balance",
-    "agent": "balance ok"
-  },
-  {
-    "timestamp": "2026-08-12T07:12:28.562000Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "folder created"
-  },
-  {
-    "timestamp": "2026-08-13T15:02:18.756960Z",
-    "user": "what is my mt5 account balance",
-    "agent": "balance ok"
-  },
-  {
-    "timestamp": "2026-08-13T15:02:20.345014Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "folder created"
-  },
-  {
-    "timestamp": "2026-08-13T16:10:36.867519Z",
-    "user": "what is my mt5 account balance",
-    "agent": "balance ok"
-  },
-  {
-    "timestamp": "2026-08-13T16:10:38.827642Z",
-    "user": "create a folder named feck on my desktop",
-    "agent": "folder created"
-  },
-  {
-    "timestamp": "2026-08-13T16:36:15.676644Z",
-    "user": "what is my mt5 account balance",
-    "agent": "balance ok"
-  },
-  {
-    "timestamp": "2026-08-13T16:36:16.758051Z",
+    "timestamp": "2026-08-13T23:56:16.636238Z",
     "user": "create a folder named feck on my desktop",
     "agent": "folder created"
   }
