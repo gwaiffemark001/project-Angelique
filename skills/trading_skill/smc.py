@@ -42,13 +42,6 @@ def detect_smc(candles: list[dict[str, Any]], direction: str | None = None) -> d
     equal_highs = abs(highs[-1] - highs[-2]) <= tolerance
     equal_lows = abs(lows[-1] - lows[-2]) <= tolerance
 
-    fair_value_gaps: list[dict[str, float | str]] = []
-    for first, _, third in zip(candles[-10:-2], candles[-9:-1], candles[-8:]):
-        if _high(first) < _low(third):
-            fair_value_gaps.append({"type": "bullish", "low": _high(first), "high": _low(third)})
-        elif _low(first) > _high(third):
-            fair_value_gaps.append({"type": "bearish", "low": _high(third), "high": _low(first)})
-
     range_high = max(highs)
     range_low = min(lows)
     equilibrium = (range_high + range_low) / 2
@@ -63,13 +56,40 @@ def detect_smc(candles: list[dict[str, Any]], direction: str | None = None) -> d
     elif sweep:
         structure_shift = "CHoCH_after_liquidity_sweep"
 
+    fair_value_gaps: list[dict[str, float | str]] = []
+    for first, _, third in zip(candles[-10:-2], candles[-9:-1], candles[-8:]):
+        if _high(first) < _low(third):
+            fair_value_gaps.append({
+                "type": "bullish",
+                "low": _high(first),
+                "high": _low(third),
+                "score": 2 + (2 if displacement else 0) + (1 if structure_shift else 0),
+            })
+        elif _low(first) > _high(third):
+            fair_value_gaps.append({
+                "type": "bearish",
+                "low": _high(third),
+                "high": _low(first),
+                "score": 2 + (2 if displacement else 0) + (1 if structure_shift else 0),
+            })
+
     order_block = None
     if displacement and len(candles) >= 2:
         previous = candles[-2]
         if _close(last) > _open(last) and _close(previous) < _open(previous):
-            order_block = {"type": "bullish", "high": _high(previous), "low": _low(previous)}
+            order_block = {
+                "type": "bullish",
+                "high": _high(previous),
+                "low": _low(previous),
+                "score": 2 + 2 + (1 if sweep else 0) + (1 if structure_shift else 0),
+            }
         elif _close(last) < _open(last) and _close(previous) > _open(previous):
-            order_block = {"type": "bearish", "high": _high(previous), "low": _low(previous)}
+            order_block = {
+                "type": "bearish",
+                "high": _high(previous),
+                "low": _low(previous),
+                "score": 2 + 2 + (1 if sweep else 0) + (1 if structure_shift else 0),
+            }
 
     evidence = {
         "status": "ready",

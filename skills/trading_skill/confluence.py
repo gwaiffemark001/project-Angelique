@@ -3,58 +3,79 @@ from __future__ import annotations
 from typing import Any
 
 
-def evaluate_confluence(direction: str, trends: dict[str, str], indicator_data: dict[str, dict[str, Any]], smc_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def evaluate_confluence(direction: str, trends: dict[str, str], indicator_data: dict[str, dict[str, Any]], smc_data: dict[str, dict[str, Any]], profile=None) -> dict[str, Any]:
     agree: list[str] = []
     disagree: list[str] = []
-    total_checks = 0
-    total_agrees = 0
+    score = 0
+
+    context_timeframe = getattr(profile, "context_timeframe", "H4")
+    structure_timeframe = getattr(profile, "structure_timeframe", "M15")
+    context_trend = trends.get(context_timeframe)
+    expected_trend = "bullish" if direction == "BUY" else "bearish"
+    if context_trend == expected_trend and trends.get(getattr(profile, "trend_timeframe", "H1"), context_trend) == expected_trend:
+        score += 2
+        agree.append(f"AGREES: higher-timeframe structure aligns with {direction}.")
+    else:
+        disagree.append("DISAGREES: higher-timeframe structure is not aligned.")
+
+    smc_values = smc_data.get(structure_timeframe, {})
+    expected_sweep = "sell_side_liquidity_sweep" if direction == "BUY" else "buy_side_liquidity_sweep"
+    if smc_values.get("liquidity_sweep") == expected_sweep:
+        score += 2
+        agree.append(f"AGREES: {structure_timeframe} liquidity sweep supports {direction}.")
+    else:
+        disagree.append(f"DISAGREES: {structure_timeframe} has no directional liquidity sweep.")
+
+    expected_shifts = {"bullish_BOS", "bullish_CHoCH"} if direction == "BUY" else {"bearish_BOS", "bearish_CHoCH"}
+    if smc_values.get("structure_shift") in expected_shifts:
+        score += 2
+        agree.append(f"AGREES: {structure_timeframe} BOS/CHoCH supports {direction}.")
+    else:
+        disagree.append(f"DISAGREES: {structure_timeframe} has no directional BOS/CHoCH.")
+
+    block = smc_values.get("order_block")
+    gaps = smc_values.get("fair_value_gaps", [])
+    quality_block = isinstance(block, dict) and block.get("type") == expected_trend and block.get("score", 0) >= 5
+    quality_gap = any(gap.get("type") == expected_trend and gap.get("score", 0) >= 4 for gap in gaps if isinstance(gap, dict))
+    if quality_block or quality_gap:
+        score += 1
+        agree.append(f"AGREES: quality {expected_trend} OB/FVG is available.")
+    else:
+        disagree.append("DISAGREES: no sufficiently qualified directional OB/FVG.")
+
+    preferred_location = "discount" if direction == "BUY" else "premium"
+    if smc_values.get("location") == preferred_location:
+        score += 1
+        agree.append(f"AGREES: price is in {preferred_location}.")
+    else:
+        disagree.append(f"DISAGREES: price is not in {preferred_location}.")
 
     for timeframe, values in indicator_data.items():
         if values.get("status") != "ready":
             continue
         last_close = float(values["last_close"])
-        ema_ok = last_close >= float(values["ema_20"]) >= float(values["ema_50"]) if direction == "BUY" else last_close <= float(values["ema_20"]) <= float(values["ema_50"])
-        macd_ok = float(values["macd"]) >= 0 if direction == "BUY" else float(values["macd"]) <= 0
+        ema_ok = last_close >= float(values["ema_20"]) >= float(values["ema_50"]) >= float(values["ema_200"]) if direction == "BUY" else last_close <= float(values["ema_20"]) <= float(values["ema_50"]) <= float(values["ema_200"])
+        macd_ok = float(values["macd_histogram"]) >= 0 if direction == "BUY" else float(values["macd_histogram"]) <= 0
         rsi_ok = float(values["rsi_14"]) >= 50 if direction == "BUY" else float(values["rsi_14"]) <= 50
-        middle = float(values["bollinger_middle"])
-        upper = float(values["bollinger_upper"])
-        lower = float(values["bollinger_lower"])
-        band_valid = lower <= last_close <= upper
-        checks = {
-            "EMA": ema_ok,
-            "RSI": rsi_ok,
-            "MACD": macd_ok,
-            "BOLLINGER": band_valid,
-        }
-        for name, passed in checks.items():
-            total_checks += 1
-            if passed:
-                total_agrees += 1
-                agree.append(f"AGREES: {timeframe} {name} supports {direction} bias.")
-            else:
-                disagree.append(f"DISAGREES: {timeframe} {name} is mixed against {direction} bias.")
+        momentum_ok = rsi_ok and macd_ok
+        if momentum_ok:
+            score += 1
+            agree.append(f"AGREES: {timeframe} momentum confirms {direction}.")
+        else:
+            disagree.append(f"DISAGREES: {timeframe} momentum confirmation is mixed.")
+        if ema_ok:
+            score += 1
+            agree.append(f"AGREES: {timeframe} EMA 20/50/200 alignment confirms {direction}.")
+        else:
+            disagree.append(f"DISAGREES: {timeframe} EMA alignment is mixed.")
+        break
 
-    for timeframe, values in smc_data.items():
-        smc_checks = [
-            ("liquidity sweep", bool(values.get("liquidity_sweep"))),
-            ("structural shift", bool(values.get("structure_shift"))),
-            ("fair value gap", bool(values.get("fair_value_gaps"))),
-            ("order block", bool(values.get("order_block"))),
-            ("location", values.get("location") in {"discount" if direction == "BUY" else "premium"}),
-        ]
-        for label, passed in smc_checks:
-            total_checks += 1
-            if passed:
-                total_agrees += 1
-                agree.append(f"AGREES: {timeframe} {label} supports the {direction} setup.")
-            else:
-                disagree.append(f"DISAGREES: {timeframe} {label} is not confirming the {direction} setup.")
-
-    score = 0.0 if total_checks == 0 else total_agrees / total_checks
+    minimum_score = getattr(profile, "minimum_score", 7)
     return {
-        "score": round(score, 3),
-        "minimum_score": 0.6,
-        "ready": score >= 0.6,
+        "score": score,
+        "maximum_score": 10,
+        "minimum_score": minimum_score,
+        "ready": score >= minimum_score,
         "agree": agree,
         "disagree": disagree,
         "summary": f"Confluence score {score:.2f}/{1.0:.2f} - {len(agree)} supporting checks and {len(disagree)} conflicting checks.",
