@@ -42,40 +42,9 @@ if [ ! -d "data" ]; then
     mkdir -p data/chroma_memory data/logs data/generated_skills
 fi
 
-# 4. Check for MT5 bridge
-LOG_DIR="$PROJECT_DIR/data/logs"
-mkdir -p "$LOG_DIR"
-
-WINE_CMD=""
-WINE_ARGS=()
-if command -v wine &> /dev/null; then
-    WINE_CMD="wine"
-    WINE_ARGS=(cmd /c python)
-elif command -v wine64 &> /dev/null; then
-    WINE_CMD="wine64"
-    WINE_ARGS=(cmd /c python)
-fi
-
-if [ -n "$WINE_CMD" ]; then
-    echo -e "${BLUE}🌉 Checking MT5 bridge...${NC}"
-    BRIDGE_SCRIPT="$PROJECT_DIR/skills/trading/engine/mt5_bridge_server.py"
-    if [ -f "$BRIDGE_SCRIPT" ]; then
-        if ! pgrep -f "mt5_bridge_server.py" > /dev/null 2>&1; then
-            echo -e "${YELLOW}🔌 Launching MT5 Bridge in Wine...${NC}"
-            if command -v winepath &> /dev/null; then
-                BRIDGE_SCRIPT_WIN=$(winepath -w "$BRIDGE_SCRIPT")
-            else
-                BRIDGE_SCRIPT_WIN="$BRIDGE_SCRIPT"
-            fi
-            "$WINE_CMD" "${WINE_ARGS[@]}" "$BRIDGE_SCRIPT_WIN" > "$LOG_DIR/mt5_bridge.log" 2>&1 &
-            sleep 3
-        else
-            echo -e "${GREEN}✅ MT5 Bridge already running${NC}"
-        fi
-    fi
-else
-    echo -e "${RED}❌ Wine not available. MT5 bridge cannot be launched, and MT5 features will be disabled.${NC}"
-fi
+# 4. MT5 bridge startup is owned by main.py so GUI and shell startup cannot
+# launch competing bridge processes or race over the configured port.
+echo -e "${BLUE}🌉 MT5 bridge startup delegated to Angelique bootstrap...${NC}"
 
 # 5. Make sure database is initialized
 echo -e "${BLUE}💾 Initializing memory system...${NC}"

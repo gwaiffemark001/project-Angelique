@@ -245,6 +245,7 @@ def _get_bridge_launch_command() -> list[str]:
 
 
 def _launch_bridge_process(bridge_env: dict[str, str], cmd: list[str], pass_fds=()):
+    bridge_env.setdefault("WINEDEBUG", "-all")
     return subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
