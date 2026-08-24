@@ -59,7 +59,8 @@ class ToolsTests(unittest.TestCase):
         fake_diffusers.StableDiffusionPipeline.from_pretrained.assert_called_once_with("demo/local-model")
 
     @patch("brain.llm_interface.requests.post")
-    def test_query_llm_prefers_remote_models_before_local(self, mock_post):
+    @patch("brain.llm_interface._is_online", return_value=True)
+    def test_query_llm_prefers_remote_models_before_local(self, mock_online, mock_post):
         original_priority = llm_interface.config.API_PRIORITY
         original_ollama_candidates = llm_interface.config.OLLAMA_MODEL_CANDIDATES
         original_openrouter_key = llm_interface.config.OPENROUTER_API_KEY
@@ -106,6 +107,29 @@ class ToolsTests(unittest.TestCase):
             llm_interface.config.OLLAMA_MODEL_CANDIDATES = original_ollama_candidates
             llm_interface.config.OPENROUTER_API_KEY = original_openrouter_key
             llm_interface.config.NVIDIA_API_KEY = original_nvidia_key
+
+    @patch("brain.llm_interface._call_ollama", return_value="offline local answer")
+    @patch("brain.llm_interface._is_online", return_value=False)
+    def test_query_llm_uses_ollama_offline_even_when_cloud_keys_exist(self, mock_online, mock_ollama):
+        original_key = llm_interface.config.OPENROUTER_API_KEY
+        try:
+            llm_interface.config.OPENROUTER_API_KEY = "remote-key"
+            result = llm_interface.query_llm([{"role": "user", "content": "hi"}])
+            self.assertEqual(result, "offline local answer")
+            mock_ollama.assert_called_once()
+        finally:
+            llm_interface.config.OPENROUTER_API_KEY = original_key
+
+    def test_ollama_candidates_include_configured_coder_model(self):
+        original_candidates = llm_interface.config.OLLAMA_MODEL_CANDIDATES
+        original_coder = llm_interface.config.CODER_MODEL
+        try:
+            llm_interface.config.CODER_MODEL = "qwen2.5-coder:7b"
+            llm_interface.config.OLLAMA_MODEL_CANDIDATES = ["llama3.1", llm_interface.config.CODER_MODEL]
+            self.assertIn("qwen2.5-coder:7b", llm_interface._ordered_ollama_candidates())
+        finally:
+            llm_interface.config.OLLAMA_MODEL_CANDIDATES = original_candidates
+            llm_interface.config.CODER_MODEL = original_coder
 
     @patch("brain.cognitive_loop.query_llm")
     @patch("brain.cognitive_loop.execute_tool", return_value="balance ok")

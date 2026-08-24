@@ -66,6 +66,44 @@ def test_get_account_info_reports_selected_mode():
         assert result['balance'] >= 0
 
 
+def test_real_and_live_requests_use_the_same_internal_mode():
+    from skills.trading_skill.wine_server import _mode
+
+    assert _mode('real') == 'live'
+    assert _mode('live') == 'live'
+    assert _mode('demo') == 'demo'
+
+
+def test_wine_bridge_marks_real_account_as_matching_real_request(monkeypatch):
+    from skills.trading_skill import wine_server
+
+    class DummyAccountInfo:
+        login = 13346136
+        server = 'Exness-MT5Real9'
+        trade_mode = 2
+        balance = 13.41
+        equity = 13.41
+        margin = 0.0
+        margin_free = 13.41
+        margin_level = 0.0
+        leverage = 2000
+        currency = 'USD'
+
+    class DummyMT5:
+        def initialize(self):
+            return True
+
+        def account_info(self):
+            return DummyAccountInfo()
+
+    monkeypatch.setitem(sys.modules, 'MetaTrader5', DummyMT5())
+    result = wine_server.account({'account_mode': 'real'})
+    assert result['mode'] == 'live'
+    assert result['requested_mode'] == 'live'
+    assert result['mode_match'] is True
+    assert result['balance'] == 13.41
+
+
 def test_get_rates_for_symbol_rejects_live_mode_when_connected_to_demo(monkeypatch):
     class DummyAccountInfo:
         def __init__(self):
@@ -239,6 +277,39 @@ def test_get_account_summary_zeroes_requested_account_on_mode_mismatch(monkeypat
     assert summary['free_margin'] == 0
     assert summary['margin_level'] == 0
     assert summary['login'] is None
+
+
+def test_get_account_summary_zeroes_authenticated_figures_on_mode_mismatch(monkeypatch):
+    from skills.trading.engine import mt5_bridge
+
+    monkeypatch.setattr(
+        mt5_bridge.bridge,
+        'get_account_info',
+        lambda account_mode='demo': {
+            'login': 123456,
+            'balance': 1250.50,
+            'equity': 1240.25,
+            'used_margin': 100.0,
+            'free_margin': 1140.25,
+            'margin_level': 1240.25,
+            'leverage': 200,
+            'currency': 'USD',
+            'mode': 'real',
+            'requested_mode': 'demo',
+            'mode_match': False,
+            'status': 'connected',
+            'error': 'MT5 is connected to real; requested demo.',
+        },
+    )
+
+    from skills.trading.engine.account import get_account_summary
+    summary = get_account_summary(account_mode='demo')
+    assert summary['login'] is None
+    assert summary['balance'] == 0
+    assert summary['equity'] == 0
+    assert summary['free_margin'] == 0
+    assert summary['mode_match'] is False
+    assert summary['error'] == 'MT5 is connected to real; requested demo.'
 
 
 def test_get_account_summary_zeroes_requested_mode_on_mismatch(monkeypatch):

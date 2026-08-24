@@ -49,6 +49,21 @@ def test_safe_tool_execution_and_audit(tmp_path):
     assert log is not None and "execute" in log
 
 
+def test_audit_records_structured_tool_output():
+    def structured():
+        return {"state": "REJECTED", "message": "refused", "details": {"failure_stage": "revalidation", "reason": "price moved"}}
+
+    schema = ToolSchema(name="test.structured", description="structured result", parameters={}, required=[], executor=structured)
+    GLOBAL_TOOL_REGISTRY.register(schema)
+    result = execution_gateway.GATEWAY.execute("test.structured", session_id="diagnostic-test")
+
+    assert result.success
+    with open(audit.AUDIT_LOG, "r", encoding="utf-8") as f:
+        record = json.loads(f.read().strip().splitlines()[-1])
+    assert record["output"]["state"] == "REJECTED"
+    assert record["output"]["details"]["reason"] == "price moved"
+
+
 def test_unknown_tool_and_validation_errors():
     # Unknown
     res = execution_gateway.GATEWAY.execute("test.unknown", {})

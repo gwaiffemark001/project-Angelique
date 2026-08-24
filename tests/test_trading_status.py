@@ -1,4 +1,9 @@
-from skills.trading.engine.trading_status import build_trading_status_banner, get_trading_status_state
+from skills.trading.engine.trading_status import (
+    build_trading_status_banner,
+    get_bridge_status_label,
+    get_mt5_data_badge_text,
+    get_trading_status_state,
+)
 
 
 def test_live_mode_connected_banner_is_explicit():
@@ -41,3 +46,14 @@ def test_mode_mismatch_connected_banner_shows_account_mode_mismatch():
     assert state["label"] == "ACCOUNT MODE MISMATCH"
     assert state["tone"] == "warning"
     assert "Bridge is connected to DEMO account" in state["detail"]
+
+
+def test_bridge_status_marks_offline_when_disconnected():
+    assert get_bridge_status_label(False, None) == "Bridge unavailable: MT5 connection is offline."
+    assert get_bridge_status_label(True, None) == "Bridge connected and ready."
+
+
+def test_mt5_badge_is_unavailable_without_account_login():
+    assert get_mt5_data_badge_text("real", "real", True, False, None, False) == "MT5 unavailable"
+    assert get_mt5_data_badge_text("real", "real", True, True, None, True) == "Using real MT5 data"
+    assert get_mt5_data_badge_text("demo", "demo", True, True, None, True) == "Using demo MT5 data"

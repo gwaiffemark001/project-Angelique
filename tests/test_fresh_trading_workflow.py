@@ -24,7 +24,7 @@ class Adapter:
 
     def market(self, symbol, timeframes, mode, count):
         data = candles(self.direction)
-        return {"timeframes": {timeframe: data for timeframe in timeframes}, "bid": 30.0, "ask": 30.1, "symbol_specs": {"tick_size": 0.01, "tick_value": 1, "volume_min": 0.01, "volume_max": 10, "volume_step": 0.01, "margin_per_volume": 10}}
+        return {"timeframes": {timeframe: data for timeframe in timeframes}, "bid": 30.0, "ask": 30.1, "symbol_specs": {"tick_size": 0.01, "tick_value": 1, "volume_min": 0.001, "volume_max": 10, "volume_step": 0.001, "margin_per_volume": 10}}
 
     def execute(self, order, mode):
         self.executions.append(order)
