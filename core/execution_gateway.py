@@ -109,7 +109,8 @@ class ExecutionGateway:
         thread = threading.Thread(target=self._run_callable, args=(func, args, container), daemon=True)
         thread.start()
         start = time.time()
-        thread.join(timeout)
+        # Never allow an unbounded external bridge call to block the caller.
+        thread.join(timeout if timeout is not None else 30.0)
         timed_out = False
         if thread.is_alive():
             timed_out = True
@@ -131,6 +132,7 @@ class ExecutionGateway:
             "permission": permission,
             "success": success,
             "error": error,
+            "output": output,
             "duration": duration,
         })
         return ExecutionResult(success, output=output, error=error, timed_out=timed_out)
