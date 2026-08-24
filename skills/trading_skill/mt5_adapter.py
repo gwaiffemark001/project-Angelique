@@ -10,6 +10,7 @@ class MT5Adapter(Protocol):
     def symbols(self, mode: str) -> list[str]: ...
     def market(self, symbol: str, timeframes: tuple[str, ...], mode: str, count: int) -> dict[str, Any]: ...
     def execute(self, order: dict[str, Any], mode: str) -> dict[str, Any]: ...
+    def positions(self, mode: str) -> dict[str, Any]: ...
 
 
 class WineMT5Adapter:
@@ -30,3 +31,6 @@ class WineMT5Adapter:
 
     def execute(self, order: dict[str, Any], mode: str) -> dict[str, Any]:
         return self.bridge.request("execute", {"order": order, "account_mode": mode})
+
+    def positions(self, mode: str) -> dict[str, Any]:
+        return self.bridge.request("positions", {"account_mode": mode})

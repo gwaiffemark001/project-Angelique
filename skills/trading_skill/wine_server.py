@@ -33,7 +33,8 @@ TIMEFRAMES = {
 
 
 def _mode(value: str | None) -> str:
-    return "real" if str(value or "demo").lower() in {"live", "real"} else "demo"
+    # Keep the bridge's internal vocabulary aligned with MT5's detected mode.
+    return "live" if str(value or "demo").lower() in {"live", "real"} else "demo"
 
 
 def _raw(value: Any) -> dict[str, Any]:
@@ -69,6 +70,23 @@ def _account_mode(raw: dict[str, Any]) -> str:
     return "demo" if raw.get("trade_mode") == 1 else "live"
 
 
+def _period_loss_percent(mt5: Any, equity: float, days: int) -> float:
+    if equity <= 0 or not hasattr(mt5, "history_deals_get"):
+        return 0.0
+    try:
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=days)
+        deals = mt5.history_deals_get(start, now) or []
+        net = sum(
+            float(getattr(deal, field, 0) or 0)
+            for deal in deals
+            for field in ("profit", "commission", "swap")
+        )
+        return max(0.0, -net / equity * 100)
+    except Exception:
+        return 0.0
+
+
 def account(request: dict[str, Any]) -> dict[str, Any]:
     requested = _mode(request.get("account_mode"))
     try:
@@ -85,7 +103,7 @@ def account(request: dict[str, Any]) -> dict[str, Any]:
         margin_level = float(raw.get("margin_level", 0) or 0)
         if margin_level <= 0 and used_margin > 0:
             margin_level = equity / used_margin * 100
-        result = {"status": "connected", "mode": actual, "requested_mode": requested, "mode_match": actual == requested, "login": raw.get("login"), "balance": float(raw.get("balance", 0) or 0), "equity": equity, "used_margin": used_margin, "margin": used_margin, "free_margin": float(raw.get("margin_free", 0) or 0), "margin_level": margin_level, "leverage": int(raw.get("leverage", 0) or 0), "currency": raw.get("currency", "USD")}
+        result = {"status": "connected", "mode": actual, "requested_mode": requested, "mode_match": actual == requested, "login": raw.get("login"), "balance": float(raw.get("balance", 0) or 0), "equity": equity, "used_margin": used_margin, "margin": used_margin, "free_margin": float(raw.get("margin_free", 0) or 0), "margin_level": margin_level, "leverage": int(raw.get("leverage", 0) or 0), "currency": raw.get("currency", "USD"), "daily_loss_percent": _period_loss_percent(mt5, equity, 1), "weekly_loss_percent": _period_loss_percent(mt5, equity, 7)}
         if actual != requested:
             result["error"] = f"MT5 is connected to {actual}; requested {requested}."
         return result
@@ -135,8 +153,13 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
             if timeframe not in TIMEFRAMES:
                 return {"status": "error", "error": f"Unsupported timeframe {timeframe}", "timeframes": {}}
             mt5_timeframe = getattr(mt5, f"TIMEFRAME_{timeframe}")
-            start = datetime.now(timezone.utc) - timedelta(minutes=TIMEFRAMES[timeframe] * count)
-            rates = mt5.copy_rates_from(symbol, mt5_timeframe, start, count)
+            # Use position zero to request the newest bars. copy_rates_from()
+            # with a timestamp in the past returns bars up to that timestamp,
+            # which made the chart lag by one complete request window.
+            if hasattr(mt5, "copy_rates_from_pos"):
+                rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, count)
+            else:
+                rates = mt5.copy_rates_from(symbol, mt5_timeframe, datetime.now(timezone.utc), count)
             rate_rows = rates if rates is not None else []
             candles[timeframe] = [{"time": row.get("time"), "open": float(row.get("open", 0)), "high": float(row.get("high", 0)), "low": float(row.get("low", 0)), "close": float(row.get("close", 0)), "tick_volume": int(row.get("tick_volume", 0))} for row in (_raw(rate) for rate in rate_rows)]
         ask = float(tick.get("ask", 0) or 0)
@@ -151,7 +174,55 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
             contract_size = float(info.get("trade_contract_size", 0) or 0)
             if leverage > 0 and contract_size > 0 and ask > 0:
                 margin_per_volume = contract_size * ask / leverage
-        return {"status": "connected", "requested_symbol": requested_symbol, "mt5_symbol": symbol, "timeframes": candles, "bid": bid, "ask": ask, "spread": ask - bid, "symbol_specs": {"tick_size": info.get("trade_tick_size"), "tick_value": info.get("trade_tick_value"), "volume_min": info.get("volume_min"), "volume_max": info.get("volume_max"), "volume_step": info.get("volume_step"), "margin_per_volume": margin_per_volume}}
+        raw_spread = ask - bid
+        tick_size = info.get("trade_tick_size")
+        tick_value = info.get("trade_tick_value")
+        # Compute spread in pips when tick_size is available. Pip definition:
+        # - For most FX pairs a pip = 0.0001 (4th decimal) but brokers may use
+        #   fractional pricing; use tick_size to normalize.
+        spread_pips = None
+        try:
+            if tick_size:
+                tick = float(tick_size)
+                # pips = raw_spread / pip_size, where pip_size is tick * (10 if tick has extra precision)
+                # A robust approach: pip_size = 10**(-int(round(abs(math.log10(tick)))))? Avoid math; use ratio to 0.0001/0.01 for JPY.
+                # Simpler: define a pip reference for common pairs: if tick < 0.001 -> pip_unit = 0.0001 else 0.01
+                pip_unit = 0.0001 if float(tick) < 0.001 else 0.01
+                spread_pips = raw_spread / pip_unit
+        except Exception:
+            spread_pips = None
+
+        point = float(info.get("point", 0) or 0)
+        digits = int(info.get("digits", 0) or 0)
+        spread_points = raw_spread / point if point > 0 else None
+        return {
+            "status": "connected",
+            "requested_symbol": requested_symbol,
+            "mt5_symbol": symbol,
+            "timeframes": candles,
+            "bid": bid,
+            "ask": ask,
+            "spread": raw_spread,
+            "spread_price": raw_spread,
+            "spread_points": spread_points,
+            "symbol_specs": {
+                "tick_size": info.get("trade_tick_size"),
+                "tick_value": info.get("trade_tick_value"),
+                "volume_min": info.get("volume_min"),
+                "volume_max": info.get("volume_max"),
+                "volume_step": info.get("volume_step"),
+                "margin_per_volume": margin_per_volume,
+                "point": point,
+                "digits": digits,
+                "swap_long": info.get("swap_long"),
+                "swap_short": info.get("swap_short"),
+                "swap_mode": info.get("swap_mode"),
+                "trade_stops_level": info.get("trade_stops_level"),
+                "trade_freeze_level": info.get("trade_freeze_level"),
+                "trade_mode": info.get("trade_mode"),
+            },
+            "spread_pips": spread_pips,
+        }
     except Exception as exc:
         return {"status": "error", "error": str(exc), "timeframes": {}}
 
@@ -182,6 +253,7 @@ def execute(request: dict[str, Any]) -> dict[str, Any]:
 def positions(request: dict[str, Any]) -> dict[str, Any]:
     requested_mode = _mode(request.get("account_mode"))
     symbol = str(request.get("symbol") or "").strip()
+    requested_ticket = request.get("ticket")
 
     def _normalize(value: str) -> str:
         return "".join(char for char in value.upper() if char.isalnum())
@@ -213,12 +285,28 @@ def positions(request: dict[str, Any]) -> dict[str, Any]:
                     "sl": float(getattr(pos, "sl", 0) or 0),
                     "tp": float(getattr(pos, "tp", 0) or 0),
                     "profit": float(getattr(pos, "profit", 0) or 0),
+                    "expected_profit": _expected_position_profit(mt5, pos),
                 }
                 for pos in positions_result
             ],
         }
     except Exception as exc:
         return {"status": "error", "error": str(exc), "positions": []}
+
+
+def _expected_position_profit(mt5: Any, position: Any) -> float | None:
+    """Estimate money earned at TP using the broker's symbol tick specification."""
+    take_profit = float(getattr(position, "tp", 0) or 0)
+    entry = float(getattr(position, "price_open", 0) or 0)
+    volume = float(getattr(position, "volume", 0) or 0)
+    if not take_profit or not entry or not volume:
+        return None
+    info = mt5.symbol_info(str(getattr(position, "symbol", "")))
+    tick_size = float(getattr(info, "trade_tick_size", 0) or 0) if info else 0
+    tick_value = float(getattr(info, "trade_tick_value", 0) or 0) if info else 0
+    if tick_size <= 0 or tick_value <= 0:
+        return None
+    return round(abs(take_profit - entry) / tick_size * tick_value * volume, 2)
 
 
 def close_position(request: dict[str, Any]) -> dict[str, Any]:
@@ -246,6 +334,15 @@ def close_position(request: dict[str, Any]) -> dict[str, Any]:
 
         if not positions:
             return {"success": False, "status": "error", "error": f"No open position found for {symbol or 'current account'}"}
+
+        if requested_ticket is not None:
+            try:
+                requested_ticket = int(requested_ticket)
+            except (TypeError, ValueError):
+                return {"success": False, "status": "error", "error": "Position ticket must be an integer."}
+            positions = [position for position in positions if int(getattr(position, "ticket", 0)) == requested_ticket]
+            if not positions:
+                return {"success": False, "status": "error", "error": f"Position ticket {requested_ticket} was not found."}
 
         position = positions[0]
         closing_type = mt5.ORDER_TYPE_SELL if position.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY

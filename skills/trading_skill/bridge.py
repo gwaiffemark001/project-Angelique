@@ -57,4 +57,7 @@ class WineBridgeClient:
             timeframe = request.get("timeframe", "H1")
             response["timeframes"] = {timeframe: candles}
             response.setdefault("status", "connected" if candles else "error")
+        # propagate explicit spread_pips if provided by the MT5 side
+        if operation == "market" and "spread_pips" in response:
+            response.setdefault("spread_pips", response.get("spread_pips"))
         return response
