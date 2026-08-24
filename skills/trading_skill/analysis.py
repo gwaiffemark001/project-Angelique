@@ -17,15 +17,19 @@ def _trend(candles: list[dict[str, Any]]) -> str:
     return "sideways"
 
 
-def analyze_structure(timeframes: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def analyze_structure(timeframes: dict[str, list[dict[str, Any]]], profile=None) -> dict[str, Any]:
     context = build_market_context(timeframes)
     trends = context.trends
     indicator_data = context.indicators
     smc_data = context.smc
-    higher = trends.get("H4", "unknown")
-    intermediate = trends.get("H1", "unknown")
-    setup = trends.get("M15", "unknown")
-    confirmation = trends.get("M5", "unknown")
+    context_timeframe = getattr(profile, "context_timeframe", "H4")
+    trend_timeframe = getattr(profile, "trend_timeframe", "H1")
+    setup_timeframe = getattr(profile, "setup_timeframe", "M15")
+    entry_timeframe = getattr(profile, "entry_timeframe", "M5")
+    higher = trends.get(context_timeframe, "unknown")
+    intermediate = trends.get(trend_timeframe, "unknown")
+    setup = trends.get(setup_timeframe, "unknown")
+    confirmation = trends.get(entry_timeframe, "unknown")
     if "unknown" in trends.values():
         return {"valid": False, "reason": "Insufficient candles for the required multi-timeframe analysis.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
     if higher not in {"bullish", "bearish"}:
@@ -57,8 +61,8 @@ def analyze_structure(timeframes: dict[str, list[dict[str, Any]]]) -> dict[str, 
         block = values.get("order_block")
         smc_reasons.append(f"{timeframe}: liquidity={sweep}, shift={shift}, FVGs={gaps}, order_block={block.get('type') if isinstance(block, dict) else 'none'}, location={values.get('location', 'unknown')}")
 
-    confluence = evaluate_confluence(direction, trends, indicator_data, smc_data)
+    confluence = evaluate_confluence(direction, trends, indicator_data, smc_data, profile=profile)
     if not confluence["ready"]:
         return {"valid": False, "reason": "The setup lacks enough confluence; indicators and SMC are not aligned strongly enough to plan a trade.", "trends": trends, "indicators": indicator_data, "smc": smc_data, "confluence": confluence}
 
-    return {"valid": True, "direction": direction, "trends": trends, "indicators": indicator_data, "smc": smc_data, "reason": f"H4, H1, M15, and M5 structure align {higher}.", "indicator_reasons": indicator_reasons, "smc_reasons": smc_reasons, "confluence": confluence}
+    return {"valid": True, "direction": direction, "trends": trends, "indicators": indicator_data, "smc": smc_data, "reason": f"{context_timeframe}, {trend_timeframe}, {setup_timeframe}, and {entry_timeframe} structure align {higher}.", "indicator_reasons": indicator_reasons, "smc_reasons": smc_reasons, "confluence": confluence}
