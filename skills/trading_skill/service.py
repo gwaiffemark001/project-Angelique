@@ -17,6 +17,14 @@ def workflow():
     return _workflow
 
 
+def set_trading_mode(trading_mode: str):
+    active = workflow()
+    if active.trading_mode.value != str(trading_mode).upper():
+        active.clear_pending_plans()
+    active.set_trading_mode(trading_mode)
+    return active.profile.as_dict()
+
+
 def get_account_snapshot(account_mode: str = "demo", force_refresh: bool = False):
     authorized, message, snapshot = account_manager.validate_authorization(account_mode)
     if force_refresh:
@@ -28,7 +36,12 @@ def get_open_positions(account_mode: str = "demo", symbol: str | None = None):
     return position_monitor.get_open_positions(account_mode, symbol)
 
 
-def prepare_trade(symbol: str, account_mode: str = "demo"):
+def monitor_positions(account_mode: str = "demo", symbol: str | None = None, market_by_symbol: dict | None = None):
+    return position_monitor.monitor_once(account_mode, symbol, market_by_symbol)
+
+
+def prepare_trade(symbol: str, account_mode: str = "demo", trading_mode: str = "DAY_TRADING"):
+    set_trading_mode(trading_mode)
     return workflow().prepare(symbol, account_mode)
 
 
@@ -54,13 +67,21 @@ def approve_trade(confirmation_phrase: str):
 
 def execute_trade(confirmation_phrase: str):
     result = workflow().execute(confirmation_phrase)
-    if result.state.value == "EXECUTED" and result.plan is not None:
-        record_trade(result.plan.as_dict(), result.details)
+    if result.plan is not None and result.state.value in {"EXECUTED", "REJECTED", "EXPIRED"}:
+        record_trade(
+            result.plan.as_dict(),
+            {
+                **(result.details or {}),
+                "status": result.state.value,
+                "message": result.message,
+            },
+        )
     return result
 
 
-def scan_universe(account_mode: str = "demo"):
+def scan_universe(account_mode: str = "demo", trading_mode: str = "DAY_TRADING"):
     active = workflow()
+    active.set_trading_mode(trading_mode)
     available = active.adapter.symbols(account_mode)
     candidates = eligible_symbols(available)
     results = []
@@ -91,8 +112,8 @@ def scan_universe(account_mode: str = "demo"):
     return {"state": "WAITING", "candidates": candidates, "scanned": len(results), "results": results}
 
 
-def monitor_universe(account_mode: str = "demo"):
-    scan = scan_universe(account_mode)
+def monitor_universe(account_mode: str = "demo", trading_mode: str = "DAY_TRADING"):
+    scan = scan_universe(account_mode, trading_mode)
     if scan["state"] != "OPPORTUNITY_FOUND":
         log_event(20, "service.monitor_universe.waiting", account_mode=account_mode, scanned=scan["scanned"])
         return scan
