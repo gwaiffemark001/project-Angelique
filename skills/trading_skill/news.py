@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import requests
 from core import config
 
 CACHE_TTL_SECONDS = 300
+MAX_HEADLINE_AGE_SECONDS = 24 * 60 * 60
 NEWS_CACHE_DIR = getattr(config, "NEWS_CACHE_DIR", Path.home() / ".config" / "angelique" / "news_cache")
 NEWS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -93,6 +95,10 @@ def _safe_fetch(url: str) -> str:
     return ""
 
 
+def _retrieved_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _normalize_url(base_url: str, link: str) -> str:
     link = link.strip()
     if not link:
@@ -107,7 +113,7 @@ def _normalize_url(base_url: str, link: str) -> str:
     return link
 
 
-def _extract_headlines(html: str, source_url: str) -> list[dict[str, str]]:
+def _extract_headlines(html: str, source_url: str, retrieved_at: str | None = None) -> list[dict[str, str]]:
     headlines: list[dict[str, str]] = []
     found_titles: set[str] = set()
 
@@ -128,6 +134,8 @@ def _extract_headlines(html: str, source_url: str) -> list[dict[str, str]]:
             "body": "",
             "source": source_url,
             "url": _normalize_url(source_url, url),
+            "retrieved_at": retrieved_at or _retrieved_at(),
+            "freshness": "fresh",
         })
         if len(headlines) >= 20:
             break
@@ -149,6 +157,8 @@ def _extract_headlines(html: str, source_url: str) -> list[dict[str, str]]:
                 "body": "",
                 "source": source_url,
                 "url": source_url,
+                "retrieved_at": retrieved_at or _retrieved_at(),
+                "freshness": "fresh",
             })
             if len(headlines) >= 20:
                 break
@@ -156,7 +166,7 @@ def _extract_headlines(html: str, source_url: str) -> list[dict[str, str]]:
     return headlines[:12]
 
 
-def _extract_forex_factory_calendar(html: str) -> list[dict[str, str]]:
+def _extract_forex_factory_calendar(html: str, retrieved_at: str | None = None) -> list[dict[str, str]]:
     events: list[dict[str, str]] = []
     for match in re.findall(
         r"<tr[^>]*>.*?<td[^>]*class=[\"']calendar__time[^\"']*[\"'][^>]*>(.*?)</td>.*?<td[^>]*class=[\"']calendar__event[^\"']*[\"'][^>]*>(.*?)</td>.*?<td[^>]*class=[\"']calendar__impact[^\"']*[\"'][^>]*>(.*?)</td>",
@@ -168,7 +178,13 @@ def _extract_forex_factory_calendar(html: str) -> list[dict[str, str]]:
         impact_text = _normalize_text(match[2])
         if not event_text:
             continue
-        events.append({"time": time_text or "TBD", "event": event_text, "impact": impact_text or "unknown"})
+        events.append({
+            "time": time_text or "TBD",
+            "event": event_text,
+            "impact": impact_text or "unknown",
+            "retrieved_at": retrieved_at or _retrieved_at(),
+            "freshness": "fresh",
+        })
         if len(events) >= 20:
             break
     return events
@@ -193,8 +209,11 @@ def get_forex_news(symbol: str | None = None) -> list[dict[str, str]]:
         if not isinstance(cached, str):
             _save_cache(cache_path, html)
 
-        headlines = _extract_headlines(html, source)
+        retrieved_at = datetime.fromtimestamp(cache_path.stat().st_mtime, timezone.utc).isoformat() if isinstance(cached, str) else _retrieved_at()
+        freshness = "cached" if isinstance(cached, str) else "fresh"
+        headlines = _extract_headlines(html, source, retrieved_at)
         for headline in headlines:
+            headline["freshness"] = freshness
             title_key = headline["title"].lower()
             if title_key in seen_titles:
                 continue
@@ -208,12 +227,14 @@ def get_forex_news(symbol: str | None = None) -> list[dict[str, str]]:
             break
 
     if not aggregated:
-        return [{"title": "News unavailable", "body": "Angelique could not retrieve market news at this time.", "source": "internal", "url": ""}]
+        return [{"title": "News unavailable", "body": "Angelique could not retrieve market news at this time.", "source": "internal", "url": "", "freshness": "unavailable"}]
 
     return aggregated
 
 
 def get_market_calendar(*args: Any, **kwargs: Any) -> list[dict[str, str]]:
+    symbol = str(kwargs.get("symbol") or "").upper()
+    currencies = {symbol[:3], symbol[3:6]} if len(symbol) >= 6 else set()
     events: list[dict[str, str]] = []
     for source in config.FOREX_FACTORY_URLS:
         cache_path = _cache_key("calendar", source)
@@ -225,11 +246,23 @@ def get_market_calendar(*args: Any, **kwargs: Any) -> list[dict[str, str]]:
         if not isinstance(cached, str):
             _save_cache(cache_path, html)
 
-        events = _extract_forex_factory_calendar(html)
+        retrieved_at = datetime.fromtimestamp(cache_path.stat().st_mtime, timezone.utc).isoformat() if isinstance(cached, str) else _retrieved_at()
+        events = _extract_forex_factory_calendar(html, retrieved_at)
+        for event in events:
+            event["freshness"] = "cached" if isinstance(cached, str) else "fresh"
+        if currencies:
+            filtered = []
+            for event in events:
+                text = f"{event.get('event', '')} {event.get('currency', '')}".upper()
+                if not event.get("currency") and not any(currency in text for currency in currencies):
+                    continue
+                if any(currency in text for currency in currencies):
+                    filtered.append(event)
+            events = filtered
         if events:
             break
 
     if not events:
-        return [{"time": "N/A", "event": "Market calendar data unavailable.", "impact": "unknown"}]
+        return [{"time": "N/A", "event": "Market calendar data unavailable.", "impact": "unknown", "freshness": "unavailable"}]
 
     return events[:20]
