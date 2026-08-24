@@ -387,6 +387,14 @@ class TradingWorkflow:
             "No execution occurs before exact approval.",
         ]
 
+        spread_cost = None
+        if market.spread is not None and market.tick_size and market.tick_value:
+            spread_cost = abs(float(market.spread) / float(market.tick_size) * float(market.tick_value) * risk["volume"])
+        commission_per_lot = specs.get("commission_per_lot")
+        commission_cost = None
+        if commission_per_lot is not None:
+            commission_cost = abs(float(commission_per_lot) * risk["volume"])
+
         plan = TradePlan(
             requested_symbol,
             mt5_symbol,
@@ -422,8 +430,13 @@ class TradingWorkflow:
                 if str(specs.get("swap_mode", "")).lower() in {"0", "currency"}
                 else None
             ),
+            estimated_spread_cost=spread_cost,
+            estimated_commission=commission_cost,
             weekend_exposure=weekend_exposure,
             expected_hold_days=expected_hold_days,
+            broker=account.broker,
+            platform=account.platform,
+            account_login=account.login,
         )
         self._plans[plan.confirmation_phrase] = plan
         self._active_plans[active_key] = plan

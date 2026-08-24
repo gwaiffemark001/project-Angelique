@@ -42,6 +42,8 @@ class AccountSnapshot:
     leverage: int = 0
     currency: str = "USD"
     error: str | None = None
+    broker: str = ""
+    platform: str = "MT5"
 
 
 @dataclass(frozen=True)
@@ -94,8 +96,13 @@ class TradePlan:
     calculated_volume: float | None = None
     actual_risk_amount: float | None = None
     estimated_swap_cost: float | None = None
+    estimated_spread_cost: float | None = None
+    estimated_commission: float | None = None
     weekend_exposure: bool = False
     expected_hold_days: int = 1
+    broker: str = ""
+    platform: str = "MT5"
+    account_login: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -131,8 +138,13 @@ class TradePlan:
             "calculated_volume": self.calculated_volume,
             "actual_risk_amount": self.actual_risk_amount,
             "estimated_swap_cost": self.estimated_swap_cost,
+            "estimated_spread_cost": self.estimated_spread_cost,
+            "estimated_commission": self.estimated_commission,
             "weekend_exposure": self.weekend_exposure,
             "expected_hold_days": self.expected_hold_days,
+            "broker": self.broker,
+            "platform": self.platform,
+            "account_login": self.account_login,
         }
 
 

@@ -48,6 +48,11 @@ def record_trade(plan: dict[str, Any], execution: dict[str, Any]) -> dict[str, A
         },
         "equity_at_decision": plan.get("equity_at_decision", plan.get("equity")),
         "estimated_swap_cost": plan.get("estimated_swap_cost"),
+        "estimated_spread_cost": plan.get("estimated_spread_cost"),
+        "estimated_commission": plan.get("estimated_commission"),
+        "broker": plan.get("broker"),
+        "platform": plan.get("platform"),
+        "account_login": plan.get("account_login"),
         "weekend_exposure": plan.get("weekend_exposure", False),
         "expected_hold_days": plan.get("expected_hold_days", 1),
         "spread": {

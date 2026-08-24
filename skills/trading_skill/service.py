@@ -79,11 +79,18 @@ def execute_trade(confirmation_phrase: str):
     return result
 
 
-def scan_universe(account_mode: str = "demo", trading_mode: str = "DAY_TRADING"):
+def scan_universe(
+    account_mode: str = "demo",
+    trading_mode: str = "DAY_TRADING",
+    allowed_symbols: list[str] | None = None,
+):
     active = workflow()
     active.set_trading_mode(trading_mode)
     available = active.adapter.symbols(account_mode)
     candidates = eligible_symbols(available)
+    if allowed_symbols is not None:
+        allowed = {str(symbol).strip().upper() for symbol in allowed_symbols if str(symbol).strip()}
+        candidates = [symbol for symbol in candidates if symbol.upper() in allowed]
     results = []
     for symbol in candidates:
         result = active.prepare(symbol, account_mode)
@@ -112,8 +119,12 @@ def scan_universe(account_mode: str = "demo", trading_mode: str = "DAY_TRADING")
     return {"state": "WAITING", "candidates": candidates, "scanned": len(results), "results": results}
 
 
-def monitor_universe(account_mode: str = "demo", trading_mode: str = "DAY_TRADING"):
-    scan = scan_universe(account_mode, trading_mode)
+def monitor_universe(
+    account_mode: str = "demo",
+    trading_mode: str = "DAY_TRADING",
+    allowed_symbols: list[str] | None = None,
+):
+    scan = scan_universe(account_mode, trading_mode, allowed_symbols=allowed_symbols)
     if scan["state"] != "OPPORTUNITY_FOUND":
         log_event(20, "service.monitor_universe.waiting", account_mode=account_mode, scanned=scan["scanned"])
         return scan

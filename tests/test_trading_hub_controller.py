@@ -48,3 +48,54 @@ def test_swing_mode_is_forwarded_to_monitor(monkeypatch):
 
     assert TradingHubController("SWING_TRADING").monitor_opportunities("demo") == {"state": "WAITING"}
     assert received["trading_mode"] == "SWING_TRADING"
+
+
+def test_monitor_forwards_dropdown_symbol_allowlist(monkeypatch):
+    from skills.trading_skill import service
+
+    received = {}
+    monkeypatch.setattr(
+        service,
+        "monitor_universe",
+        lambda account_mode, trading_mode, allowed_symbols: received.update(
+            account_mode=account_mode,
+            trading_mode=trading_mode,
+            allowed_symbols=allowed_symbols,
+        ) or {"state": "WAITING"},
+    )
+
+    result = TradingHubController().monitor_opportunities("demo", ["EURUSDm", "XAUUSDm"])
+
+    assert result == {"state": "WAITING"}
+    assert received == {
+        "account_mode": "demo",
+        "trading_mode": "DAY_TRADING",
+        "allowed_symbols": ["EURUSDm", "XAUUSDm"],
+    }
+
+
+def test_scan_prepares_only_allowed_dropdown_symbols(monkeypatch):
+    from skills.trading_skill import service
+    from skills.trading_skill.models import WorkflowResult, WorkflowState
+
+    class FakeWorkflow:
+        trading_mode = type("Mode", (), {"value": "DAY_TRADING"})()
+
+        def __init__(self):
+            self.prepared = []
+            self.adapter = type("Adapter", (), {"symbols": lambda _self, _mode: ["EURUSDm", "GBPUSDm"]})()
+
+        def set_trading_mode(self, _mode):
+            return None
+
+        def prepare(self, symbol, _account_mode):
+            self.prepared.append(symbol)
+            return WorkflowResult(WorkflowState.REJECTED, "no setup")
+
+    fake = FakeWorkflow()
+    monkeypatch.setattr(service, "workflow", lambda: fake)
+
+    result = service.scan_universe("demo", allowed_symbols=["EURUSDm"])
+
+    assert result["candidates"] == ["EURUSDm"]
+    assert fake.prepared == ["EURUSDm"]

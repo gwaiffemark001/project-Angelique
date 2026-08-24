@@ -81,6 +81,24 @@ def test_live_authorization_rejects_unmatched_mode(monkeypatch):
     assert "authorization" in result.message.lower()
 
 
+def test_account_snapshot_rejects_omitted_mode_match_for_other_account():
+    snapshot = account_snapshot({"mode": "real", "login": 101, "balance": 1000}, "demo")
+
+    assert snapshot.connected is False
+    assert snapshot.login is None
+    assert "not connected" in (snapshot.error or "").lower()
+
+
+def test_account_snapshot_preserves_broker_and_platform_identity():
+    snapshot = account_snapshot(
+        {"mode": "demo", "mode_match": True, "login": 101, "broker": "Exness", "platform": "MT5"},
+        "demo",
+    )
+
+    assert snapshot.broker == "Exness"
+    assert snapshot.platform == "MT5"
+
+
 def test_position_monitor_returns_positions(monkeypatch):
     monkeypatch.setattr(
         position_monitor,

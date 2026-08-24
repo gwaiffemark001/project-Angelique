@@ -103,7 +103,7 @@ def account(request: dict[str, Any]) -> dict[str, Any]:
         margin_level = float(raw.get("margin_level", 0) or 0)
         if margin_level <= 0 and used_margin > 0:
             margin_level = equity / used_margin * 100
-        result = {"status": "connected", "mode": actual, "requested_mode": requested, "mode_match": actual == requested, "login": raw.get("login"), "balance": float(raw.get("balance", 0) or 0), "equity": equity, "used_margin": used_margin, "margin": used_margin, "free_margin": float(raw.get("margin_free", 0) or 0), "margin_level": margin_level, "leverage": int(raw.get("leverage", 0) or 0), "currency": raw.get("currency", "USD"), "daily_loss_percent": _period_loss_percent(mt5, equity, 1), "weekly_loss_percent": _period_loss_percent(mt5, equity, 7)}
+        result = {"status": "connected", "mode": actual, "requested_mode": requested, "mode_match": actual == requested, "login": raw.get("login"), "balance": float(raw.get("balance", 0) or 0), "equity": equity, "used_margin": used_margin, "margin": used_margin, "free_margin": float(raw.get("margin_free", 0) or 0), "margin_level": margin_level, "leverage": int(raw.get("leverage", 0) or 0), "currency": raw.get("currency", "USD"), "broker": raw.get("company", raw.get("server", "")), "platform": "MT5", "daily_loss_percent": _period_loss_percent(mt5, equity, 1), "weekly_loss_percent": _period_loss_percent(mt5, equity, 7)}
         if actual != requested:
             result["error"] = f"MT5 is connected to {actual}; requested {requested}."
         return result
@@ -217,6 +217,8 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
                 "swap_long": info.get("swap_long"),
                 "swap_short": info.get("swap_short"),
                 "swap_mode": info.get("swap_mode"),
+                "swap_rollover3days": info.get("swap_rollover3days"),
+                "commission_per_lot": info.get("commission_per_lot", info.get("trade_commission")),
                 "trade_stops_level": info.get("trade_stops_level"),
                 "trade_freeze_level": info.get("trade_freeze_level"),
                 "trade_mode": info.get("trade_mode"),

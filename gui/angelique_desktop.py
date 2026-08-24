@@ -1232,7 +1232,10 @@ class AngeliqueDesktopApp(tk.Tk):
             if getattr(self, "_shutting_down", False):
                 return
             self.after(0, lambda: self._trading_monitor_status_var.set("ANGELIQUE MONITOR: CANDIDATE FOUND | ANGELIQUE IS REVIEWING MARKET CONTEXT AND PRIOR TRADES..."))
-            scan = self._trading_hub_controller.monitor_opportunities(account_mode)
+            scan = self._trading_hub_controller.monitor_opportunities(
+                account_mode,
+                allowed_symbols=self._get_trading_dropdown_symbols(),
+            )
             candidates = scan.get("candidates", [])
             if scan.get("state") != "OPPORTUNITY_FOUND":
                 if getattr(self, "_shutting_down", False):
@@ -1261,6 +1264,7 @@ class AngeliqueDesktopApp(tk.Tk):
         return (getattr(self, "_account_mode_var", None).get() if getattr(self, "_account_mode_var", None) is not None else "demo")
 
     def _on_account_mode_change(self, selected_mode: str):
+        self._selected_position_ticket = None
         self._save_gui_settings(account_mode=selected_mode)
         self._refresh_trading_view()
 
@@ -2082,6 +2086,22 @@ class AngeliqueDesktopApp(tk.Tk):
         from skills.trading_skill.universe import eligible_symbols
         return eligible_symbols([s.upper() for s in config.TRADING_SYMBOLS])
 
+    def _get_trading_dropdown_symbols(self) -> list[str]:
+        """Return exactly the symbols currently exposed by the Trading Hub menu."""
+        menu_owner = getattr(self, "_symbol_menu", None)
+        if menu_owner is None:
+            return []
+        try:
+            menu = menu_owner["menu"]
+            symbols = []
+            for index in range(menu.index("end") + 1):
+                label = menu.entrycget(index, "label")
+                if label:
+                    symbols.append(str(label).strip().upper())
+            return symbols
+        except (tk.TclError, TypeError, ValueError):
+            return []
+
     def _show_trade_plan_popup(self, result):
         """Show a complete assistant-generated plan before any approval action."""
         plan = result.get("plan") if isinstance(result, dict) else None
@@ -2126,6 +2146,9 @@ class AngeliqueDesktopApp(tk.Tk):
         body = "\n".join([
             "ANGELIQUE - TRADE PLAN SUMMARY",
             "STATUS: READY FOR APPROVAL",
+            "EXECUTION TARGET",
+            f"Broker: {get_value('broker')} | Platform: {get_value('platform')} | Account: {get_value('account_login')}",
+            f"Environment: {get_value('account_mode')} | Symbol: {get_value('mt5_symbol')} | Direction: {get_value('direction')}",
             f"PAIR: {get_value('mt5_symbol')}",
             f"MODE: {mode} | SMC SCORE: {score}/10 | MINIMUM: {profile.get('minimum_score', 7)}/10",
             "",
@@ -2142,6 +2165,7 @@ class AngeliqueDesktopApp(tk.Tk):
             "",
             "RISK",
             f"Risk: {get_value('risk_percent')}% | Maximum loss: ${risk_amount:.2f} | Estimated profit: ${potential_profit:.2f}",
+            f"Estimated spread cost: ${get_value('estimated_spread_cost')} | Commission: ${get_value('estimated_commission')} | Swap: ${get_value('estimated_swap_cost')}",
             f"Margin required: ${get_value('margin_required')} | Free margin after: ${get_value('free_margin_after')}",
             f"Equity: ${(account or {}).get('equity', '-')} | Projected margin level: {get_value('projected_margin_level')}",
             "",
@@ -2198,6 +2222,7 @@ class AngeliqueDesktopApp(tk.Tk):
         actions.pack_propagate(False)
         tk.Button(actions, text="Cancel", command=lambda: self._cancel_trade_plan(dialog), fg=self._theme("text"), bg=self._theme("button_bg"), bd=0, padx=16, pady=10).pack(side="right", padx=(10, 0))
         self._trading_monitor_popup_open = True
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self._cancel_trade_plan(dialog))
         tk.Button(actions, text="APPROVE & EXECUTE", command=lambda: self._approve_trade_plan(dialog, get_value("confirmation_phrase")), fg=self._theme("text"), bg=self._theme("button_active"), bd=0, padx=16, pady=10).pack(side="right")
         self._center_dialog(dialog)
 
@@ -2236,6 +2261,7 @@ class AngeliqueDesktopApp(tk.Tk):
                     self.trading_detail_var.set(result),
                     self._append_console("TRADING", result),
                     self._append_console("TRADING-DIAGNOSTIC", detail) if detail else None,
+                    self._refresh_trading_view() if self._active_center_view == "position_monitor" else None,
                 ))
 
         threading.Thread(target=execute_worker, daemon=True).start()

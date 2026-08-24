@@ -99,8 +99,14 @@ class TradingHubController:
             positions=positions,
         )
 
-    def monitor_opportunities(self, account_mode: str) -> dict:
+    def monitor_opportunities(self, account_mode: str, allowed_symbols: list[str] | None = None) -> dict:
         from skills.trading_skill import service
 
         service.set_trading_mode(self.trading_mode)
-        return service.monitor_universe(account_mode, trading_mode=self.trading_mode)
+        if allowed_symbols is None:
+            return service.monitor_universe(account_mode, trading_mode=self.trading_mode)
+        return service.monitor_universe(
+            account_mode,
+            trading_mode=self.trading_mode,
+            allowed_symbols=allowed_symbols,
+        )

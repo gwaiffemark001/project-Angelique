@@ -11,10 +11,12 @@ def account_snapshot(payload: dict, requested_mode: str) -> AccountSnapshot:
     requested = str(requested_mode or "demo").lower()
     internal_mode = normalize_mode(requested)
     actual = normalize_mode(str(payload.get("mode") or internal_mode)) if isinstance(payload, dict) else internal_mode
+    mode_matches = actual == normalize_mode(requested)
     if (
         not isinstance(payload, dict)
         or not payload.get("login")
         or payload.get("mode_match") is False
+        or not mode_matches
         or payload.get("error")
     ):
         return AccountSnapshot(
@@ -36,4 +38,6 @@ def account_snapshot(payload: dict, requested_mode: str) -> AccountSnapshot:
         margin_level=float(payload.get("margin_level", 0) or 0),
         leverage=int(payload.get("leverage", 0) or 0),
         currency=str(payload.get("currency", "USD")),
+        broker=str(payload.get("broker", payload.get("company", "")) or ""),
+        platform=str(payload.get("platform", "MT5") or "MT5"),
     )
