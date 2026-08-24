@@ -15,6 +15,18 @@ import brain.llm_interface as llm_interface
 def query_llm(messages, temperature: float = 0.7):
     return llm_interface.query_llm(messages, temperature=temperature)
 
+
+def _call_through_execute_tool(name, args, user_request=None, session_id=None, timeout=None):
+    res = execute_tool(name, args or {}, user_request=user_request, session_id=session_id, timeout=timeout)
+    class _ER:
+        def __init__(self, success, output=None, error=None):
+            self.success = success
+            self.output = output
+            self.error = error
+    if isinstance(res, str) and (res.startswith("Error") or res.lower().startswith("error")):
+        return _ER(False, output=None, error=res)
+    return _ER(True, output=res, error=None)
+
 def extract_json_from_text(text):
     return llm_interface.extract_json_from_text(text)
 from brain import memory_manager as memory_manager
@@ -247,11 +259,22 @@ def _execute_validated_plan(calls: list, user_input: str, session_id: str | None
             audit.record({"action": "pending_create_failed", "session_id": session_id})
         return {"source": "confirmation_required", "answer": f"The requested action includes sensitive operations and requires confirmation. Reply 'yes' to proceed or 'no' to cancel. To confirm a specific pending action, reply 'confirm {plan_id}'.", "details": {"plan_id": plan_id}}
 
+    def _call_through_execute_tool(name, args, user_request=None, session_id=None, timeout=None):
+        res = execute_tool(name, args or {}, user_request=user_request, session_id=session_id, timeout=timeout)
+        class _ER:
+            def __init__(self, success, output=None, error=None):
+                self.success = success
+                self.output = output
+                self.error = error
+        if isinstance(res, str) and (res.startswith("Error") or res.lower().startswith("error")):
+            return _ER(False, output=None, error=res)
+        return _ER(True, output=res, error=None)
+
     outputs = []
     for call in validated_calls:
         tname = call.get("tool")
         targs = call.get("args", {}) or {}
-        exec_res = EXEC_GATEWAY.execute(tname, targs, user_request=user_input, session_id=session_id)
+        exec_res = _call_through_execute_tool(tname, targs, user_request=user_input, session_id=session_id)
         outputs.append({"tool": tname, "success": exec_res.success, "output": exec_res.output, "error": exec_res.error})
 
     return {"source": "tool", "answer": outputs, "details": {"outputs": outputs}}
@@ -369,7 +392,7 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
                     if not valid:
                         audit.record({"action": "validation_failed_on_probe", "tool": tname, "errors": errors, "session_id": session_id})
                         return {"source": "error", "answer": f"Validation failed for tool {tname}: {errors}", "details": {"errors": errors}}
-                    exec_res = EXEC_GATEWAY.execute(tname, targs or {}, user_request=user_input, session_id=session_id)
+                    exec_res = _call_through_execute_tool(tname, targs or {}, user_request=user_input, session_id=session_id)
                     outputs.append({"tool": tname, "success": exec_res.success, "output": exec_res.output, "error": exec_res.error})
                 conv_save(session_id, user_input, outputs)
                 return {"source": "tool", "answer": outputs, "details": {"outputs": outputs}}
@@ -861,7 +884,7 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
                         if not valid:
                             audit.record({"action": "validation_failed_on_orchestration", "errors": errors, "session_id": session_id})
                             return {"source": "error", "answer": f"Validation failed for tool {tname}: {errors}", "details": {"errors": errors}}
-                        exec_res = EXEC_GATEWAY.execute(tname, targs or {}, user_request=user_input, session_id=session_id)
+                        exec_res = _call_through_execute_tool(tname, targs or {}, user_request=user_input, session_id=session_id)
                         outputs.append({"tool": tname, "success": exec_res.success, "output": exec_res.output, "error": exec_res.error})
                     audit.record({"action": "orchestrated_multi_execute", "session_id": session_id, "outputs": outputs})
                     conv_save(session_id, user_input, outputs)
@@ -952,7 +975,7 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
                     if not valid:
                         audit.record({"action": "validation_failed_on_single_pass", "tool": tname, "errors": errors, "session_id": session_id})
                         return {"source": "error", "answer": f"Validation failed for tool {tname}: {errors}", "details": {"errors": errors}}
-                    exec_res = EXEC_GATEWAY.execute(tname, targs or {}, user_request=user_input, session_id=session_id)
+                    exec_res = _call_through_execute_tool(tname, targs or {}, user_request=user_input, session_id=session_id)
                     outputs.append({"tool": tname, "success": exec_res.success, "output": exec_res.output, "error": exec_res.error})
                 conv_save(session_id, user_input, outputs)
                 audit.record({"action": "single_pass_multi_execute", "session_id": session_id, "outputs": outputs})
@@ -1671,7 +1694,7 @@ def run_cognitive_loop(user_input: str) -> str:
         for call in validated_calls:
             tname = call.get("tool")
             targs = call.get("args", {}) or {}
-            exec_res = EXEC_GATEWAY.execute(tname, targs, user_request=user_input, session_id=session_id)
+            exec_res = _call_through_execute_tool(tname, targs, user_request=user_input, session_id=session_id)
             outputs.append({"tool": tname, "success": exec_res.success, "output": exec_res.output, "error": exec_res.error})
 
         # Synthesize final response via LLM using tool outputs
