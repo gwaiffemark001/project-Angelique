@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(PROJECT_ROOT / ".env")
 except ImportError:
     # Avoid printing non-ASCII characters when running under Wine's default
     # ANSI codepage to prevent UnicodeEncodeError observed in bridge startup.
@@ -14,7 +16,6 @@ except ImportError:
         pass
 
 # --- Project Root & Directories (ABSOLUTE PATHS) ---
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -52,9 +53,25 @@ MT5_BRIDGE_CONNECT_TIMEOUT = float(os.getenv("ANGELIQUE_MT5_CONNECT_TIMEOUT", "1
 MT5_BRIDGE_RECONNECT_INTERVAL = float(os.getenv("ANGELIQUE_MT5_RECONNECT_INTERVAL", "1.0"))
 MT5_BRIDGE_HEALTH_CHECK_INTERVAL = float(os.getenv("ANGELIQUE_MT5_HEALTH_CHECK_INTERVAL", "5.0"))
 
-TRADING_MIN_FREE_MARGIN = float(os.getenv("ANGELIQUE_TRADING_MIN_FREE_MARGIN", "100.0"))
+TRADING_MIN_FREE_MARGIN = float(os.getenv("ANGELIQUE_TRADING_MIN_FREE_MARGIN", "0.0"))
+TRADING_MIN_FREE_MARGIN_PERCENT = float(os.getenv("TRADING_MIN_FREE_MARGIN_PERCENT", "10.0"))
+TRADING_DEFAULT_RISK_PERCENT = float(os.getenv(
+    "TRADING_DEFAULT_RISK_PERCENT",
+    os.getenv("ANGELIQUE_TRADING_DEFAULT_RISK_PERCENT", "0.5"),
+))
+TRADING_MAX_RISK_PERCENT = float(os.getenv("TRADING_MAX_RISK_PERCENT", "1.0"))
+TRADING_DAILY_LOSS_LIMIT_PERCENT = float(os.getenv("TRADING_DAILY_LOSS_LIMIT_PERCENT", "2.0"))
+TRADING_WEEKLY_LOSS_LIMIT_PERCENT = float(os.getenv("TRADING_WEEKLY_LOSS_LIMIT_PERCENT", "5.0"))
+TRADING_MIN_RR = float(os.getenv("TRADING_MIN_RR", "2.5"))
+TRADING_PREFERRED_RR = float(os.getenv("TRADING_PREFERRED_RR", "3.0"))
+TRADING_MAX_SIMULTANEOUS_TRADES = int(os.getenv("TRADING_MAX_SIMULTANEOUS_TRADES", "1"))
+TRADING_MINIMUM_LOT_PROTECTION = os.getenv("TRADING_MINIMUM_LOT_PROTECTION", "true").lower() in ("1", "true", "yes")
+TRADING_MARGIN_PROTECTION = os.getenv("TRADING_MARGIN_PROTECTION", "true").lower() in ("1", "true", "yes")
+TRADING_MARTINGALE_ENABLED = os.getenv("TRADING_MARTINGALE_ENABLED", "false").lower() in ("1", "true", "yes")
+TRADING_SWING_EXPECTED_HOLD_DAYS = int(os.getenv("TRADING_SWING_EXPECTED_HOLD_DAYS", "7"))
+TRADING_SWING_ALLOW_WEEKEND_HOLDING = os.getenv("TRADING_SWING_ALLOW_WEEKEND_HOLDING", "true").lower() in ("1", "true", "yes")
 TRADING_MIN_RR_RATIO = float(os.getenv("ANGELIQUE_TRADING_MIN_RR_RATIO", "2.0"))
-TRADING_MAX_SPREAD = float(os.getenv("ANGELIQUE_TRADING_MAX_SPREAD", "10.0"))
+TRADING_MAX_SPREAD = float(os.getenv("ANGELIQUE_TRADING_MAX_SPREAD", "3.0"))
 TRADING_CONFIDENCE_THRESHOLD = float(os.getenv("ANGELIQUE_TRADING_CONFIDENCE_THRESHOLD", "80.0"))
 TRADING_RSI_MIN = float(os.getenv("ANGELIQUE_TRADING_RSI_MIN", "30.0"))
 TRADING_RSI_MAX = float(os.getenv("ANGELIQUE_TRADING_RSI_MAX", "70.0"))
@@ -63,7 +80,6 @@ TRADING_EMA_SLOW = int(os.getenv("ANGELIQUE_TRADING_EMA_SLOW", "200"))
 TRADING_RSI_PERIOD = int(os.getenv("ANGELIQUE_TRADING_RSI_PERIOD", "14"))
 TRADING_ATR_PERIOD = int(os.getenv("ANGELIQUE_TRADING_ATR_PERIOD", "14"))
 TRADING_BBANDS_PERIOD = int(os.getenv("ANGELIQUE_TRADING_BBANDS_PERIOD", "20"))
-TRADING_DEFAULT_RISK_PERCENT = float(os.getenv("ANGELIQUE_TRADING_DEFAULT_RISK_PERCENT", "1.0"))
 TRADING_SYMBOLS = [s.strip().upper() for s in os.getenv("ANGELIQUE_TRADING_SYMBOLS", "EURUSD,GBPUSD,AUDUSD,USDJPY,XAUUSD,BTCUSD,ETHUSD").split(",") if s.strip()]
 TRADING_TIMEFRAMES = [s.strip().upper() for s in os.getenv("ANGELIQUE_TRADING_TIMEFRAMES", "M1,M5,M15,M30,H1,H4,D1,W1,MN").split(",") if s.strip()]
 DEFAULT_TRADING_SYMBOL = os.getenv("ANGELIQUE_DEFAULT_TRADING_SYMBOL", TRADING_SYMBOLS[0] if TRADING_SYMBOLS else "EURUSD").upper()
@@ -125,7 +141,10 @@ BLUESMINDS_MODEL = os.getenv("BLUESMINDS_MODEL", "meta/llama-3.1-8b-instruct")
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-70b-instruct")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
-OLLAMA_MODEL_CANDIDATES = [s.strip() for s in os.getenv("OLLAMA_MODEL_CANDIDATES", f"{LOCAL_FALLBACK_MODEL},{PRIMARY_MODEL},qwen2.5:3b,llama3.1").split(",") if s.strip()]
+OLLAMA_MODEL_CANDIDATES = [s.strip() for s in os.getenv(
+    "OLLAMA_MODEL_CANDIDATES",
+    f"{LOCAL_FALLBACK_MODEL},{PRIMARY_MODEL},{CODER_MODEL},qwen2.5:3b,llama3.1",
+).split(",") if s.strip()]
 API_DEFAULT_REFERER = os.getenv("API_DEFAULT_REFERER", "http://localhost")
 API_CLIENT_TITLE = os.getenv("API_CLIENT_TITLE", "Angelique AI")
 ANGELIQUE_DEFAULT_MODE_ENV = os.getenv("ANGELIQUE_DEFAULT_MODE_ENV", "ANGELIQUE_DEFAULT_MODE")
