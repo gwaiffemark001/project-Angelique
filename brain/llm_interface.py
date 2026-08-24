@@ -39,9 +39,10 @@ def _try_ollama_model(model_name: str, messages: list) -> Optional[str]:
             # Ollama may return either {'message': {'content': '...'}} or {'content': '...'} depending on version
             if isinstance(j, dict):
                 if "message" in j and isinstance(j["message"], dict) and "content" in j["message"]:
-                    return j["message"]["content"]
+                    content = j["message"]["content"]
+                    return content if isinstance(content, str) and content.strip() else None
                 if "content" in j and isinstance(j["content"], str):
-                    return j["content"]
+                    return j["content"] if j["content"].strip() else None
             # Fallback: try to extract nested content keys
             try:
                 # attempt common keyed extraction
@@ -54,31 +55,21 @@ def _try_ollama_model(model_name: str, messages: list) -> Optional[str]:
 
 
 def query_llm(messages: list, temperature: float = 0.7) -> str:
-    """Core function to query LLMs with remote-first priority and local Ollama as fallback."""
-    # If the host appears offline and no remote API keys are configured,
-    # prefer local Ollama immediately for faster response. Otherwise proceed
-    # with the configured provider order (remote-first when keys are present).
+    """Query cloud providers online, then Ollama; use Ollama directly offline."""
     if not _is_online():
-        has_remote_keys = any(
-            getattr(config, k, "") for k in (
-                "OPENROUTER_API_KEY",
-                "GEMINI_API_KEY",
-                "BLUESMINDS_API_KEY",
-                "NVIDIA_API_KEY",
-            )
-        )
-        if not has_remote_keys:
-            try:
-                result = _call_ollama(messages)
-                if result:
-                    return result
-            except Exception:
-                pass
-            return "I'm having a little trouble connecting to my brain right now."
+        result = _call_ollama(messages)
+        if result:
+            return result
+        print("[LLM] Offline mode: all local Ollama candidates failed; see the model diagnostics above.")
+        return "I'm having a little trouble connecting to my brain right now."
 
-    ordered_providers = [provider.strip().lower() for provider in (config.API_PRIORITY or []) if provider and provider.strip()]
+    ordered_providers = [
+        provider.strip().lower()
+        for provider in (config.API_PRIORITY or [])
+        if provider and provider.strip() and provider.strip().lower() != "ollama"
+    ]
     if not ordered_providers:
-        ordered_providers = ["openrouter", "nvidia", "bluesminds", "gemini", "ollama"]
+        ordered_providers = ["openrouter", "nvidia", "bluesminds", "gemini"]
 
     provider_handlers = {
         "nvidia": lambda: _call_nvidia(messages, temperature),
@@ -98,14 +89,11 @@ def query_llm(messages: list, temperature: float = 0.7) -> str:
         except Exception as exc:
             print(f"⚠️ [LLM] {provider} failed: {exc}")
 
-    # As a final attempt, try local Ollama candidates
-    try:
-        result = _call_ollama(messages)
-        if result:
-            return result
-    except Exception:
-        pass
+    result = _call_ollama(messages)
+    if result:
+        return result
 
+    print("[LLM] Cloud providers and all local Ollama candidates failed; see the provider diagnostics above.")
     return "I'm having a little trouble connecting to my brain right now."
 
 
