@@ -3,5 +3,13 @@ from .bridge import WineBridgeClient
 from .mt5_adapter import WineMT5Adapter
 
 
-def build_default_workflow(risk_percent=1.0, minimum_rr=2.0):
-    return TradingWorkflow(WineMT5Adapter(WineBridgeClient()), risk_percent=risk_percent, minimum_rr=minimum_rr)
+def build_default_workflow(risk_percent=None, minimum_rr=None, trading_mode="DAY_TRADING"):
+    from .profiles import get_trading_profile
+
+    profile = get_trading_profile(trading_mode)
+    return TradingWorkflow(
+        WineMT5Adapter(WineBridgeClient()),
+        risk_percent=profile.risk_per_trade if risk_percent is None else risk_percent,
+        minimum_rr=profile.minimum_rr if minimum_rr is None else minimum_rr,
+        trading_mode=profile.mode,
+    )

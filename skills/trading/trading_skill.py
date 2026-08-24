@@ -112,9 +112,20 @@ def analyze_and_recommend(symbol, timeframe="H1", risk_percent=1.0, entry_price=
 
 def execute_approved_trade(plan, confirmation):
     phrase = confirmation or (plan.get("confirmation_phrase") if isinstance(plan, dict) else getattr(plan, "confirmation_phrase", ""))
-    result = _LEGACY_WORKFLOW.execute(phrase)
-    details = result.details if isinstance(result.details, dict) else {}
-    return {"success": result.state == "EXECUTED", "status": result.state, "message": result.message, **details}
+    from core.execution_gateway import GATEWAY
+    import core.trading_gateway
+
+    execution = GATEWAY.execute(
+        "trading.execute_approved_trade",
+        {"confirmation_phrase": phrase},
+        user_request="Execute approved trade plan",
+        session_id="legacy-trading-facade",
+    )
+    return execution.output if execution.success else {
+        "success": False,
+        "status": "REJECTED",
+        "message": execution.error or "Gateway rejected trade execution.",
+    }
 
 
 def get_account_summary(account_mode='demo'):
