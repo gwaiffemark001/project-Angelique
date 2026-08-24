@@ -8,7 +8,7 @@ def get_account_summary(account_mode="demo"):
     display_mode = "real" if snapshot.requested_mode in {"live", "real"} else "demo"
     mode = "live" if snapshot.actual_mode == "real" else snapshot.actual_mode
     requested_mode = "live" if snapshot.requested_mode in {"live", "real"} else "demo"
-    mode_match = snapshot.connected
+    mode_match = raw.get("mode_match", snapshot.connected)
     if raw.get("status") == "error" and raw.get("error"):
         mode_match = True
     return {
@@ -26,5 +26,7 @@ def get_account_summary(account_mode="demo"):
         "requested_mode": requested_mode,
         "mode_match": mode_match,
         "status": "connected" if snapshot.connected else "unavailable",
-        **({"error": snapshot.error} if snapshot.error else {}),
+        "daily_loss_percent": raw.get("daily_loss_percent", 0),
+        "weekly_loss_percent": raw.get("weekly_loss_percent", 0),
+        **({"error": snapshot.error or raw.get("error")} if snapshot.error or raw.get("error") else {}),
     }
