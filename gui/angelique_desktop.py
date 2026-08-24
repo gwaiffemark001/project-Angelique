@@ -11,13 +11,15 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
-from tkinter import simpledialog, messagebox, scrolledtext
+from tkinter import simpledialog, messagebox, scrolledtext, ttk
 from pathlib import Path
 
 from core import config
+from gui.trading_hub_controller import TradingHubController
 #[main 44abb76] restore point
 #[main 53c3b9b] new restore
 #[main ba52bb9] reversal
+#[main 1081cdc] report
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -39,6 +41,15 @@ try:
 except ImportError:
     listen = None
     speak = None
+
+try:
+    from skills.wifi_control.router_client import allow_device_forever, allow_device_for_duration, disconnect_device, list_connected_devices, list_disconnected_devices
+except ImportError:
+    list_connected_devices = None
+    allow_device_forever = None
+    allow_device_for_duration = None
+    disconnect_device = None
+    list_disconnected_devices = None
 
 try:
     from PIL import Image, ImageDraw, ImageTk
@@ -112,6 +123,7 @@ class AngeliqueDesktopApp(tk.Tk):
         self._ring_particles = []
         self._ring_arc_ids = []
         self._ring_arc_config = []
+        self._trading_scan_stop_event = threading.Event()
         self._avatar_status_text_id = None
         self._avatar_status_blink_job = None
         self._avatar_status_mode = None
@@ -160,6 +172,8 @@ class AngeliqueDesktopApp(tk.Tk):
             "_stop_listening": None,
             "_trading_status_var": None,
             "_trading_detail_var": None,
+            "_wifi_refresh_pending": False,
+            "_wifi_generation": 0,
             "_ticker_index": 0,
             "_ticker_labels": [],
             "_scan_line_ids": [],
@@ -181,6 +195,8 @@ class AngeliqueDesktopApp(tk.Tk):
         self._avatar_size_cached = 0
         self._active_center_view = "home"
         self._speak_enabled = True
+        self._gui_settings_path = Path.home() / ".config" / "angelique" / "gui_settings.json"
+        self._gui_settings = self._load_gui_settings()
         self._voice_listener_thread = None
         self._stop_listening = None
         self.center_title_label = None
@@ -189,6 +205,10 @@ class AngeliqueDesktopApp(tk.Tk):
         self.trading_view_frame = None
         self.trading_status_var = None
         self.trading_detail_var = None
+        self._trading_hub_controller = TradingHubController(self._gui_settings.get("trading_mode", "DAY_TRADING"))
+        self.wifi_view_frame = None
+        self._wifi_status_var = None
+        self._wifi_detail_var = None
 
         self._mission_status_generators = [
             lambda s: f"CPU {s['cpu']}%  |  MEMORY {s['memory']}%",
@@ -470,6 +490,7 @@ class AngeliqueDesktopApp(tk.Tk):
         self.center_status_label.pack(anchor="s", pady=(16, 20))
 
         self._build_trading_view()
+        self._build_wifi_view()
         self._show_home_view()
 
     def _build_trading_view(self):
@@ -499,6 +520,8 @@ class AngeliqueDesktopApp(tk.Tk):
 
         self._trading_bridge_error_var = tk.StringVar(value="Bridge status unknown.")
         self._trading_mode_banner_var = tk.StringVar(value="Preparing trading status...")
+        self._strategy_mode_var = tk.StringVar(value=f"ACTIVE MODE: {self._trading_hub_controller.trading_mode}")
+        self._strategy_profile_var = tk.StringVar(value="")
         bridge_error_label = tk.Label(
             self.trading_view_frame,
             textvariable=self._trading_bridge_error_var,
@@ -522,6 +545,45 @@ class AngeliqueDesktopApp(tk.Tk):
         banner_label.pack(anchor="nw", padx=20, pady=(0, 14))
         self._trading_mode_label_widget = banner_label
 
+        strategy_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
+        strategy_frame.pack(anchor="nw", padx=20, pady=(0, 12))
+        tk.Label(
+            strategy_frame,
+            text="TRADING MODE:",
+            fg=self._theme("text"),
+            bg=self._theme("panel"),
+            font=("Consolas", 10, "bold"),
+        ).pack(side="left", padx=(0, 8))
+        for mode, label in (("DAY_TRADING", "DAY TRADING"), ("SWING_TRADING", "SWING TRADING")):
+            tk.Button(
+                strategy_frame,
+                text=label,
+                command=lambda selected=mode: self._on_strategy_mode_change(selected),
+                fg=self._theme("text"),
+                bg=self._theme("button_bg"),
+                activebackground=self._theme("button_active"),
+                activeforeground=self._theme("accent"),
+                bd=0,
+                padx=12,
+                pady=6,
+                font=("Consolas", 9, "bold"),
+            ).pack(side="left", padx=(0, 8))
+        tk.Label(
+            strategy_frame,
+            textvariable=self._strategy_mode_var,
+            fg=self._theme("accent"),
+            bg=self._theme("panel"),
+            font=("Consolas", 10, "bold"),
+        ).pack(side="left", padx=(4, 12))
+        tk.Label(
+            strategy_frame,
+            textvariable=self._strategy_profile_var,
+            fg=self._theme("text"),
+            bg=self._theme("panel"),
+            font=("Consolas", 9),
+        ).pack(side="left")
+        self._update_strategy_profile_display()
+
         # MT5 data availability badge (shows whether real MT5 data is being used)
         self._mt5_data_badge_var = tk.StringVar(value="")
         self._mt5_data_badge_label = tk.Label(
@@ -535,11 +597,7 @@ class AngeliqueDesktopApp(tk.Tk):
             bd=0,
             relief="flat",
         )
-        try:
-            # pack to the right side of the header area
-            self._mt5_data_badge_label.pack(anchor="ne", padx=20, pady=(0, 14))
-        except Exception:
-            self._mt5_data_badge_label.pack(anchor="nw", padx=20, pady=(0, 14))
+        self._mt5_data_badge_label.place(relx=0.985, rely=0.012, anchor="ne")
         # Tooltip: show raw bridge error on hover
         self._mt5_tooltip = None
         self._mt5_data_badge_label.bind("<Enter>", lambda e: self._show_mt5_tooltip(e))
@@ -568,6 +626,16 @@ class AngeliqueDesktopApp(tk.Tk):
             wraplength=1100,
         )
         monitor_label.pack(anchor="nw", padx=20, pady=(0, 12))
+        self._trading_health_var = tk.StringVar(value="TRADING HEALTH: CHECKING...")
+        tk.Label(
+            self.trading_view_frame,
+            textvariable=self._trading_health_var,
+            fg=self._theme("accent"),
+            bg=self._theme("panel"),
+            font=("Consolas", 9),
+            justify="left",
+            wraplength=1100,
+        ).pack(anchor="nw", padx=20, pady=(0, 12))
 
         timeframe_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
         timeframe_frame.pack(anchor="nw", padx=20, pady=(0, 14))
@@ -644,6 +712,23 @@ class AngeliqueDesktopApp(tk.Tk):
         )
         account_mode_menu.pack(side="left")
 
+        trading_navigation = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
+        trading_navigation.pack(anchor="nw", padx=20, pady=(0, 14))
+        self._position_monitor_button = tk.Button(
+            trading_navigation,
+            text="OPEN POSITION MONITOR",
+            command=self._show_position_monitor_view,
+            fg=self._theme("text"),
+            bg=self._theme("button_bg"),
+            activebackground=self._theme("button_active"),
+            activeforeground=self._theme("accent"),
+            bd=0,
+            padx=14,
+            pady=9,
+            font=("Consolas", 10, "bold"),
+        )
+        self._position_monitor_button.pack(side="left")
+
         dashboard_container = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
         dashboard_container.pack(fill="both", expand=True, padx=20, pady=(0, 14))
 
@@ -657,7 +742,11 @@ class AngeliqueDesktopApp(tk.Tk):
             font=("Consolas", 12, "bold"),
         ).pack(anchor="nw", padx=14, pady=(14, 6))
 
-        for label in ["Balance", "Equity", "Used Margin", "Free Margin", "Margin Level", "Leverage", "Currency"]:
+        for label in [
+            "Balance", "Equity", "Used Margin", "Free Margin", "Margin Level",
+            "Leverage", "Currency", "Risk %", "Risk Amount", "Daily Loss",
+            "Weekly Loss", "Max Risk", "Current Open Risk",
+        ]:
             container = tk.Frame(account_frame, bg=self._theme("panel"))
             container.pack(fill="x", padx=14, pady=6)
             tk.Label(
@@ -694,7 +783,46 @@ class AngeliqueDesktopApp(tk.Tk):
             highlightthickness=0,
         )
         self.trading_chart_canvas.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self.trading_chart_canvas.bind("<Configure>", self._on_trading_chart_resize)
         self._draw_trading_placeholder_chart()
+
+        positions_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), bd=1, relief="solid")
+        tk.Label(
+            positions_frame,
+            text="POSITION MONITORING",
+            fg=self._theme("accent"),
+            bg=self._theme("panel"),
+            font=("Consolas", 12, "bold"),
+        ).pack(anchor="nw", padx=14, pady=(10, 2))
+        tk.Label(
+            positions_frame,
+            text="Green/positive P&L means profit. Distances are from current price. Management signals are advisory; no SL changes happen automatically.",
+            fg=self._theme("text"),
+            bg=self._theme("panel"),
+            font=("Consolas", 9),
+        ).pack(anchor="nw", padx=14, pady=(0, 8))
+        position_columns = ("position", "prices", "stop", "target", "profit", "expected_profit", "r", "status")
+        self._positions_tree = ttk.Treeview(
+            positions_frame,
+            columns=position_columns,
+            show="headings",
+            height=3,
+            style="Hotspot.Treeview",
+        )
+        headings = (
+            ("position", "POSITION", 190), ("prices", "CURRENT | ENTRY", 190),
+            ("stop", "SL REMAIN | TOTAL", 190), ("target", "TP REMAIN | TOTAL", 190),
+            ("profit", "P/L", 100), ("expected_profit", "TP PROFIT", 125),
+            ("r", "R", 80), ("status", "STATUS", 130),
+        )
+        for column, heading, width in headings:
+            self._positions_tree.heading(column, text=heading)
+            self._positions_tree.column(column, width=width, minwidth=width, anchor="center", stretch=True)
+        self._positions_tree.tag_configure("profit", foreground="#22c55e")
+        self._positions_tree.tag_configure("loss", foreground="#ef4444")
+        self._positions_tree.tag_configure("neutral", foreground=self._theme("text"))
+        self._positions_tree.bind("<<TreeviewSelect>>", self._on_position_selected)
+        self._positions_tree.pack(fill="x", padx=14, pady=(0, 10))
 
         # Tooltip widget for OHLC on hover (created as child of canvas so we can use create_window)
         try:
@@ -712,31 +840,6 @@ class AngeliqueDesktopApp(tk.Tk):
             self.trading_chart_canvas.bind("<ButtonRelease-1>", lambda e: self._on_chart_button_release(e))
         except Exception:
             pass
-
-        transcript_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), bd=1, relief="solid")
-        transcript_frame.pack(fill="both", expand=True, padx=20, pady=(0, 18))
-        tk.Label(
-            transcript_frame,
-            text="TRADE ACTIVITY LOG",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 12, "bold"),
-        ).pack(anchor="nw", padx=14, pady=(14, 6))
-
-        self.trading_transcript_text = scrolledtext.ScrolledText(
-            transcript_frame,
-            height=6,
-            bg=self._theme("bg"),
-            fg=self._theme("text"),
-            insertbackground=self._theme("text"),
-            bd=0,
-            highlightthickness=1,
-            highlightbackground=self._theme("border"),
-            wrap="word",
-            font=("Consolas", 10),
-        )
-        self.trading_transcript_text.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-        self.trading_transcript_text.configure(state="disabled")
 
         button_row = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
         button_row.pack(anchor="nw", padx=20, pady=(0, 8))
@@ -773,6 +876,251 @@ class AngeliqueDesktopApp(tk.Tk):
         )
         self._back_to_home_button.pack(side="left")
 
+        self.position_monitor_view_frame = tk.Frame(self, bg=self._theme("panel"))
+        self.position_monitor_view_frame.place_forget()
+        tk.Label(self.position_monitor_view_frame, text="POSITION MONITOR", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 16, "bold")).pack(anchor="nw", padx=20, pady=(16, 8))
+        self._position_monitor_status_var = tk.StringVar(value="Waiting for live position data...")
+        tk.Label(self.position_monitor_view_frame, textvariable=self._position_monitor_status_var, fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 10)).pack(anchor="nw", padx=20, pady=(0, 16))
+        monitor_frame = tk.Frame(self.position_monitor_view_frame, bg=self._theme("panel"), bd=1, relief="solid")
+        monitor_frame.pack(fill="both", expand=True, padx=20, pady=(0, 14))
+        tk.Label(monitor_frame, text="LIVE POSITIONS AND MANAGEMENT STATE", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 12, "bold")).pack(anchor="nw", padx=14, pady=(14, 6))
+        self._monitor_positions_tree = ttk.Treeview(monitor_frame, columns=position_columns, show="headings", height=12, style="Hotspot.Treeview")
+        for column, heading, width in headings:
+            self._monitor_positions_tree.heading(column, text=heading)
+            self._monitor_positions_tree.column(column, width=width, minwidth=width, anchor="center", stretch=True)
+        self._monitor_positions_tree.tag_configure("profit", foreground="#22c55e")
+        self._monitor_positions_tree.tag_configure("loss", foreground="#ef4444")
+        self._monitor_positions_tree.tag_configure("neutral", foreground=self._theme("text"))
+        self._monitor_positions_tree.bind("<<TreeviewSelect>>", self._on_position_selected)
+        self._monitor_positions_tree.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        monitor_buttons = tk.Frame(self.position_monitor_view_frame, bg=self._theme("panel"))
+        monitor_buttons.pack(anchor="nw", padx=20, pady=(0, 8))
+        tk.Button(monitor_buttons, text="REFRESH POSITIONS", command=self._refresh_trading_view, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=14, pady=9, font=("Consolas", 10, "bold")).pack(side="left", padx=(0, 10))
+        tk.Button(monitor_buttons, text="EXIT ACTIVE TRADE", command=self._manual_exit_trade, fg=self._theme("text"), bg="#7f1d1d", activebackground="#991b1b", bd=0, padx=14, pady=9, font=("Consolas", 10, "bold")).pack(side="left", padx=(0, 10))
+        tk.Button(monitor_buttons, text="BACK TO TRADING HUB", command=self._show_trading_view, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=14, pady=9, font=("Consolas", 10, "bold")).pack(side="left")
+
+    def _update_strategy_profile_display(self):
+        profile = self._trading_hub_controller.get_trading_profile()
+        self._strategy_mode_var.set(f"ACTIVE MODE: {profile['mode']}")
+        self._strategy_profile_var.set(
+            f"SMC ENABLED | RISK {profile['risk_per_trade']:.2f}% | "
+            f"MAX SPREAD {profile['max_spread_pips']:.1f} PIPS | "
+            f"{profile['trend_timeframe']} > {profile['setup_timeframe']} > {profile['entry_timeframe']}"
+        )
+
+    def _on_strategy_mode_change(self, mode: str):
+        profile = self._trading_hub_controller.set_trading_mode(mode)
+        self._save_gui_settings(trading_mode=profile["mode"])
+        self._update_strategy_profile_display()
+        self._append_trading_transcript(
+            f"Trading mode changed to {profile['mode']}. Existing positions retain their opening mode."
+        )
+
+    def _build_wifi_view(self):
+        wifi_style = ttk.Style(self)
+        try:
+            wifi_style.theme_use("clam")
+        except tk.TclError:
+            pass
+        wifi_style.configure(
+            "Hotspot.Treeview",
+            background=self._theme("panel_alt"),
+            fieldbackground=self._theme("panel_alt"),
+            foreground=self._theme("text"),
+            bordercolor=self._theme("border"),
+            lightcolor=self._theme("border"),
+            darkcolor=self._theme("border"),
+            rowheight=28,
+            font=("Consolas", 10),
+        )
+        wifi_style.configure(
+            "Hotspot.Treeview.Heading",
+            background=self._theme("button_bg"),
+            foreground=self._theme("accent"),
+            bordercolor=self._theme("border"),
+            relief="flat",
+            font=("Consolas", 10, "bold"),
+        )
+        wifi_style.map(
+            "Hotspot.Treeview",
+            background=[("selected", self._theme("button_active"))],
+            foreground=[("selected", self._theme("accent"))],
+        )
+        self.wifi_view_frame = tk.Frame(self, bg=self._theme("panel"))
+        self.wifi_view_frame.place_forget()
+        tk.Label(
+            self.wifi_view_frame, text="HOTSPOT HUB", fg=self._theme("accent"),
+            bg=self._theme("panel"), font=("Consolas", 16, "bold"),
+        ).pack(anchor="nw", padx=20, pady=(16, 8))
+
+        self._wifi_status_var = tk.StringVar(value="Router status initializing...")
+        tk.Label(
+            self.wifi_view_frame, textvariable=self._wifi_status_var,
+            fg=self._theme("text"), bg=self._theme("panel"),
+            font=("Consolas", 11), justify="left",
+        ).pack(anchor="nw", padx=20, pady=(0, 6))
+        self._wifi_detail_var = tk.StringVar(value="The router is the enforcement layer. Angelique is the control panel.")
+        tk.Label(
+            self.wifi_view_frame, textvariable=self._wifi_detail_var,
+            fg=self._theme("accent"), bg=self._theme("panel"),
+            font=("Consolas", 10, "italic"), justify="left", wraplength=1100,
+        ).pack(anchor="nw", padx=20, pady=(0, 14))
+
+        content = tk.Frame(self.wifi_view_frame, bg=self._theme("panel"))
+        content.pack(fill="both", expand=True, padx=20, pady=(0, 14))
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_columnconfigure(1, weight=0, minsize=430)
+        device_frame = tk.Frame(content, bg=self._theme("panel"), bd=1, relief="solid")
+        device_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        tk.Label(device_frame, text="CONNECTED DEVICES", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 12, "bold")).pack(anchor="nw", padx=14, pady=(14, 8))
+        columns = ("device", "mac", "ip", "status")
+        self._wifi_device_tree = ttk.Treeview(device_frame, columns=columns, show="headings", height=8, style="Hotspot.Treeview")
+        for column, heading, width in (("device", "DEVICE", 190), ("mac", "MAC", 150), ("ip", "IP", 130), ("status", "STATUS", 90)):
+            self._wifi_device_tree.heading(column, text=heading)
+            self._wifi_device_tree.column(column, width=width, anchor="w")
+        self._wifi_device_tree.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+
+        tk.Label(device_frame, text="DISCONNECTED DEVICES", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 12, "bold")).pack(anchor="nw", padx=14, pady=(4, 8))
+        self._wifi_disconnected_tree = ttk.Treeview(device_frame, columns=("device", "mac", "status"), show="headings", height=5, style="Hotspot.Treeview")
+        for column, heading, width in (("device", "DEVICE", 220), ("mac", "MAC", 180), ("status", "STATUS", 130)):
+            self._wifi_disconnected_tree.heading(column, text=heading)
+            self._wifi_disconnected_tree.column(column, width=width, anchor="w")
+        self._wifi_disconnected_tree.pack(fill="x", padx=14, pady=(0, 14))
+
+        action_frame = tk.Frame(content, bg=self._theme("panel"), bd=1, relief="solid", width=410)
+        action_frame.grid(row=0, column=1, sticky="nsew")
+        action_frame.pack_propagate(False)
+        tk.Label(action_frame, text="ACCESS CONTROL", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 12, "bold")).pack(anchor="nw", padx=14, pady=(14, 12))
+        tk.Label(action_frame, text="Selected device", fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 10)).pack(anchor="w", padx=14)
+        self._wifi_selected_var = tk.StringVar(value="Select a device")
+        tk.Label(action_frame, textvariable=self._wifi_selected_var, fg=self._theme("accent"), bg=self._theme("panel_alt"), font=("Consolas", 10, "bold"), wraplength=370, justify="left").pack(fill="x", padx=14, pady=(4, 14))
+        duration_label_frame = tk.Frame(action_frame, bg=self._theme("panel"))
+        duration_label_frame.pack(fill="x", padx=14)
+        tk.Label(duration_label_frame, text="Access duration", fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 10)).pack(side="left")
+        self._wifi_duration_unit_var = tk.StringVar(value="Minutes")
+        duration_unit_menu = tk.OptionMenu(duration_label_frame, self._wifi_duration_unit_var, "Minutes", "Hours")
+        duration_unit_menu.configure(bg=self._theme("button_bg"), fg=self._theme("accent"), activebackground=self._theme("button_active"), activeforeground=self._theme("accent"), bd=0, highlightthickness=0, font=("Consolas", 9))
+        duration_unit_menu.pack(side="right")
+        self._wifi_duration_var = tk.StringVar(value="60")
+        self._wifi_duration_spinbox = tk.Spinbox(action_frame, from_=1, to=1440, textvariable=self._wifi_duration_var, bg=self._theme("button_bg"), fg=self._theme("text"), insertbackground=self._theme("text"), buttonbackground=self._theme("button_bg"), font=("Consolas", 10), width=8)
+        self._wifi_duration_spinbox.pack(anchor="w", padx=14, pady=(4, 14))
+        tk.Button(action_frame, text="ALLOW FOR DURATION", command=self._wifi_allow_for_duration, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=10, pady=9, font=("Consolas", 10, "bold")).pack(fill="x", padx=14, pady=4)
+        tk.Button(action_frame, text="ALLOW FOREVER", command=self._wifi_allow_forever, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=10, pady=9, font=("Consolas", 10, "bold")).pack(fill="x", padx=14, pady=4)
+        tk.Button(action_frame, text="CONNECT DEVICE", command=self._wifi_allow_forever, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=10, pady=9, font=("Consolas", 10, "bold")).pack(fill="x", padx=14, pady=4)
+        tk.Button(action_frame, text="DISCONNECT NOW", command=self._wifi_disconnect_now, fg=self._theme("text"), bg="#7f1d1d", activebackground="#991b1b", bd=0, padx=10, pady=9, font=("Consolas", 10, "bold")).pack(fill="x", padx=14, pady=4)
+        tk.Label(action_frame, text="Timed access is enforced by the router. Disconnected devices stay blocked until Connect Device is used.", fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 9, "italic"), wraplength=370, justify="left").pack(anchor="w", padx=14, pady=(16, 8))
+
+        self._wifi_device_tree.bind("<<TreeviewSelect>>", self._on_wifi_device_select)
+        self._wifi_disconnected_tree.bind("<<TreeviewSelect>>", self._on_wifi_disconnected_select)
+        buttons = tk.Frame(self.wifi_view_frame, bg=self._theme("panel"))
+        buttons.pack(anchor="nw", padx=20, pady=(0, 8))
+        tk.Button(buttons, text="REFRESH DEVICES", command=self._refresh_wifi_view, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=16, pady=10, font=("Consolas", 10, "bold")).pack(side="left", padx=(0, 12))
+        tk.Button(buttons, text="BACK TO HOME", command=self._show_home_view, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=16, pady=10, font=("Consolas", 10, "bold")).pack(side="left")
+
+    def _on_wifi_device_select(self, _event=None):
+        selected = self._wifi_device_tree.selection()
+        if selected:
+            values = self._wifi_device_tree.item(selected[0], "values")
+            self._wifi_selected_var.set(f"{values[0]}\n{values[1]}\n{values[2]}")
+            self._wifi_selected_device = {"name": values[0], "mac": values[1], "ip": values[2]}
+
+    def _on_wifi_disconnected_select(self, _event=None):
+        selected = self._wifi_disconnected_tree.selection()
+        if selected:
+            values = self._wifi_disconnected_tree.item(selected[0], "values")
+            self._wifi_selected_var.set(f"{values[0]}\n{values[1]}\nDISCONNECTED")
+            self._wifi_selected_device = {"name": values[0], "mac": values[1], "ip": "--"}
+
+    def _wifi_selected_mac(self):
+        return getattr(self, "_wifi_selected_device", {}).get("mac", "")
+
+    def _wifi_run_action(self, action, success_text):
+        mac = self._wifi_selected_mac()
+        if not mac:
+            self._wifi_detail_var.set("Select a device first.")
+            return
+        self._wifi_detail_var.set("Sending router command...")
+        threading.Thread(target=self._wifi_action_worker, args=(action, success_text), daemon=True).start()
+
+    def _wifi_action_worker(self, action, success_text):
+        try:
+            action()
+            self.after(0, lambda: (self._wifi_detail_var.set(success_text), self._refresh_wifi_view()))
+        except Exception as exc:
+            self.after(0, lambda: self._wifi_detail_var.set(f"Router command failed: {exc}"))
+
+    def _wifi_allow_for_duration(self):
+        try:
+            duration = int(self._wifi_duration_var.get())
+        except ValueError:
+            self._wifi_detail_var.set("Duration must be a whole number.")
+            return
+        unit = self._wifi_duration_unit_var.get()
+        minutes = duration * 60 if unit == "Hours" else duration
+        if minutes > 1440:
+            self._wifi_detail_var.set("Access duration cannot exceed 24 hours.")
+            return
+        self._wifi_run_action(lambda: allow_device_for_duration(self._wifi_selected_mac(), minutes), f"Device allowed for {duration} {unit.lower()}; the router will enforce the restriction afterward.")
+
+    def _wifi_allow_forever(self):
+        self._wifi_run_action(lambda: allow_device_forever(self._wifi_selected_mac()), "Device is permanently allowed; its blacklist entry and timed restrictions were removed.")
+
+    def _wifi_disconnect_now(self):
+        device = getattr(self, "_wifi_selected_device", {})
+        self._wifi_run_action(lambda: disconnect_device(device.get("mac", ""), name=device.get("name", "")), "Device disconnected and blocked by the router until Allow Forever is used.")
+
+    def _show_wifi_view(self):
+        self._active_center_view = "wifi"
+        self.center_title_label.configure(text="HOTSPOT HUB")
+        self.center_status_label.configure(text="MODE: LOCAL WI-FI ACCESS CONTROL")
+        if self.ring_canvas is not None:
+            self.ring_canvas.pack_forget()
+        self.center_status_label.pack_forget()
+        self._hide_main_panels()
+        self.wifi_view_frame.place(relx=0.02, rely=0.055, relwidth=0.96, relheight=0.88)
+        self._refresh_wifi_view()
+
+    def _refresh_wifi_view(self):
+        if self._wifi_refresh_pending:
+            return
+        self._wifi_refresh_pending = True
+        self._wifi_generation += 1
+        generation = self._wifi_generation
+        self._wifi_status_var.set("Router status: SCANNING...")
+        threading.Thread(target=self._refresh_wifi_worker, args=(generation,), daemon=True).start()
+
+    def _refresh_wifi_worker(self, generation):
+        try:
+            devices = list_connected_devices() if list_connected_devices else []
+            disconnected = list_disconnected_devices() if list_disconnected_devices else []
+            self.after(0, lambda: self._apply_wifi_devices(generation, devices, disconnected, None))
+        except Exception as exc:
+            self.after(0, lambda: self._apply_wifi_devices(generation, [], [], str(exc)))
+
+    def _apply_wifi_devices(self, generation, devices, disconnected, error):
+        if generation != self._wifi_generation:
+            return
+        self._wifi_refresh_pending = False
+        for item in self._wifi_device_tree.get_children():
+            self._wifi_device_tree.delete(item)
+        for device in devices:
+            self._wifi_device_tree.insert("", "end", values=(device["name"], device["mac"], device["ip"], device["status"]))
+        for item in self._wifi_disconnected_tree.get_children():
+            self._wifi_disconnected_tree.delete(item)
+        for device in disconnected:
+            self._wifi_disconnected_tree.insert("", "end", values=(device["name"], device["mac"], device["status"]))
+        if error:
+            self._wifi_status_var.set("Router status: OFFLINE")
+            self._wifi_detail_var.set(f"Could not read the MF296A at the configured host: {error}")
+            self._append_console("HOTSPOT", f"Router scan failed: {error}")
+        else:
+            self._wifi_status_var.set(f"Router status: ONLINE  |  connected devices: {len(devices)}")
+            detail = "Read-only device discovery is active. Select a device to prepare an access-control action."
+            if not devices:
+                detail = "Router responded, but returned no wireless station records. Refresh after confirming the device is connected."
+            self._wifi_detail_var.set(detail)
+
     def _hide_main_panels(self):
         for panel in [self.left_panel, self.center_panel, self.right_panel, self.bottom_panel]:
             if panel is not None:
@@ -789,10 +1137,21 @@ class AngeliqueDesktopApp(tk.Tk):
 
     def _show_home_view(self):
         self._active_center_view = "home"
+        position_job = getattr(self, "_position_refresh_job", None)
+        if position_job is not None:
+            try:
+                self.after_cancel(position_job)
+            except Exception:
+                pass
+            self._position_refresh_job = None
         self.center_title_label.configure(text="CORE MATRIX")
         self.center_status_label.configure(text="PRIORITY: HARMONIC SYNTHESIS")
         if self.trading_view_frame is not None:
             self.trading_view_frame.place_forget()
+        if getattr(self, "position_monitor_view_frame", None) is not None:
+            self.position_monitor_view_frame.place_forget()
+        if self.wifi_view_frame is not None:
+            self.wifi_view_frame.place_forget()
         self._show_main_panels()
         if self.ring_canvas is not None:
             self.ring_canvas.pack(fill="both", expand=True, padx=18, pady=18)
@@ -811,6 +1170,22 @@ class AngeliqueDesktopApp(tk.Tk):
         self._hide_main_panels()
         if self.trading_view_frame is not None:
             self.trading_view_frame.place(relx=0.02, rely=0.055, relwidth=0.96, relheight=0.88)
+        if getattr(self, "position_monitor_view_frame", None) is not None:
+            self.position_monitor_view_frame.place_forget()
+        self._refresh_trading_view()
+
+    def _show_position_monitor_view(self):
+        self._active_center_view = "position_monitor"
+        self.center_title_label.configure(text="POSITION MONITOR")
+        self.center_status_label.configure(text="LIVE POSITION MANAGEMENT")
+        if self.ring_canvas is not None:
+            self.ring_canvas.pack_forget()
+        if self.center_status_label is not None:
+            self.center_status_label.pack_forget()
+        self._hide_main_panels()
+        if self.trading_view_frame is not None:
+            self.trading_view_frame.place_forget()
+        self.position_monitor_view_frame.place(relx=0.02, rely=0.055, relwidth=0.96, relheight=0.88)
         self._refresh_trading_view()
 
     def _refresh_trading_view(self):
@@ -825,9 +1200,7 @@ class AngeliqueDesktopApp(tk.Tk):
         account_mode = self._get_selected_account_mode()
         self._trading_refresh_generation += 1
         generation = self._trading_refresh_generation
-        self.trading_status_var.set(
-            f"{symbol} • {timeframe} • bridge checking • balance $0.00"
-        )
+        self.trading_status_var.set(f"{symbol} • {timeframe} • loading account and market data...")
         self.trading_detail_var.set(f"Loading trading data for {symbol} {timeframe}...")
         self._draw_trading_placeholder_chart()
         threading.Thread(target=self._refresh_trading_view_data, args=(symbol, timeframe, account_mode, generation), daemon=True).start()
@@ -839,7 +1212,7 @@ class AngeliqueDesktopApp(tk.Tk):
         self.after(5000, self._monitor_trading_opportunities)
 
     def _monitor_trading_opportunities(self):
-        if not self._trading_monitor_running:
+        if not self._trading_monitor_running or self._trading_scan_stop_event.is_set():
             return
         if self._trading_monitor_scan_active:
             self.after(15000, self._monitor_trading_opportunities)
@@ -853,12 +1226,17 @@ class AngeliqueDesktopApp(tk.Tk):
             self.after(15000, self._monitor_trading_opportunities)
 
     def _monitor_trading_opportunity_worker(self, account_mode):
+        if self._trading_scan_stop_event.is_set():
+            return
         try:
-            from skills.trading_skill.service import monitor_universe
+            if getattr(self, "_shutting_down", False):
+                return
             self.after(0, lambda: self._trading_monitor_status_var.set("ANGELIQUE MONITOR: CANDIDATE FOUND | ANGELIQUE IS REVIEWING MARKET CONTEXT AND PRIOR TRADES..."))
-            scan = monitor_universe(account_mode)
+            scan = self._trading_hub_controller.monitor_opportunities(account_mode)
             candidates = scan.get("candidates", [])
             if scan.get("state") != "OPPORTUNITY_FOUND":
+                if getattr(self, "_shutting_down", False):
+                    return
                 self.after(0, lambda: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: WAITING FOR OPPORTUNITY | SCANNED {len(candidates)} ELIGIBLE SYMBOLS | NO VALID SETUP YET"))
                 return
             result = scan["opportunity"]
@@ -867,13 +1245,17 @@ class AngeliqueDesktopApp(tk.Tk):
             if not signature or signature == self._trading_monitor_signature or self._trading_monitor_popup_open:
                 return
             self._trading_monitor_signature = signature
+            if getattr(self, "_shutting_down", False):
+                return
             self.after(0, lambda: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: OPPORTUNITY FOUND ON {plan.get('mt5_symbol')} | PLAN READY FOR REVIEW"))
             self.after(0, lambda: self._show_trade_plan_popup(result))
         except Exception as exc:
-            self.after(0, lambda: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: BLOCKED | {exc}"))
-            self.after(0, lambda: self._append_console("TRADING-ERR", f"Opportunity monitor: {exc}"))
+            error_text = str(exc)
+            self.after(0, lambda error=error_text: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: BLOCKED | {error}"))
+            self.after(0, lambda error=error_text: self._append_console("TRADING-ERR", f"Opportunity monitor: {error}"))
         finally:
-            self.after(0, lambda: setattr(self, "_trading_monitor_scan_active", False))
+            if not self._trading_scan_stop_event.is_set():
+                self.after(0, lambda: setattr(self, "_trading_monitor_scan_active", False))
 
     def _get_selected_account_mode(self) -> str:
         return (getattr(self, "_account_mode_var", None).get() if getattr(self, "_account_mode_var", None) is not None else "demo")
@@ -903,41 +1285,56 @@ class AngeliqueDesktopApp(tk.Tk):
         self._gui_settings = settings
 
     def _refresh_trading_view_data(self, symbol: str, timeframe: str, account_mode: str, generation: int):
-        bridge_error = None
-        account = {}
-        market_data = {}
         try:
-            from skills.trading.engine.account import get_account_summary
-            from skills.trading.engine.connection_manager import bridge_manager
-            from skills.trading.market.market_data import market
-
-            account = get_account_summary(account_mode=account_mode)
-            active = bridge_manager.get_status()
-            if not active:
-                bridge_manager.connect()
-                active = bridge_manager.get_status()
-            bridge_error = account.get("error")
-            if not bridge_error and not active:
-                bridge_error = bridge_manager.get_last_error()
-            market_data = market.get_candles_and_indicators(symbol, timeframe, account_mode=account_mode)
-
-            try:
-                symbols_response = bridge_manager.send_command("list_instruments", {"account_mode": account_mode})
-                self.after(0, lambda: self._update_symbol_menu(symbols_response))
-            except Exception:
-                pass
-
-            self.after(0, lambda: self._apply_trading_view_data_if_current(generation, symbol, account, market_data, active, bridge_error, account_mode))
+            result = self._trading_hub_controller.load_refresh(symbol, timeframe, account_mode)
+            if result.instruments is not None and not getattr(self, "_shutting_down", False):
+                self.after(0, lambda: self._update_symbol_menu(result.instruments))
+            if not getattr(self, "_shutting_down", False):
+                self.after(0, lambda: self._apply_trading_view_data_if_current(
+                    generation,
+                    result.symbol,
+                    result.account,
+                    result.market_data,
+                    result.bridge_active,
+                    result.bridge_error,
+                    result.account_mode,
+                    result.health,
+                    result.positions,
+                ))
         except Exception as exc:
-            bridge_error = str(exc)
-            self.after(0, lambda: self._apply_trading_view_data_if_current(generation, symbol, {}, {}, False, bridge_error, account_mode))
+            error_text = str(exc)
+            if not getattr(self, "_shutting_down", False):
+                self.after(0, lambda error=error_text: self._apply_trading_view_data_if_current(generation, symbol, {}, {}, False, error, account_mode))
 
     def _apply_trading_view_data_if_current(self, generation, *args):
         if generation != self._trading_refresh_generation:
             return
         self._apply_trading_view_data(*args)
 
-    def _apply_trading_view_data(self, symbol: str, account: dict, market_data: dict, active: bool, bridge_error: str | None, account_mode: str):
+    def _apply_trading_view_data(self, symbol: str, account: dict, market_data: dict, active: bool, bridge_error: str | None, account_mode: str, health: dict | None = None, positions: dict | None = None):
+        positions = positions or {}
+        position_rows = positions.get("positions", []) if isinstance(positions, dict) else []
+        account = {
+            **(account or {}),
+            "current_open_risk_percent": sum(
+                float(row.get("risk_percent", 0) or 0)
+                for row in position_rows
+                if isinstance(row, dict)
+            ),
+        }
+        self._update_position_monitor(positions, market_data or {})
+        if self._active_center_view == "trading" and not getattr(self, "_shutting_down", False):
+            existing_job = getattr(self, "_position_refresh_job", None)
+            if existing_job is None:
+                self._position_refresh_job = self.after(5000, self._refresh_position_monitor)
+        health = health or {}
+        health_state = "ENABLED" if health.get("trading_enabled") else "DISABLED"
+        self._trading_health_var.set(
+            f"TRADING {health_state} | MT5 {health.get('mt5', 'UNKNOWN')} | "
+            f"BRIDGE {health.get('bridge', 'UNKNOWN')} | ACCOUNT {health.get('account', 'UNKNOWN')} | "
+            f"MARKET {health.get('market_data', 'UNKNOWN')} | SYMBOL {health.get('symbol', 'UNKNOWN')} | "
+            f"MONITOR {health.get('monitor', 'UNKNOWN')}"
+        )
         status = "connected" if active else "disconnected"
         balance = account.get("balance", 0)
         # Debug: log full account response to console for tracing UI mismatch issues
@@ -952,8 +1349,8 @@ class AngeliqueDesktopApp(tk.Tk):
         display_requested_mode = "real" if account_mode in ("live", "real") else "demo"
         actual_login = account.get("login") or "unavailable"
 
-        # If the returned account indicates no login, treat the requested account as unavailable
-        if not account.get("login") or account.get("error") or not account_mode_match:
+        # A mode mismatch must not expose the other account's figures.
+        if not account.get("login") or not account_mode_match:
             # Ensure the summary shows zero values for the requested account
             balance = 0
             account = {**(account or {}), "balance": 0, "equity": 0, "free_margin": 0, "margin_level": 0, "login": None}
@@ -1010,7 +1407,69 @@ class AngeliqueDesktopApp(tk.Tk):
                 f"Market chart unavailable{': ' + error_text if error_text else ''}"
             )
 
-        self._update_bridge_error(bridge_error)
+        self._update_bridge_error(active, bridge_error)
+
+    def _refresh_position_monitor(self):
+        self._position_refresh_job = None
+        if self._active_center_view == "trading" and not getattr(self, "_shutting_down", False):
+            self._refresh_trading_view()
+
+    def _update_position_monitor(self, positions_response: dict, market_data: dict):
+        if not hasattr(self, "_positions_tree"):
+            return
+        from skills.trading_skill.position_display import format_position_row
+
+        trees = [self._positions_tree]
+        monitor_tree = getattr(self, "_monitor_positions_tree", None)
+        if monitor_tree is not None:
+            trees.append(monitor_tree)
+        for tree in trees:
+            for item in tree.get_children():
+                tree.delete(item)
+        positions = positions_response.get("positions", []) if isinstance(positions_response, dict) else []
+        if not positions:
+            for tree in trees:
+                tree.insert("", "end", values=("No open positions", "-", "-", "-", "$0.00", "-", "-", "WAITING"), tags=("neutral",))
+            if getattr(self, "_position_monitor_status_var", None) is not None:
+                self._position_monitor_status_var.set("No open positions. Live MT5 position data is synchronized.")
+            return
+
+        for index, position in enumerate(positions):
+            try:
+                row = format_position_row(position, market_data)
+            except (TypeError, ValueError, KeyError):
+                continue
+            def display_price(value):
+                return "-" if not value else f"{value:.5f}"
+
+            def display_pips(value):
+                return "-" if value is None else f"{value:.1f}"
+
+            profit = row["profit"]
+            r_multiple = row["r_multiple"]
+            tag = "profit" if profit > 0 else "loss" if profit < 0 else "neutral"
+            row_id = str(row["ticket"])
+            if row_id in self._positions_tree.get_children() or row_id in {"-", "None"}:
+                row_id = f"position-{index}"
+            values = (
+                f"#{row['ticket']}  {row['symbol']} {row['direction']}",
+                f"{display_price(row['current'])} / {display_price(row['entry'])}",
+                f"{display_pips(row['to_stop_pips'])} / {display_pips(row['total_stop_pips'])} pips",
+                f"{display_pips(row['to_target_pips'])} / {display_pips(row['total_target_pips'])} pips",
+                f"${profit:,.2f}",
+                "-" if row["expected_profit"] is None else f"+${row['expected_profit']:,.2f}",
+                "-" if r_multiple is None else f"{r_multiple:.2f}R", row["status"],
+            )
+            self._positions_tree.insert("", "end", iid=row_id, values=values, tags=(tag,))
+            if monitor_tree is not None:
+                monitor_tree.insert("", "end", iid=row_id, values=values, tags=(tag,))
+        if getattr(self, "_position_monitor_status_var", None) is not None:
+            self._position_monitor_status_var.set(f"{len(positions)} open position(s). Live MT5 position data is synchronized.")
+
+    def _on_position_selected(self, _event=None):
+        source = self._monitor_positions_tree if self._active_center_view == "position_monitor" else self._positions_tree
+        selected = source.selection() if source is not None else ()
+        self._selected_position_ticket = int(selected[0]) if selected and selected[0].isdigit() else None
 
     def _flash_widget(self, widget, cycles=4, interval=250):
         if not widget:
@@ -1053,7 +1512,11 @@ class AngeliqueDesktopApp(tk.Tk):
             self._append_console("TRADING-ERR", f"Manual exit failed: invalid account mode '{account_mode}'.")
             self.trading_detail_var.set(f"Manual exit failed: invalid account mode '{account_mode}'.")
             return None
-        return {"symbol": symbol, "account_mode": account_mode, "timeframe": timeframe}
+        payload = {"symbol": symbol, "account_mode": account_mode, "timeframe": timeframe}
+        selected_ticket = getattr(self, "_selected_position_ticket", None)
+        if selected_ticket is not None:
+            payload["ticket"] = selected_ticket
+        return payload
 
     def _swap_display_mode(self, mode: str | None) -> str:
         mode = (mode or "demo").lower()
@@ -1074,9 +1537,13 @@ class AngeliqueDesktopApp(tk.Tk):
             else:
                 display_mode = account.get("mode", "demo")
         display_mode = self._swap_display_mode(display_mode)
+        from skills.trading_skill.profiles import get_trading_profile
+        profile = get_trading_profile(self._trading_hub_controller.trading_mode)
+        equity = float(account.get("equity", 0) or 0) if isinstance(account, dict) else 0.0
+        risk_percent = profile.risk_per_trade
 
-        # Show zero balance if: no account, no login, or ANY error
-        if not account or not account.get("login") or account.get("error"):
+        # Only show figures for the account mode selected in the Trading Hub.
+        if not account or not account.get("login") or account.get("mode_match") is False:
             values = {
                 "balance": 0,
                 "equity": 0,
@@ -1084,9 +1551,15 @@ class AngeliqueDesktopApp(tk.Tk):
                 "free_margin": 0,
                 "margin_level": 0,
                 "leverage": "—",
-                "currency": account.get("currency", "USD"),
+                "currency": account.get("currency", "USD") if isinstance(account, dict) else "USD",
                 "account_mode": display_mode,
                 "login": "—",
+                "risk_percent": risk_percent,
+                "risk_amount": 0,
+                "daily_loss": 0,
+                "weekly_loss": 0,
+                "max_risk": config.TRADING_MAX_RISK_PERCENT,
+                "current_open_risk": 0,
             }
         else:
             values = {
@@ -1099,6 +1572,12 @@ class AngeliqueDesktopApp(tk.Tk):
                 "currency": account.get("currency", "USD"),
                 "account_mode": display_mode,
                 "login": account.get("login", "—"),
+                "risk_percent": risk_percent,
+                "risk_amount": equity * risk_percent / 100,
+                "daily_loss": account.get("daily_loss_percent", 0),
+                "weekly_loss": account.get("weekly_loss_percent", 0),
+                "max_risk": config.TRADING_MAX_RISK_PERCENT,
+                "current_open_risk": account.get("current_open_risk_percent", 0),
             }
         for key, label in self._account_labels.items():
             value = values.get(key, "—")
@@ -1108,6 +1587,9 @@ class AngeliqueDesktopApp(tk.Tk):
         if self.trading_chart_canvas is None:
             return
         self.trading_chart_canvas.delete("all")
+        self._last_chart_data = None
+        self._chart_selection_rect_id = None
+        self._selection_handle_ids = []
         width = self.trading_chart_canvas.winfo_width() or 860
         height = self.trading_chart_canvas.winfo_height() or 220
         padding = 16
@@ -1132,23 +1614,38 @@ class AngeliqueDesktopApp(tk.Tk):
             self._draw_trading_placeholder_chart()
             return
 
-        # Keep a reference to the full dataset for zooming
-        try:
-            self._last_full_candles = list(candles)
-        except Exception:
-            self._last_full_candles = candles
+        valid_candles = []
+        for candle in candles:
+            if not isinstance(candle, dict):
+                continue
+            try:
+                open_price = float(candle.get("open", candle.get("o", candle.get("Open", 0))))
+                high_price = float(candle.get("high", candle.get("h", candle.get("High", open_price))))
+                low_price = float(candle.get("low", candle.get("l", candle.get("Low", open_price))))
+                close_price = float(candle.get("close", candle.get("c", candle.get("Close", open_price))))
+            except (TypeError, ValueError):
+                continue
+            if min(open_price, high_price, low_price, close_price) <= 0:
+                continue
+            valid_candles.append(candle)
+        if not valid_candles:
+            self._draw_trading_placeholder_chart()
+            return
+
+        # Keep a validated reference for zooming and resize redraws.
+        self._last_full_candles = valid_candles
 
         self.trading_chart_canvas.delete("all")
         width = self.trading_chart_canvas.winfo_width() or 860
         height = self.trading_chart_canvas.winfo_height() or 220
         padding = 16
 
-        total = len(candles)
+        total = len(valid_candles)
         view_count = min(self._trading_chart_view_count, total)
         offset = max(0, int(self._trading_chart_view_offset))
         start_idx = max(0, total - view_count - offset)
         end_idx = min(total, start_idx + view_count)
-        selected = candles[start_idx:end_idx]
+        selected = valid_candles[start_idx:end_idx]
 
         # Extract prices and preserve metadata
         prices = []
@@ -1264,6 +1761,13 @@ class AngeliqueDesktopApp(tk.Tk):
         # Save last chart data for tooltip/interactions
         self._last_chart_data = {"prices": prices, "points_x": points_x, "start_idx": start_idx}
 
+    def _on_trading_chart_resize(self, _event=None):
+        if getattr(self, "_shutting_down", False):
+            return
+        candles = getattr(self, "_last_full_candles", None)
+        if candles:
+            self._draw_trading_chart(candles)
+
     def _update_trading_mode_banner(
         self,
         account_mode: str,
@@ -1287,15 +1791,12 @@ class AngeliqueDesktopApp(tk.Tk):
             except Exception:
                 pass
 
-    def _update_bridge_error(self, bridge_error: str | None):
-        if self._trading_bridge_error_var is None:
-            return
-        if bridge_error:
-            self._trading_bridge_error_var.set(f"Bridge detail: {bridge_error}")
-        else:
-            self._trading_bridge_error_var.set("Bridge connected and ready.")
+    def _update_bridge_error(self, bridge_connected: bool, bridge_error: str | None):
+        from skills.trading.engine.trading_status import get_bridge_status_label, get_mt5_data_badge_text
 
-        # Update MT5 data badge state
+        if self._trading_bridge_error_var is not None:
+            self._trading_bridge_error_var.set(get_bridge_status_label(bridge_connected, bridge_error))
+
         try:
             if getattr(self, "_mt5_data_badge_var", None) is not None:
                 account_error = getattr(self, "_last_account_error", None)
@@ -1303,42 +1804,33 @@ class AngeliqueDesktopApp(tk.Tk):
                 actual_mode = (last_account.get("mode") or "").lower()
                 requested_mode = (last_account.get("requested_mode") or "").lower()
                 mode_match = last_account.get("mode_match", True)
+                account_connected = bool(last_account.get("login")) and not bool(account_error)
                 actual_mode = self._swap_display_mode(actual_mode)
                 requested_mode = self._swap_display_mode(requested_mode)
 
-                if not mode_match:
-                    mismatch_text = f"Mode mismatch: connected {actual_mode.upper()}, requested {requested_mode.upper()}"
-                    self._mt5_data_badge_var.set(mismatch_text)
-                    try:
-                        self._mt5_data_badge_label.configure(bg="#f59e0b")
-                    except Exception:
-                        pass
-                elif actual_mode in {"live", "demo"}:
-                    if actual_mode == "live":
-                        self._mt5_data_badge_var.set("Using real MT5 data")
-                        try:
-                            self._mt5_data_badge_label.configure(bg="#16a34a")
-                        except Exception:
-                            pass
-                    else:
-                        self._mt5_data_badge_var.set("Using demo MT5 data")
-                        try:
-                            self._mt5_data_badge_label.configure(bg="#0ea5e9")
-                        except Exception:
-                            pass
-                elif bridge_error or account_error:
-                    self._mt5_data_badge_var.set("MT5 unavailable")
-                    try:
-                        self._mt5_data_badge_label.configure(bg="#dc2626")
-                    except Exception:
-                        pass
-                else:
+                badge_text = get_mt5_data_badge_text(actual_mode, requested_mode, bridge_connected, account_connected, bridge_error, mode_match)
+                if not badge_text:
                     self._mt5_data_badge_var.set("")
                     try:
                         self._mt5_data_badge_label.configure(bg=self._theme("accent"))
                     except Exception:
                         pass
-
+                else:
+                    self._mt5_data_badge_var.set(badge_text)
+                    if badge_text == "MT5 unavailable":
+                        bg = "#dc2626"
+                    elif "Mode mismatch" in badge_text:
+                        bg = "#f59e0b"
+                    elif badge_text == "Using real MT5 data":
+                        bg = "#16a34a"
+                    elif badge_text == "Using demo MT5 data":
+                        bg = "#0ea5e9"
+                    else:
+                        bg = self._theme("accent")
+                    try:
+                        self._mt5_data_badge_label.configure(bg=bg)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -1467,6 +1959,14 @@ class AngeliqueDesktopApp(tk.Tk):
 
     def _on_chart_button_release(self, event):
         try:
+            start_x = getattr(self, "_selection_start_x", event.x)
+            start_y = getattr(self, "_selection_start_y", event.y)
+            drag_width = abs(event.x - start_x)
+            drag_height = abs(event.y - start_y)
+            # A click is for inspection only; do not turn it into a one-candle zoom.
+            if drag_width < 8 or drag_width <= drag_height:
+                self.trading_chart_canvas.delete("chart_drag_select")
+                return
             # finalize selection and zoom to it
             try:
                 sel = self.trading_chart_canvas.find_withtag("chart_drag_select")
@@ -1515,12 +2015,9 @@ class AngeliqueDesktopApp(tk.Tk):
             pass
 
     def _append_trading_transcript(self, message: str):
-        if self.trading_transcript_text is None:
+        transcript = getattr(self, "trading_transcript_text", None)
+        if transcript is None:
             return
-        self.trading_transcript_text.configure(state="normal")
-        self.trading_transcript_text.insert(tk.END, f"{message}\n\n")
-        self.trading_transcript_text.see(tk.END)
-        self.trading_transcript_text.configure(state="disabled")
 
     def _update_symbol_menu(self, response):
         if not isinstance(response, dict):
@@ -1603,15 +2100,9 @@ class AngeliqueDesktopApp(tk.Tk):
             return "-" if value is None else value
 
         rationale = plan.get("rationale", []) if isinstance(plan, dict) else plan.rationale
-        agree = []
-        disagree = []
-        for item in rationale:
-            if not isinstance(item, str):
-                continue
-            if item.startswith("AGREES:"):
-                agree.append(item)
-            elif item.startswith("DISAGREES:"):
-                disagree.append(item)
+        smc_analysis = plan.get("smc_analysis", {}) if isinstance(plan, dict) else getattr(plan, "smc_analysis", {})
+        profile = plan.get("profile", {}) if isinstance(plan, dict) else getattr(plan, "profile", {})
+        confluence = (result.get("details") or {}).get("confluence", {}) if isinstance(result, dict) else {}
         account = result.get("account") if isinstance(result, dict) else None
         market = result.get("market") if isinstance(result, dict) else None
         if account is not None and not isinstance(account, dict):
@@ -1620,55 +2111,91 @@ class AngeliqueDesktopApp(tk.Tk):
             market = market.__dict__
         risk_amount = float(get_value("risk_amount"))
         potential_profit = risk_amount * float(get_value("reward_to_risk"))
+        score = confluence.get("score", "-")
+        mode = plan.get("trading_mode", "DAY_TRADING") if isinstance(plan, dict) else getattr(plan, "trading_mode", "DAY_TRADING")
+        structure = smc_analysis.get("structure_shift", "none") if isinstance(smc_analysis, dict) else "none"
+        sweep = smc_analysis.get("liquidity_sweep", "none") if isinstance(smc_analysis, dict) else "none"
+        location = smc_analysis.get("location", "unknown") if isinstance(smc_analysis, dict) else "unknown"
+        news_context = plan.get("news_context", {}) if isinstance(plan, dict) else getattr(plan, "news_context", {})
+        try:
+            score_value = float(score)
+        except (TypeError, ValueError):
+            score_value = 0.0
+        indicator_color = "#22c55e" if score_value >= 8 else "#ef4444"
+        indicator_text = "HIGH CONFIDENCE" if score_value >= 8 else "POSSIBLE / LOWER CONFIDENCE"
         body = "\n".join([
-            "ANGELIQUE - TRADE PLAN",
-            "STATUS: READY FOR YOUR APPROVAL",
-            f"Brain review: {(result.get('brain_review') or {}).get('response', 'Completed deterministic review.') if isinstance(result, dict) else 'Completed deterministic review.'}",
+            "ANGELIQUE - TRADE PLAN SUMMARY",
+            "STATUS: READY FOR APPROVAL",
+            f"PAIR: {get_value('mt5_symbol')}",
+            f"MODE: {mode} | SMC SCORE: {score}/10 | MINIMUM: {profile.get('minimum_score', 7)}/10",
             "",
-            "MARKET",
-            f"{get_value('mt5_symbol')} | {get_value('direction')} | {get_value('order_type')}",
-            "Analysis: H4 -> H1 -> M15 -> M5",
-            f"Bid: {(market or {}).get('bid', '-')} | Ask: {(market or {}).get('ask', '-')} | Spread: {(market or {}).get('spread', '-')}",
+            "SETUP",
+            f"DIRECTION: {get_value('direction')} | ORDER: {get_value('order_type')}",
+            f"Structure: {structure} | Liquidity: {sweep} | Zone: {location}",
+            f"News: {news_context.get('bias', 'unknown')} | {news_context.get('reason', 'No news context available.')}",
+            f"Timeframes: {profile.get('context_timeframe', 'H4')} > {profile.get('trend_timeframe', 'H1')} > {profile.get('setup_timeframe', 'M15')} > {profile.get('entry_timeframe', 'M5')}",
+            f"Spread: {(market or {}).get('spread_pips', (market or {}).get('spread', '-'))} pips",
             "",
-            "TRADE LEVELS",
-            f"Requested entry: {get_value('entry')}",
-            f"Stop loss: {get_value('stop_loss')}",
-            f"Take profit: {get_value('take_profit')}",
-            f"Reward/Risk: 1:{float(get_value('reward_to_risk')):.2f}",
+            "EXECUTION LEVELS",
+            f"Entry: {get_value('entry')} | Stop: {get_value('stop_loss')} | Target: {get_value('take_profit')}",
+            f"Reward/Risk: 1:{float(get_value('reward_to_risk')):.2f} | Volume: {get_value('volume')}",
             "",
-            "POSITION & RISK",
-            f"Volume: {get_value('volume')}",
-            f"Risk: {get_value('risk_percent')}% | Maximum loss: ${risk_amount:.2f}",
-            f"Estimated profit: ${potential_profit:.2f}",
-            f"Used margin before: ${(account or {}).get('used_margin', (account or {}).get('margin', '-'))}",
-            f"Leverage: {(account or {}).get('leverage', '-')}",
-            f"Margin required: ${get_value('margin_required')}",
-            f"Free margin after: ${get_value('free_margin_after')}",
-            f"Projected margin level: {get_value('projected_margin_level'):.1f}%" if isinstance(get_value('projected_margin_level'), (int, float)) else f"Projected margin level: {get_value('projected_margin_level')}",
-            f"Equity: ${(account or {}).get('equity', '-')} | Free margin: ${(account or {}).get('free_margin', '-')}",
-            "",
-            "SETUP EVIDENCE",
-            "",
-            "AGREED SIGNALS",
-            *(agree or ["No agreement markers were captured."]),
-            "",
-            "DISAGREED SIGNALS",
-            *(disagree or ["No conflicting markers were captured."]),
-            "",
-            "FULL RATIONALE",
-            *rationale,
+            "RISK",
+            f"Risk: {get_value('risk_percent')}% | Maximum loss: ${risk_amount:.2f} | Estimated profit: ${potential_profit:.2f}",
+            f"Margin required: ${get_value('margin_required')} | Free margin after: ${get_value('free_margin_after')}",
+            f"Equity: ${(account or {}).get('equity', '-')} | Projected margin level: {get_value('projected_margin_level')}",
             "",
             "INVALIDATION",
-            f"The {get_value('direction').lower()} idea is invalidated at the stop-loss level: {get_value('stop_loss')}.",
+            f"Cancel the {get_value('direction').lower()} idea if price reaches {get_value('stop_loss')} or the plan expires.",
+            "Market execution may vary with spread and slippage.",
             "",
-            "EXECUTION WARNING",
-            "Market execution is not guaranteed at the requested entry. Spread and slippage may change the fill.",
-            "",
-            f"Type exactly: {get_value('confirmation_phrase')}",
+            f"TYPE EXACTLY: {get_value('confirmation_phrase')}",
         ])
-        tk.Label(dialog, text=body, justify="left", wraplength=720, fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 11)).pack(padx=20, pady=20, anchor="w")
-        actions = tk.Frame(dialog, bg=self._theme("panel"))
-        actions.pack(fill="x", padx=20, pady=(0, 20))
+        dialog.minsize(760, 480)
+        dialog.geometry("820x560")
+        dialog.resizable(True, True)
+
+        indicators = tk.Frame(dialog, bg=self._theme("panel"))
+        indicators.pack(fill="x", padx=20, pady=(16, 0))
+        for label in ("PROFIT LIKELIHOOD", "SETUP QUALITY"):
+            indicator = tk.Frame(indicators, bg=self._theme("panel"))
+            indicator.pack(side="left", padx=(0, 24))
+            light = tk.Canvas(indicator, width=16, height=16, bg=self._theme("panel"), highlightthickness=0)
+            light.create_oval(2, 2, 14, 14, fill=indicator_color, outline=indicator_color)
+            light.pack(side="left", padx=(0, 6))
+            tk.Label(
+                indicator,
+                text=f"{label}: {indicator_text}",
+                fg=self._theme("accent") if score_value >= 8 else self._theme("text"),
+                bg=self._theme("panel"),
+                font=("Consolas", 9, "bold"),
+            ).pack(side="left")
+
+        body_container = tk.Frame(dialog, bg=self._theme("panel"))
+        body_container.pack(fill="both", expand=True, padx=20, pady=(20, 0))
+
+        body_box = tk.Text(
+            body_container,
+            wrap="word",
+            fg=self._theme("text"),
+            bg=self._theme("panel"),
+            insertbackground=self._theme("text"),
+            relief="flat",
+            highlightthickness=0,
+            font=("Consolas", 10),
+            width=88,
+            height=20,
+        )
+        body_box.insert("1.0", body)
+        body_box.configure(state="disabled")
+        scrollbar = tk.Scrollbar(body_container, orient="vertical", command=body_box.yview)
+        body_box.configure(yscrollcommand=scrollbar.set)
+        body_box.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        actions = tk.Frame(dialog, bg=self._theme("panel"), height=64)
+        actions.pack(fill="x", padx=20, pady=(6, 20))
+        actions.pack_propagate(False)
         tk.Button(actions, text="Cancel", command=lambda: self._cancel_trade_plan(dialog), fg=self._theme("text"), bg=self._theme("button_bg"), bd=0, padx=16, pady=10).pack(side="right", padx=(10, 0))
         self._trading_monitor_popup_open = True
         tk.Button(actions, text="APPROVE & EXECUTE", command=lambda: self._approve_trade_plan(dialog, get_value("confirmation_phrase")), fg=self._theme("text"), bg=self._theme("button_active"), bd=0, padx=16, pady=10).pack(side="right")
@@ -1681,31 +2208,74 @@ class AngeliqueDesktopApp(tk.Tk):
     def _approve_trade_plan(self, dialog, confirmation_phrase):
         dialog.destroy()
         self._trading_monitor_popup_open = False
-        from skills.trading_skill.service import execute_trade
-        result = execute_trade(confirmation_phrase)
-        self.trading_detail_var.set(result.message)
-        self._append_console("TRADING", result.message)
+        self.trading_detail_var.set("Executing approved trade plan...")
+
+        def execute_worker():
+            from core.execution_gateway import GATEWAY
+            import core.trading_gateway
+
+            execution = GATEWAY.execute(
+                "trading.execute_approved_trade",
+                {"confirmation_phrase": confirmation_phrase},
+                user_request="Approve and execute the displayed TradePlan",
+                session_id="gui-trading-hub",
+                timeout=30.0,
+            )
+            output = execution.output if isinstance(execution.output, dict) else {}
+            message = execution.error or output.get("message", "Trade execution completed.")
+            details = output.get("details") if isinstance(output.get("details"), dict) else {}
+            if output.get("state") in {"REJECTED", "EXPIRED"}:
+                stage = details.get("failure_stage", "execution")
+                reason = details.get("reason", message)
+                message = f"{output.get('state')}: {reason} [stage: {stage}]"
+                diagnostic = f"{message} | details={details}"
+            else:
+                diagnostic = None
+            if not getattr(self, "_shutting_down", False):
+                self.after(0, lambda result=message, detail=diagnostic: (
+                    self.trading_detail_var.set(result),
+                    self._append_console("TRADING", result),
+                    self._append_console("TRADING-DIAGNOSTIC", detail) if detail else None,
+                ))
+
+        threading.Thread(target=execute_worker, daemon=True).start()
 
     def _manual_exit_trade(self):
         try:
             payload = self._get_manual_exit_payload()
             if not payload:
                 return
-            from skills.trading.engine.mt5_bridge import bridge
             self._append_console("TRADING", f"Manual exit requested for {payload['symbol']} on account {payload['account_mode']}.")
             self._append_console("DEBUG", f"Exit payload: {payload}")
-            response = bridge.send_command("close_position", payload)
-            self._append_console("DEBUG", f"Bridge response: {response}")
-            message = response.get("message") or response.get("error") or response.get("status") or "Manual exit attempted."
-            if response.get("success") is True or response.get("status") == "closed":
-                self.trading_detail_var.set(f"Manual exit successful: {message}")
-                self._append_console("TRADING", f"Manual exit successful: {message}")
-            else:
-                self.trading_detail_var.set(f"Manual exit failed: {message}")
-                self._append_console("TRADING-ERR", f"Manual exit failed: {message}")
+            self.trading_detail_var.set("Closing selected trade...")
+
+            def exit_worker():
+                from core.execution_gateway import GATEWAY
+                import core.trading_gateway
+
+                execution = GATEWAY.execute(
+                    "trading.close_position",
+                    payload,
+                    user_request="Close the selected active trade",
+                    session_id="gui-trading-hub",
+                    timeout=30.0,
+                )
+                response = execution.output if execution.success and isinstance(execution.output, dict) else {"error": execution.error}
+                message = response.get("message") or response.get("error") or response.get("status") or "Manual exit attempted."
+                success = response.get("success") is True or response.get("status") == "closed"
+                if not getattr(self, "_shutting_down", False):
+                    self.after(0, lambda: self._append_console("DEBUG", f"Bridge response: {response}"))
+                    self.after(0, lambda text=message, ok=success: self._record_exit_result(text, ok))
+
+            threading.Thread(target=exit_worker, daemon=True).start()
         except Exception as exc:
             self._append_console("TRADING-ERR", f"Manual exit failed: {exc}")
             self.trading_detail_var.set(f"Manual exit failed: {exc}")
+
+    def _record_exit_result(self, message: str, success: bool):
+        prefix = "successful" if success else "failed"
+        self.trading_detail_var.set(f"Manual exit {prefix}: {message}")
+        self._append_console("TRADING" if success else "TRADING-ERR", f"Manual exit {prefix}: {message}")
 
     def _update_avatar(self):
         # Ensure canvas layout is settled before measuring
@@ -1776,6 +2346,7 @@ class AngeliqueDesktopApp(tk.Tk):
 
         self._build_mission_ticker()
         self._create_command_button(self.right_panel, "TRADING HUB", command=self._enter_trading_view)
+        self._create_command_button(self.right_panel, "HOTSPOT HUB", command=self._show_wifi_view)
         self._create_command_button(self.right_panel, "VOICE ASSIST", command=self._toggle_audio_mode)
         self._create_command_button(self.right_panel, "SYSTEM DIAGNOSTICS", command=self._show_system_diagnostics)
         self._create_command_button(self.right_panel, "EXIT ANGELIQUE", command=self._exit_angelique)
@@ -2030,21 +2601,6 @@ class AngeliqueDesktopApp(tk.Tk):
         )
         self.footer_label.place(relx=0.02, rely=0.5, anchor="w")
 
-        self.speech_toggle = tk.Button(
-            self.footer_bar,
-            text="VOICE OUTPUT ON",
-            command=self._toggle_voice_output,
-            fg=self._theme("text"),
-            bg=self._theme("button_bg"),
-            activebackground=self._theme("button_active"),
-            activeforeground=self._theme("accent"),
-            bd=0,
-            padx=12,
-            pady=6,
-            font=("Consolas", 9, "bold"),
-        )
-        self.speech_toggle.place(relx=0.93, rely=0.5, anchor="e")
-
         self.resize_handle = tk.Frame(
             self.footer_bar,
             bg=self._theme("button_bg"),
@@ -2144,22 +2700,6 @@ class AngeliqueDesktopApp(tk.Tk):
             self._ring_arc_ids.append(arc_id)
             self._ring_arc_config.append((start, extent, radius_offset, stroke, config_idx * 1.7 + 0.6))
 
-        for idx in range(18):
-            angle = (idx / 18) * (2 * math.pi)
-            orbit = radius * 0.88
-            x = center_x + orbit * math.cos(angle)
-            y = center_y + orbit * math.sin(angle)
-            particle = self.ring_canvas.create_oval(
-                x - 2,
-                y - 2,
-                x + 2,
-                y + 2,
-                fill=self._theme("accent"),
-                outline="",
-                tags=("ring",),
-            )
-            self._ring_particles.append((particle, idx * 0.5, orbit, angle, 3))
-
         self._scanner_item = self.ring_canvas.create_line(
             center_x,
             center_y,
@@ -2170,6 +2710,7 @@ class AngeliqueDesktopApp(tk.Tk):
             capstyle="round",
             tags=("ring",),
         )
+        self._scanner_dot = None
 
         self.ring_canvas.create_text(
             center_x,
@@ -2280,19 +2821,10 @@ class AngeliqueDesktopApp(tk.Tk):
         if self._scanner_item is not None:
             self.ring_canvas.coords(self._scanner_item, center_x, center_y, x, y)
 
-        dot_size = max(6, int(size * 0.015))
         scanner_dot_id = getattr(self, "_scanner_dot", None)
         if scanner_dot_id is not None:
-            self.ring_canvas.coords(scanner_dot_id, x - dot_size, y - dot_size, x + dot_size, y + dot_size)
-        else:
-            self._scanner_dot = self.ring_canvas.create_oval(
-                x - dot_size,
-                y - dot_size,
-                x + dot_size,
-                y + dot_size,
-                fill=self._theme("accent"),
-                outline="",
-            )
+            self.ring_canvas.delete(scanner_dot_id)
+            self._scanner_dot = None
 
         for particle, phase_offset, orbit_radius, base_angle, radius_delta in self._ring_particles:
             orbit_radians = base_angle + self._animation_phase * 0.9 + phase_offset
@@ -2737,15 +3269,6 @@ class AngeliqueDesktopApp(tk.Tk):
         """Display a trading plan in the Trading Hub and notify the user if not focused."""
         try:
             self.trading_detail_var.set(plan_text)
-            # Append to transcript
-            try:
-                ts = time.strftime('%H:%M:%S')
-                self.trading_transcript_text.configure(state='normal')
-                self.trading_transcript_text.insert('end', f"[{ts}] PLAN: {plan_text}\n")
-                self.trading_transcript_text.configure(state='disabled')
-                self.trading_transcript_text.see('end')
-            except Exception:
-                pass
             # If the GUI is not focused, notify with whistle/bell
             try:
                 if not self.focus_displayof():
@@ -3341,12 +3864,13 @@ class AngeliqueDesktopApp(tk.Tk):
         if self._mode_label:
             self._mode_label.configure(bg=theme["panel"], fg=theme["accent"])
         self.footer_label.configure(fg=theme["accent"], bg=theme["panel"])
-        self.speech_toggle.configure(
-            fg=theme["text"],
-            bg=theme["button_bg"],
-            activebackground=theme["button_active"],
-            activeforeground=theme["accent"],
-        )
+        if hasattr(self, "speech_toggle"):
+            self.speech_toggle.configure(
+                fg=theme["text"],
+                bg=theme["button_bg"],
+                activebackground=theme["button_active"],
+                activeforeground=theme["accent"],
+            )
         self.resize_handle.configure(bg=theme["button_bg"])
         if hasattr(self, "command_frame"):
             self.command_frame.configure(bg=theme["panel"])
@@ -3480,8 +4004,9 @@ class AngeliqueDesktopApp(tk.Tk):
 
     def _toggle_voice_output(self):
         self._speak_enabled = not self._speak_enabled
-        label = "VOICE OUTPUT ON" if self._speak_enabled else "VOICE OUTPUT OFF"
-        self.speech_toggle.configure(text=label)
+        if hasattr(self, "speech_toggle"):
+            label = "VOICE OUTPUT ON" if self._speak_enabled else "VOICE OUTPUT OFF"
+            self.speech_toggle.configure(text=label)
         status = "enabled" if self._speak_enabled else "disabled"
         self._append_console("SYSTEM", f"Voice output {status}.")
         try:
@@ -3550,6 +4075,14 @@ class AngeliqueDesktopApp(tk.Tk):
         if getattr(self, "_shutting_down", False):
             return
         self._shutting_down = True
+        self._trading_monitor_running = False
+        self._trading_scan_stop_event.set()
+        position_job = getattr(self, "_position_refresh_job", None)
+        if position_job is not None:
+            try:
+                self.after_cancel(position_job)
+            except Exception:
+                pass
         try:
             self._stop_voice_listener()
         except Exception:
