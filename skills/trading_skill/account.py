@@ -11,7 +11,12 @@ def account_snapshot(payload: dict, requested_mode: str) -> AccountSnapshot:
     requested = str(requested_mode or "demo").lower()
     internal_mode = normalize_mode(requested)
     actual = normalize_mode(str(payload.get("mode") or internal_mode)) if isinstance(payload, dict) else internal_mode
-    if not isinstance(payload, dict) or not payload.get("login") or payload.get("mode_match") is False or payload.get("error"):
+    if (
+        not isinstance(payload, dict)
+        or not payload.get("login")
+        or payload.get("mode_match") is False
+        or payload.get("error")
+    ):
         return AccountSnapshot(
             requested_mode=requested,
             actual_mode=actual,

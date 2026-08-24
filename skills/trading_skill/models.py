@@ -52,6 +52,11 @@ class MarketSnapshot:
     bid: float | None = None
     ask: float | None = None
     spread: float | None = None
+    # Normalized market tick information
+    tick_size: float | None = None
+    tick_value: float | None = None
+    # Spread expressed in pips (normalized unit) when available
+    spread_pips: float | None = None
     stale: bool = False
     error: str | None = None
 
@@ -78,6 +83,19 @@ class TradePlan:
     confirmation_phrase: str
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     expires_at: str = field(default_factory=lambda: (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat())
+    trading_mode: str = "DAY_TRADING"
+    profile: dict[str, Any] = field(default_factory=dict)
+    smc_analysis: dict[str, Any] = field(default_factory=dict)
+    news_context: dict[str, Any] = field(default_factory=dict)
+    equity_at_decision: float | None = None
+    spread_price: float | None = None
+    spread_points: float | None = None
+    spread_pips: float | None = None
+    calculated_volume: float | None = None
+    actual_risk_amount: float | None = None
+    estimated_swap_cost: float | None = None
+    weekend_exposure: bool = False
+    expected_hold_days: int = 1
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -102,6 +120,19 @@ class TradePlan:
             "confirmation_phrase": self.confirmation_phrase,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
+            "trading_mode": self.trading_mode,
+            "profile": dict(self.profile),
+            "smc_analysis": dict(self.smc_analysis),
+            "news_context": dict(self.news_context),
+            "equity_at_decision": self.equity_at_decision,
+            "spread_price": self.spread_price,
+            "spread_points": self.spread_points,
+            "spread_pips": self.spread_pips,
+            "calculated_volume": self.calculated_volume,
+            "actual_risk_amount": self.actual_risk_amount,
+            "estimated_swap_cost": self.estimated_swap_cost,
+            "weekend_exposure": self.weekend_exposure,
+            "expected_hold_days": self.expected_hold_days,
         }
 
 
