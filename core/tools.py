@@ -24,6 +24,7 @@ from skills.vision.image_generator import generate_image
 from skills.vision.file_analyzer import analyze_file, analyze_directory
 from skills.web.browser_tools import open_browser_and_search
 from skills.web.search_tools import search_web
+from skills.wifi_control.router_client import add_access_schedule, allow_device_forever, allow_device_for_duration, disconnect_device, get_access_control_list, get_access_schedules, get_router_status, list_connected_devices, list_disconnected_devices, login_router, remove_access_schedule
 
 def _discover_skill_functions():
     """Discover callable skill functions across the project dynamically."""
@@ -485,6 +486,62 @@ TOOL_REGISTRY = {
         "parameters": {"skill_name": "Skill name or module path, e.g. 'system_cmds.get_system_health' or 'system health'", "args": "Optional keyword arguments to pass to the skill"},
         "function": lambda skill_name, args=None: call_skill(skill_name, args or {}),
     },
+    "wifi.list_connected_devices": {
+        "description": "List devices currently visible to the configured local router.",
+        "parameters": {"host": "Optional router host or IP address"},
+        "function": lambda host=None: list_connected_devices(host=host),
+    },
+    "wifi.list_disconnected_devices": {
+        "description": "List devices currently blocked by the router's permanent MAC blacklist.",
+        "parameters": {"host": "Optional router host"},
+        "function": lambda host=None: list_disconnected_devices(host=host),
+    },
+    "wifi.get_router_status": {
+        "description": "Read local router reachability and connected-device count.",
+        "parameters": {"host": "Optional router host or IP address"},
+        "function": lambda host=None: get_router_status(host=host),
+    },
+    "wifi.login_router": {
+        "description": "Log Angelique into the configured MF296A router and retain its local session.",
+        "parameters": {"host": "Optional router host", "password": "Optional router password"},
+        "function": lambda host=None, password=None: login_router(host=host, password=password),
+        "requires_confirmation": True,
+    },
+    "wifi.add_access_schedule": {
+        "description": "Add a timed restricted-access rule on the configured local router.",
+        "parameters": {"mac": "Device MAC address", "start": "Start time HH:MM", "end": "End time HH:MM", "day_mask": "MF296A weekday bitmask", "host": "Optional router host"},
+        "function": lambda mac, start, end, day_mask=0, host=None: add_access_schedule(mac, start, end, day_mask, host=host),
+        "requires_confirmation": True,
+    },
+    "wifi.get_access_schedules": {
+        "description": "Read restricted-access schedules for a managed router device.",
+        "parameters": {"mac": "Device MAC address", "host": "Optional router host"},
+        "function": lambda mac, host=None: get_access_schedules(mac, host=host),
+    },
+    "wifi.disconnect_device": {
+        "description": "Manually disconnect and permanently block a router device until it is allowed again.",
+        "parameters": {"mac": "Device MAC address", "name": "Optional device name", "host": "Optional router host"},
+        "function": lambda mac, name="", host=None: disconnect_device(mac, name=name, host=host),
+        "requires_confirmation": True,
+    },
+    "wifi.allow_device_forever": {
+        "description": "Permanently allow a device by removing its MAC block and timed restrictions.",
+        "parameters": {"mac": "Device MAC address", "host": "Optional router host"},
+        "function": lambda mac, host=None: allow_device_forever(mac, host=host),
+        "requires_confirmation": True,
+    },
+    "wifi.allow_device_for_duration": {
+        "description": "Allow a device now and let the router begin its restriction when the duration expires.",
+        "parameters": {"mac": "Device MAC address", "minutes": "Access duration from 1 to 1440", "host": "Optional router host"},
+        "function": lambda mac, minutes, host=None: allow_device_for_duration(mac, minutes, host=host),
+        "requires_confirmation": True,
+    },
+    "wifi.remove_access_schedule": {
+        "description": "Remove restricted-access rules for a managed device.",
+        "parameters": {"mac": "Device MAC address", "host": "Optional router host"},
+        "function": lambda mac, host=None: remove_access_schedule(mac, host=host),
+        "requires_confirmation": True,
+    },
     "system_monitor.get_system_health": {
         "description": "Directly invoke the PC system health skill.",
         "parameters": {},
@@ -573,9 +630,20 @@ def execute_tool(tool_name: str, args: dict, user_request: str = None, session_i
         except Exception:
             exec_timeout = timeout
 
-        # Backwards-compatible hook: if the legacy TOOL_REGISTRY contains a
-        # direct function and tests (or callers) have patched it, prefer
-        # invoking that function so mocks on TOOL_REGISTRY are honored.
+        # Prefer canonical GLOBAL_TOOL_REGISTRY entry. If present, execute via
+        # the centralized ExecutionGateway. If the tool is not registered
+        # globally, fall back to the legacy `TOOL_REGISTRY` function only as
+        # a migration path (audit logged). Dynamic `call_skill` fallbacks are
+        # removed to keep execution canonical.
+        try:
+            from core.tool_registry import GLOBAL_TOOL_REGISTRY as _GTR
+            schema = _GTR.get(tool_name)
+        except Exception:
+            schema = None
+
+        # If a legacy TOOL_REGISTRY entry exists for this tool, prefer the
+        # direct legacy function during tests or when callers have replaced
+        # TOOL_REGISTRY entries (keeps behavior predictable for unit tests).
         try:
             if tool_name in TOOL_REGISTRY:
                 func = TOOL_REGISTRY[tool_name]["function"]
@@ -590,15 +658,17 @@ def execute_tool(tool_name: str, args: dict, user_request: str = None, session_i
         except Exception:
             pass
 
-        res = GATEWAY.execute(tool_name, args or {}, user_request=user_request, session_id=session_id, timeout=exec_timeout)
-        if res.success:
-            return res.output
-        err = res.error or ""
-        # If validation failed due to unknown/extra args, allow legacy
-        # direct function invocation for backward compatibility.
-        if any(token in err for token in ("Validation failed", "Unknown parameter", "InvalidArguments")):
+        if schema is not None:
+            res = GATEWAY.execute(tool_name, args or {}, user_request=user_request, session_id=session_id, timeout=exec_timeout)
+        else:
+            # Legacy direct function (migration only)
             try:
                 if tool_name in TOOL_REGISTRY:
+                    try:
+                        # audit may not be available in some runtimes
+                        audit.record({"action": "legacy_tool_used", "tool": tool_name, "note": "Tool not registered in GLOBAL_TOOL_REGISTRY; using legacy TOOL_REGISTRY function."})
+                    except Exception:
+                        pass
                     func = TOOL_REGISTRY[tool_name]["function"]
                     try:
                         sig = inspect.signature(func)
@@ -609,31 +679,32 @@ def execute_tool(tool_name: str, args: dict, user_request: str = None, session_i
                         pass
             except Exception:
                 pass
-        if "Unknown tool" in err or "ToolNotFound" in err:
-            # Prefer legacy registered tools (explicit functions) before
-            # falling back to dynamic skill discovery.
-            try:
-                if tool_name in TOOL_REGISTRY:
-                    func = TOOL_REGISTRY[tool_name]["function"]
-                    try:
-                        sig = inspect.signature(func)
-                        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
-                        valid_args = args if accepts_kwargs else {k: v for k, v in (args or {}).items() if k in sig.parameters}
-                        return func(**valid_args)
-                    except Exception:
-                        # fall through to dynamic lookup
-                        pass
-            except Exception:
-                pass
+
+            # No global schema and legacy direct function did not succeed — fall back to dynamic skill lookup
             try:
                 fallback = call_skill(tool_name, args or {})
             except Exception:
                 fallback = None
-            if fallback is not None:
-                if isinstance(fallback, str) and fallback.startswith("Error: skill"):
-                    return f"Error: Tool '{tool_name}' not found."
+            if fallback is not None and not str(fallback).lower().startswith("error: skill"):
                 return fallback
+
+            # No fallback succeeded
             return f"Error: Tool '{tool_name}' not found."
+        if res.success:
+            return res.output
+        err = res.error or ""
+        # If gateway rejected due to validation of unknown params, fall back
+        # to the legacy TOOL_REGISTRY function (ignoring unexpected kwargs).
+        if isinstance(err, str) and ("Unknown parameter" in err or "Validation failed" in err or "InvalidArguments" in err):
+            try:
+                if tool_name in TOOL_REGISTRY:
+                    func = TOOL_REGISTRY[tool_name]["function"]
+                    sig = inspect.signature(func)
+                    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
+                    valid_args = args if accepts_kwargs else {k: v for k, v in (args or {}).items() if k in sig.parameters}
+                    return func(**valid_args)
+            except Exception:
+                pass
         if res.timed_out:
             return f"Error: Execution timed out for {tool_name}."
         return f"Error executing {tool_name}: {res.error}"
