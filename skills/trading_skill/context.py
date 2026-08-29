@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from .indicators import snapshot
 from .evidence import detect_amd_phase, detect_candle_pattern, detect_ifvg, detect_wave_context
 from .smc import ZoneRegistry, detect_smc
+
+# Import ICT core concepts
+try:
+    from skills.trading.ict_core import (
+        detect_amd_phase,
+        is_prime_time,
+        analyze_premium_discount,
+        identify_ote_zone,
+    )
+    ICT_AVAILABLE = True
+except ImportError:
+    ICT_AVAILABLE = False
 
 
 def _trend(candles: list[dict[str, Any]]) -> str:
@@ -40,6 +53,7 @@ class MarketContext:
     trends: dict[str, str]
     indicators: dict[str, dict[str, Any]]
     smc: dict[str, dict[str, Any]]
+    ict: dict[str, Any] = field(default_factory=dict)
     direction: str | None = None
     confluence: dict[str, Any] = field(default_factory=dict)
 

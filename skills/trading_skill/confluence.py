@@ -28,6 +28,7 @@ def evaluate_confluence(
     agree: list[str] = []
     disagree: list[str] = []
     score = 0
+    max_score = 14  # Increased from 10 to account for ICT factors
 
     context_tf = getattr(profile, "context_timeframe", "H4")
     trend_tf = getattr(profile, "trend_timeframe", "H1")
@@ -203,7 +204,7 @@ def evaluate_confluence(
     minimum_score = int(getattr(profile, "minimum_score", 7) or 7)
     return {
         "score": score,
-        "maximum_score": 10,
+        "maximum_score": max_score,
         "minimum_score": minimum_score,
         "ready": score >= minimum_score,
         "strategy": strategy,
