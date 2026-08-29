@@ -17,7 +17,10 @@ devnull_fd = os.open(os.devnull, os.O_WRONLY)
 os.dup2(devnull_fd, 2)
 os.close(devnull_fd)
 
-import speech_recognition as sr
+try:
+    import speech_recognition as sr
+except ImportError:
+    sr = None
 from dotenv import load_dotenv
 load_dotenv()
 from core import config
@@ -184,6 +187,8 @@ def listen() -> str:
         if IS_SPEAKING:
             return ""
 
+    if sr is None:
+        return ""
     recognizer = sr.Recognizer()
     recognizer.pause_threshold = 1.5
     recognizer.energy_threshold = 300

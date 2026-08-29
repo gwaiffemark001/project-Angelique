@@ -1,6 +1,4 @@
 import os
-import img2pdf
-from docx2pdf import convert as docx2pdf_convert
 
 def convert_images_to_pdf(image_paths: list, output_path: str) -> str:
     """Converts a list of image file paths into a single PDF."""
@@ -9,6 +7,10 @@ def convert_images_to_pdf(image_paths: list, output_path: str) -> str:
         if not valid_paths:
             return "No valid image files found at the provided paths."
         
+        try:
+            import img2pdf
+        except ImportError:
+            return "PDF conversion unavailable: install img2pdf."
         with open(output_path, "wb") as f:
             f.write(img2pdf.convert(valid_paths))
         return f"Successfully created PDF at {output_path} from {len(valid_paths)} images."
@@ -21,6 +23,10 @@ def convert_word_to_pdf(docx_path: str, pdf_path: str) -> str:
         if not os.path.exists(docx_path):
             return f"Word document not found at {docx_path}."
         
+        try:
+            from docx2pdf import convert as docx2pdf_convert
+        except ImportError:
+            return "Word-to-PDF conversion unavailable: install docx2pdf."
         docx2pdf_convert(docx_path, pdf_path)
         return f"Successfully converted {docx_path} to {pdf_path}."
     except Exception as e:

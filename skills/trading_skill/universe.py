@@ -13,6 +13,12 @@ DEFAULT_ELIGIBLE_BASES = (
     "NZDUSD",
     "XAUUSD",
     "AUDCAD",
+    "XAGUSD",
+    "BTCUSD",
+    "ETHUSD",
+    "EURGBP",
+    "EURJPY",
+    "GBPJPY",
 )
 
 

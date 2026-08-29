@@ -21,12 +21,14 @@ def execute_approved_trade(confirmation_phrase: str) -> dict[str, Any]:
 def close_position(symbol: str, account_mode: str = "demo", ticket: int | None = None) -> dict[str, Any]:
     from skills.trading_skill.account_manager import account_manager
     from skills.trading_skill.bridge import WineBridgeClient
+    from core.trading_routing import broker_for_symbol
 
+    required_broker = broker_for_symbol(symbol)
     authorized, message, _ = account_manager.validate_authorization(account_mode)
     if not authorized:
         return {"success": False, "status": "error", "error": f"Account authorization failed: {message}"}
 
-    bridge = WineBridgeClient()
+    bridge = WineBridgeClient(broker=required_broker)
     if ticket is None:
         positions = bridge.request("positions", {"account_mode": account_mode}).get("positions", [])
         matches = [position for position in positions if str(position.get("symbol", "")).upper() == symbol.upper()]
@@ -40,6 +42,18 @@ def close_position(symbol: str, account_mode: str = "demo", ticket: int | None =
     payload: dict[str, Any] = {"symbol": symbol, "account_mode": account_mode}
     payload["ticket"] = ticket
     return bridge.request("close_position", payload)
+
+
+def close_all_positions(account_mode: str = "demo") -> dict[str, Any]:
+    from skills.trading_skill.account_manager import account_manager
+    from skills.trading_skill.bridge import WineBridgeClient
+
+    authorized, message, _ = account_manager.validate_authorization(account_mode)
+    if not authorized:
+        return {"success": False, "status": "error", "error": f"Account authorization failed: {message}"}
+
+    bridge = WineBridgeClient()
+    return bridge.request("close_all_positions", {"account_mode": account_mode})
 
 
 def register_trading_tools() -> None:
@@ -65,6 +79,18 @@ def register_trading_tools() -> None:
             risk_level="FINANCIAL",
             category="trading",
             executor=close_position,
+            confirmation_policy="never",
+        ),
+        ToolSchema(
+            name="trading.close_all_positions",
+            description="Close every open position on the account through the MT5 bridge. Used by the manual 'close all positions' control and the daily-loss kill switch.",
+            parameters={"account_mode": "Account environment."},
+            required=[],
+            param_types={"account_mode": "string"},
+            enums={"account_mode": ["demo", "real", "live"]},
+            risk_level="FINANCIAL",
+            category="trading",
+            executor=close_all_positions,
             confirmation_policy="never",
         ),
     )

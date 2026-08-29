@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from skills.trading_skill.bridge import WineBridgeClient
 
 
@@ -42,7 +44,16 @@ class BridgeFacade:
         return response
 
     def send_command(self, action, payload=None):
-        operations = {"get_account_info": "account", "list_instruments": "symbols", "get_symbols": "symbols", "get_rates": "market", "close_position": "close_position"}
+        operations = {
+            "get_account_info": "account",
+            "list_instruments": "symbols",
+            "get_symbols": "symbols",
+            "get_rates": "market",
+            "close_position": "close_position",
+            "close_all_positions": "close_all_positions",
+            "modify_position": "modify_position",
+            "recent_deals": "recent_deals",
+        }
         operation = operations.get(action, action)
         return self.request(operation, payload)
 
@@ -58,3 +69,7 @@ def execute(request: dict[str, Any]) -> dict[str, Any]:
 
 
 bridge = BridgeFacade()
+
+
+def recent_deals(account_mode="demo", minutes=60):
+    return bridge.request("recent_deals", {"account_mode": account_mode, "minutes": minutes})

@@ -8,6 +8,7 @@ import platform
 import socket
 import time
 from datetime import datetime
+from core import config
 
 _confirm_privileged_command_callback = None
 _prompt_for_sudo_password_callback = None
@@ -66,11 +67,14 @@ def run_shell_command(
         command_to_run = command
         gui_confirmed = False
         stripped_command = (command or "").strip()
+        is_privileged = _is_privileged_command(command)
         apt_auto_confirm = bool(re.match(r"^(?:sudo\s+)?(?:apt-get|apt)\s+", stripped_command, flags=re.IGNORECASE))
         if apt_auto_confirm:
             auto_confirm = True
 
-        if _is_privileged_command(command) and _prompt_for_privileged_command_callback is not None:
+        explicit_auth = sudo_password is not None
+
+        if is_privileged and not explicit_auth and _prompt_for_privileged_command_callback is not None:
             auth_result = _prompt_for_privileged_command_callback(command)
             if auth_result is None:
                 if apt_auto_confirm:
@@ -102,7 +106,12 @@ def run_shell_command(
             else:
                 gui_confirmed = bool(auth_result) or apt_auto_confirm
 
-        if _is_privileged_command(command) and _confirm_privileged_command_callback is not None:
+        # Sudo/pkexec commands are already explicitly privileged by their syntax.
+        # Do not ask for a redundant second y/n confirmation. The authentication
+        # callback below is responsible only for obtaining the user's password.
+        if is_privileged and _is_interactive_sudo_command(command):
+            gui_confirmed = True
+        elif is_privileged and not explicit_auth and _confirm_privileged_command_callback is not None:
             callback_confirmed = bool(_confirm_privileged_command_callback(command))
             if not callback_confirmed and not apt_auto_confirm:
                 return "Command cancelled."

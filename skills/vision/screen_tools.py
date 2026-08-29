@@ -1,6 +1,3 @@
-import pyautogui
-import pytesseract
-from PIL import Image
 import tempfile
 import os
 import re
@@ -13,6 +10,9 @@ def read_screen(region=None, save_to_file=None):
         save_to_file: Optional path to save the screenshot image.
     """
     try:
+        import pyautogui
+        import pytesseract
+        from PIL import Image
         if region:
             screenshot = pyautogui.screenshot(region=region)
         else:

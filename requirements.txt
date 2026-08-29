@@ -35,9 +35,8 @@ elevenlabs>=0.2.0
 SpeechRecognition>=3.10.0
 PyAudio>=0.2.13
 
-# Web Automation
-playwright>=1.40.0
-selenium>=4.15.0
+# Web
+ddgs>=9.0.0
 
 # OS & System
 psutil>=5.9.0

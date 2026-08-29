@@ -3,8 +3,29 @@ from __future__ import annotations
 from typing import Any
 
 
+INDICATOR_MINIMUMS = {
+    "ema_20": 60,
+    "ema_50": 150,
+    "ema_200": 200,
+    "rsi_14": 30,
+    "atr_14": 30,
+    "bollinger_middle": 30,
+    "bollinger_upper": 30,
+    "bollinger_lower": 30,
+    "macd": 100,
+    "macd_signal": 100,
+    "macd_histogram": 100,
+    "adx_14": 50,
+}
+PREFERRED_EMA200_WARMUP = 400
+
+
+def _closed(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return candles[:-1] if candles and candles[-1].get("closed") is False else candles
+
+
 def _closes(candles: list[dict[str, Any]]) -> list[float]:
-    return [float(c.get("close", 0)) for c in candles if float(c.get("close", 0)) > 0]
+    return [float(c.get("close", 0)) for c in _closed(candles) if float(c.get("close", 0)) > 0]
 
 
 def ema(values: list[float], period: int) -> float:
@@ -28,17 +49,27 @@ def rsi(values: list[float], period: int = 14) -> float:
 
 
 def atr(candles: list[dict[str, Any]], period: int = 14) -> float:
-    ranges = [float(c.get("high", 0)) - float(c.get("low", 0)) for c in candles]
-    recent = [value for value in ranges[-period:] if value > 0]
+    values = _closed(candles)
+    ranges: list[float] = []
+    previous_close = None
+    for candle in values:
+        high = float(candle.get("high", 0)); low = float(candle.get("low", 0)); close = float(candle.get("close", 0))
+        if high <= 0 or low <= 0 or close <= 0:
+            continue
+        ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)) if previous_close is not None else high - low)
+        previous_close = close
+    recent = ranges[-period:]
     return sum(recent) / max(1, len(recent))
 
 
 def _macd(values: list[float]) -> tuple[float, float, float]:
-    macd_values: list[float] = []
+    if not values:
+        return 0.0, 0.0, 0.0
     fast_alpha = 2 / 13
     slow_alpha = 2 / 27
     fast_value = values[0]
     slow_value = values[0]
+    macd_values: list[float] = []
     for value in values:
         fast_value = fast_alpha * value + (1 - fast_alpha) * fast_value
         slow_value = slow_alpha * value + (1 - slow_alpha) * slow_value
@@ -49,15 +80,14 @@ def _macd(values: list[float]) -> tuple[float, float, float]:
 
 
 def adx(candles: list[dict[str, Any]], period: int = 14) -> float:
-    if len(candles) < 2:
+    values = _closed(candles)
+    if len(values) < 2:
         return 0.0
     directional_ranges: list[float] = []
     true_ranges: list[float] = []
-    for previous, current in zip(candles, candles[1:]):
-        high = float(current.get("high", 0))
-        low = float(current.get("low", 0))
-        previous_high = float(previous.get("high", 0))
-        previous_low = float(previous.get("low", 0))
+    for previous, current in zip(values, values[1:]):
+        high = float(current.get("high", 0)); low = float(current.get("low", 0))
+        previous_high = float(previous.get("high", 0)); previous_low = float(previous.get("low", 0))
         up_move = max(0.0, high - previous_high)
         down_move = max(0.0, previous_low - low)
         directional_ranges.append(abs(up_move - down_move))
@@ -70,10 +100,12 @@ def adx(candles: list[dict[str, Any]], period: int = 14) -> float:
     return min(100.0, 100 * (sum(recent_directional) / max(1, len(recent_directional))) / average_tr)
 
 
-def snapshot(candles: list[dict[str, Any]]) -> dict[str, float | str]:
+def snapshot(candles: list[dict[str, Any]]) -> dict[str, Any]:
     values = _closes(candles)
-    if len(values) < 2:
-        return {"status": "insufficient"}
+    available = len(values)
+    if available < 2:
+        return {"status": "insufficient", "available_candles": available, "readiness": {key: False for key in INDICATOR_MINIMUMS}}
+
     fast = ema(values, 20)
     slow = ema(values, 50)
     long = ema(values, 200)
@@ -81,8 +113,13 @@ def snapshot(candles: list[dict[str, Any]]) -> dict[str, float | str]:
     middle = sum(middle_values) / len(middle_values)
     deviation = (sum((value - middle) ** 2 for value in middle_values) / len(middle_values)) ** 0.5
     macd, macd_signal, macd_histogram = _macd(values)
+    readiness = {key: available >= minimum for key, minimum in INDICATOR_MINIMUMS.items()}
     return {
-        "status": "ready",
+        "status": "ready" if all(readiness.values()) else "insufficient",
+        "available_candles": available,
+        "preferred_warmup_complete": available >= PREFERRED_EMA200_WARMUP,
+        "readiness": readiness,
+        "minimums": dict(INDICATOR_MINIMUMS),
         "ema_20": fast,
         "ema_50": slow,
         "ema_200": long,

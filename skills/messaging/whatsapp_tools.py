@@ -1,216 +1,135 @@
-import csv
-import json
-import os
-import re
-import time
-import urllib.parse
-import webbrowser
+from __future__ import annotations
+import csv, re
+from pathlib import Path
 import requests
 from core import config
 
-CONTACTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contacts.csv")
-WHATSAPP_SEND_URL = "https://web.whatsapp.com/send"
+CONTACTS_FILE = Path(getattr(config, "WHATSAPP_CONTACTS_FILE", Path(__file__).with_name("contacts.csv")))
+if not CONTACTS_FILE.is_absolute():
+    CONTACTS_FILE = (config.PROJECT_ROOT / CONTACTS_FILE).resolve()
 
-
-def _normalize_phone(phone: str | None) -> str | None:
-    if not phone:
+def _normalize_phone(value: str | None) -> str | None:
+    if not value:
         return None
-    cleaned = re.sub(r"[^\d\+]+", "", str(phone))
-    if cleaned.startswith("00"):
-        cleaned = "+" + cleaned[2:]
-    return cleaned or None
+    digits = re.sub(r"[^0-9+]", "", str(value))
+    if digits.startswith("00"):
+        digits = "+" + digits[2:]
+    if not digits.startswith("+") and digits:
+        digits = "+" + digits
+    return digits or None
 
-
-def _load_whatsapp_contacts() -> list[dict]:
-    contacts = []
-    if not os.path.exists(CONTACTS_FILE):
-        return contacts
-
-    try:
-        with open(CONTACTS_FILE, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                phones = []
-                for key in ("Phone 1 - Value", "Phone 2 - Value"):
-                    value = (row.get(key) or "").strip()
-                    if not value:
-                        continue
-                    for part in re.split(r"[,:;\\/]+| ::: | and ", value):
-                        normalized = _normalize_phone(part)
-                        if normalized:
-                            phones.append(normalized)
-                if not phones:
-                    continue
-
-                names = []
-                for key in ("First Name", "Last Name", "File As", "Nickname", "Organization Name"):
-                    value = (row.get(key) or "").strip()
-                    if value:
-                        names.append(value)
-
-                contacts.append({
-                    "names": names,
-                    "phones": phones,
-                })
-    except Exception:
-        pass
-
+def load_contacts() -> list[dict]:
+    if not CONTACTS_FILE.exists():
+        return []
+    contacts=[]
+    with CONTACTS_FILE.open(newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            names=[(row.get(k) or "").strip() for k in ("First Name","Middle Name","Last Name","File As","Nickname","Organization Name")]
+            names=[n for n in names if n]
+            phones=[]
+            for key in ("Phone 1 - Value","Phone 2 - Value"):
+                for part in re.split(r"\s*(?:,|;|/|\\|:::)\s*", row.get(key) or ""):
+                    phone=_normalize_phone(part)
+                    if phone: phones.append(phone)
+            if names and phones:
+                contacts.append({"names": names, "phones": list(dict.fromkeys(phones))})
     return contacts
 
+def resolve_contact(name: str) -> str | None:
+    """Resolve a human contact reference using exact, token and fuzzy matching.
 
-def _find_contact_phone(contact_name: str) -> str | None:
-    if not contact_name:
+    A single strong match is accepted even when the user omits a middle name or
+    a few words added by the command parser. Ties remain ambiguous and are not
+    guessed.
+    """
+    query = re.sub(r"[^a-z0-9 ]", "", str(name or "").lower()).strip()
+    if not query:
         return None
-
-    normalized_target = contact_name.strip().lower()
-    if not normalized_target:
-        return None
-
-    contacts = _load_whatsapp_contacts()
-    if not contacts:
-        return None
-
+    query_tokens = set(query.split())
+    contacts = load_contacts()
+    scored = []
     for contact in contacts:
-        for name in contact["names"]:
-            normalized_name = name.lower().strip()
-            if normalized_name == normalized_target:
-                return contact["phones"][0]
-            if normalized_target in normalized_name or normalized_name in normalized_target:
-                return contact["phones"][0]
-
-    for contact in contacts:
-        for name in contact["names"]:
-            cleaned_name = re.sub(r"[^a-z0-9 ]", "", name.lower())
-            if cleaned_name and (normalized_target in cleaned_name or cleaned_name in normalized_target):
-                return contact["phones"][0]
-
-    return None
-
-
-def _build_whatsapp_url(phone: str, message: str | None = None) -> str:
-    params = {"phone": phone}
-    if message:
-        params["text"] = message
-    return f"{WHATSAPP_SEND_URL}?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}"
-
-
-def _open_whatsapp_browser(phone: str, message: str | None = None) -> dict:
-    try:
-        url = _build_whatsapp_url(phone, message)
-        webbrowser.open(url)
-        return {"success": True, "url": url, "phone": phone}
-    except Exception as exc:
-        return {"success": False, "error": str(exc)}
-
-
-def _get_contact(arg_dict):
-    return arg_dict.get('contact_name') or arg_dict.get('contact') or arg_dict.get('contactname') or ''
-
-
-def send_whatsapp(contact_name=None, message=None, **kwargs):
-    contact_name = contact_name or _get_contact(kwargs)
-    if not contact_name:
-        return "❌ WhatsApp messaging unavailable: no contact provided."
-    # 1) Preferred: Use configured WhatsApp API if available (server-side send)
-    api_url = getattr(config, "WHATSAPP_API_URL", "")
-    api_token = getattr(config, "WHATSAPP_API_TOKEN", "")
-    if api_url:
-        try:
-            payload = {"contact_name": contact_name, "message": message or ""}
-            headers = {"Content-Type": "application/json"}
-            if api_token:
-                headers["Authorization"] = f"Bearer {api_token}"
-            resp = requests.post(api_url, json=payload, headers=headers, timeout=10)
-            try:
-                jr = resp.json()
-            except Exception:
-                jr = {"status": resp.status_code, "text": resp.text}
-            if resp.status_code >= 200 and resp.status_code < 300:
-                return f"✅ WhatsApp API accepted message for '{contact_name}': {jr}"
-            return f"❌ WhatsApp API failed: {resp.status_code} {jr}"
-        except Exception as e:
-            # Surface API errors to help debugging instead of silently falling back
-            return f"❌ WhatsApp API error: {e}"
-
-    # 2) Playwright automation only when explicitly enabled in config
-    if getattr(config, "WHATSAPP_USE_PLAYWRIGHT", False):
-        try:
-            from skills.messaging.whatsapp_playwright import prepare_whatsapp_message_sync
-            result = prepare_whatsapp_message_sync(contact_name, message or "")
-            if isinstance(result, dict) and result.get("status") == "DRAFT_READY":
-                return f"📝 WhatsApp draft ready for '{contact_name}'. Confirm to send."
-            if isinstance(result, dict) and result.get("status") == "SUCCESS":
-                return f"✅ WhatsApp message sent to '{contact_name}'."
-            return json.dumps(result, ensure_ascii=False)
-        except Exception:
-            # Fall through to non-Playwright fallback
-            pass
-
-    # 2b) Try a local WhatsApp helper library if available (best-effort)
-    # Try configured fallbacks in order
-    fallbacks = getattr(config, "WHATSAPP_FALLBACKS", ["pywhatkit", "browser"]) or ["pywhatkit", "browser"]
-    for fallback in fallbacks:
-        if fallback == "pywhatkit":
-            try:
-                import pywhatkit as _pywhatkit
-                phone_try = _find_contact_phone(contact_name)
-                if phone_try:
-                    try:
-                        _pywhatkit.sendwhatmsg_instantly(phone_try, message or "", tab_close=True, close_time=3)
-                        return f"✅ WhatsApp (pywhatkit) attempted send to '{contact_name}'."
-                    except Exception:
-                        continue
-            except Exception:
-                continue
-        if fallback == "browser":
-            # leave to the final browser open approach below
+        for raw in contact["names"]:
+            clean = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
+            tokens = set(clean.split())
+            score = 0
+            if query == clean:
+                score = 100
+            elif query in clean or clean in query:
+                score = 85
+            else:
+                overlap = len(query_tokens & tokens)
+                if overlap:
+                    score = 60 + overlap * 8 - abs(len(query_tokens) - len(tokens))
+            if score:
+                scored.append((score, clean, contact))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    best_score = scored[0][0]
+    best_contacts = []
+    seen = set()
+    for score, _, contact in scored:
+        if score != best_score:
             break
+        ident = id(contact)
+        if ident not in seen:
+            seen.add(ident)
+            best_contacts.append(contact)
+    if len(best_contacts) != 1:
+        return None
+    return best_contacts[0]["phones"][0]
 
-    phone = _find_contact_phone(contact_name)
-    if not phone:
-        return f"❌ WhatsApp messaging unavailable: contact '{contact_name}' was not found in contacts.csv."
-
-    result = _open_whatsapp_browser(phone, message)
-    if result.get("success"):
-        return f"✅ WhatsApp browser chat opened for '{contact_name}'. Complete send in the browser."
-    return f"❌ WhatsApp browser open failed: {result.get('error') or 'unknown error'}"
-
-
-def draft_whatsapp(contact_name=None, message=None, **kwargs):
-    contact_name = contact_name or _get_contact(kwargs)
-    if not contact_name:
-        return "❌ WhatsApp draft unavailable: no contact provided."
-
-    phone = _find_contact_phone(contact_name)
-    if not phone:
-        return f"❌ WhatsApp draft unavailable: contact '{contact_name}' was not found in contacts.csv."
-
-    result = _open_whatsapp_browser(phone, message)
-    if result.get("success"):
-        return f"📝 WhatsApp draft opened for '{contact_name}' in browser."
-    return f"❌ WhatsApp browser open failed: {result.get('error') or 'unknown error'}"
-
-
-def send_whatsapp_approved(contact_name=None, message=None, confirm=False, **kwargs):
-    contact_name = contact_name or _get_contact(kwargs)
-    if not confirm:
-        return f"⚠️ Please confirm sending WhatsApp message to '{contact_name}'. Reply with 'confirm send' to proceed."
-    return send_whatsapp(contact_name=contact_name, message=message)
-
-
-def check_messaging_status() -> str:
-    parts = []
-    if os.path.exists(CONTACTS_FILE):
-        parts.append("WhatsApp Direct: 🟢 contacts.csv loaded")
+def _send_http(phone: str, message: str) -> dict:
+    provider=str(getattr(config,"WHATSAPP_PROVIDER","generic") or "generic").lower()
+    if provider == "meta":
+        token=getattr(config,"WHATSAPP_ACCESS_TOKEN","")
+        phone_id=getattr(config,"WHATSAPP_PHONE_NUMBER_ID","")
+        if not token or not phone_id:
+            raise RuntimeError("WhatsApp Meta provider is not configured: WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are required.")
+        version=getattr(config,"WHATSAPP_GRAPH_VERSION","v23.0")
+        url=f"https://graph.facebook.com/{version}/{phone_id}/messages"
+        headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"}
+        payload={"messaging_product":"whatsapp","to":phone.lstrip("+"),"type":"text","text":{"body":message}}
     else:
-        parts.append("WhatsApp Direct: 🔴 contacts.csv missing")
-    try:
-        from skills.os_control.system_cmds import get_system_health
-        h = get_system_health()
-        parts.append(f"System: CPU {h.get('cpu_percent', 'N/A')}% | RAM {h.get('memory_percent', 'N/A')}%")
-    except Exception:
-        parts.append("System info unavailable")
-    return " | ".join(parts)
+        url=str(getattr(config,"WHATSAPP_API_URL","") or "").strip()
+        if not url: raise RuntimeError("WHATSAPP_API_URL is not configured.")
+        headers={"Content-Type":"application/json"}
+        token=getattr(config,"WHATSAPP_API_TOKEN","")
+        if token: headers["Authorization"]=f"Bearer {token}"
+        payload={"to":phone,"message":message}
+    response=requests.post(url,headers=headers,json=payload,timeout=8)
+    if not response.ok:
+        raise RuntimeError(f"WhatsApp gateway HTTP {response.status_code}: {response.text[:500]}")
+    try: body=response.json()
+    except ValueError: body={"status_code":response.status_code,"text":response.text[:500]}
+    return body
 
+def send_whatsapp(contact_name: str | None=None, message: str | None=None, **kwargs) -> dict:
+    contact_name=contact_name or kwargs.get("contact") or kwargs.get("contactname")
+    if not contact_name or not message:
+        raise ValueError("contact_name and message are required")
+    phone=resolve_contact(contact_name)
+    if not phone:
+        raise LookupError(f"Contact '{contact_name}' is not uniquely present in contacts.csv")
+    body=_send_http(phone, str(message))
+    return {"success":True,"contact":contact_name,"phone":phone,"provider":getattr(config,"WHATSAPP_PROVIDER","generic"),"response":body}
 
-# Removed unused helper `send_email_simulate` which belonged to unrelated email draft functionality.
+def prepare_whatsapp_message(contact_name: str, message: str, **kwargs) -> dict:
+    phone=resolve_contact(contact_name)
+    return {"ready":bool(phone),"contact":contact_name,"phone":phone,"message":message}
+
+def draft_whatsapp(contact_name: str, message: str, **kwargs) -> dict:
+    return prepare_whatsapp_message(contact_name,message,**kwargs)
+
+def send_whatsapp_approved(contact_name: str, message: str, confirm: bool=False, **kwargs):
+    if not confirm:
+        return {"confirmation_required":True,"contact":contact_name}
+    return send_whatsapp(contact_name,message)
+
+def execute_whatsapp_send(**kwargs):
+    return send_whatsapp_approved(**kwargs)
+
+def check_messaging_status() -> dict:
+    configured=bool((getattr(config,"WHATSAPP_ACCESS_TOKEN","") and getattr(config,"WHATSAPP_PHONE_NUMBER_ID","")) if getattr(config,"WHATSAPP_PROVIDER","meta")=="meta" else getattr(config,"WHATSAPP_API_URL",""))
+    return {"contacts_file":str(CONTACTS_FILE),"contacts_loaded":len(load_contacts()),"provider":getattr(config,"WHATSAPP_PROVIDER","meta"),"configured":configured,"browser_automation":False}

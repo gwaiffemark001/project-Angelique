@@ -122,6 +122,12 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     if not normalized:
         return None, {}
 
+    # Deterministic date/time questions must never be handed to the LLM.
+    if re.fullmatch(r"(?:what time is it|what(?:'s| is) the time|tell me the time|current time|time)", normalized):
+        return "adapter.jarvis.time", {}
+    if re.fullmatch(r"(?:what(?:'s| is) the date|what day is it|tell me the date|current date|today|date)", normalized):
+        return "adapter.jarvis.date", {}
+
     # Quick music/playback heuristics (handle before generic app opening)
     try:
         from core import config as _cfg
@@ -205,8 +211,8 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     # ============================================================
     # MT5 / TRADING TERMINAL
     # ============================================================
-    if re.search(r'\b(?:open|start|launch).*?(?:mt5|metatrader\s+5|trading\s+terminal|exness)\b', normalized):
-        return 'open_app', {'app_name': 'MetaTrader 5 Exness'}
+    if re.search(r'\b(?:open|start|launch).*?(?:mt5|metatrader\s+5|trading\s+terminal)\b', normalized):
+        return 'open_app', {'app_name': 'MetaTrader 5'}
 
     # ============================================================
     # SCREEN READING & OCR
@@ -250,7 +256,7 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
 
     # Whole laptop / home directory search intent.
     laptop_search_match = re.search(
-        r"\b(?:search|find|locate|look(?:\s+for)?)\b.*\b(?:my\s+)?(?:whole\s+)?(?:laptop|computer|machine|filesystem|home\s+directory|home\s+folder|disk|hard\s+drive)\b",
+        r"\b(?:search|find|locate|look(?:\s+for)?)\b.*\b(?:my\s+)?(?:whole\s+)?(?:laptop|computer|pc|machine|filesystem|home\s+directory|home\s+folder|disk|hard\s+drive)\b",
         normalized,
     )
     if laptop_search_match:
@@ -354,7 +360,7 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     # FILE MANAGEMENT
     # ============================================================
     # Natural language listing: "what files are in X", "show me the files in X"
-    nl_list_match = re.search(r"\b(?:what\s+files\s+are\s+in|show\s+me\s+the\s+files\s+in|what's\s+in|what\s+is\s+in)\s+(?:the\s+)?([\w\-\. ]+?)(?:\s+on\s+my\s+desktop|\s+on\s+desktop)?\b", normalized)
+    nl_list_match = re.search(r"^\s*(?:what\s+files\s+are\s+in|show\s+me\s+the\s+files\s+in|what's\s+in|what\s+is\s+in)\s+(?:the\s+)?([\w\-\. ]+?)(?:\s+on\s+my\s+desktop|\s+on\s+desktop)?\s*$", normalized)
     if nl_list_match:
         folder = nl_list_match.group(1).strip()
         # If user referred to 'projects' on desktop
@@ -424,6 +430,30 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
         return None, {}
 
     # ============================================================
+    # FILE/FOLDER SEARCH ON THIS COMPUTER
+    # ============================================================
+    local_search = re.search(
+        r"\b(?:search|find|locate|look(?:\s+for)?)\s+(?:for\s+)?(?:any\s+)?(?:(?:file|folder|directory)\s+)?(?:named\s+|called\s+)?([^\n]+?)(?:\s+(?:on|in|under|within)\s+(?:my\s+)?(?:pc|computer|laptop|machine|filesystem|home)\b)(.*)$",
+        normalized,
+    )
+    if local_search:
+        query = local_search.group(1).strip().strip('\"\'')
+        query = re.sub(r"\s+(?:and\s+tell\s+me\s+what\s+is\s+in\s+it|and\s+tell\s+me\s+about\s+it)$", '', query, flags=re.IGNORECASE).strip()
+        if query and len(query) < 180:
+            return 'search_files', {'query': query, 'root': os.path.expanduser('~'), 'max_results': 100, 'max_depth': 12}
+
+    # Explicit 'any file named X' form, including a follow-up clause such as
+    # 'and tell me what is in it'.
+    named_file = re.search(
+        r"\b(?:find|search|look\s+for|locate)\s+(?:any\s+)?(?:file|folder|directory)\s+(?:named|called)\s+(.+)$",
+        normalized,
+    )
+    if named_file:
+        query = re.split(r"\s+and\s+(?:tell|show|read)\s+me\b", named_file.group(1), maxsplit=1, flags=re.IGNORECASE)[0].strip(' \"\'')
+        if query:
+            return 'search_files', {'query': query, 'root': os.path.expanduser('~'), 'max_results': 100, 'max_depth': 12}
+
+    # ============================================================
     # WEB SEARCH
     # ============================================================
     search_match = re.search(r'\b(?:search|find|look(?:\s+up)?|query|google|ask|research)\s+(?:for\s+|about\s+)?(.+?)(?:\s+(?:online|on\s+web|internet))?\b', normalized)
@@ -461,8 +491,17 @@ def extract_command_heuristically(text: str) -> tuple[str, dict] | tuple[None, d
     # ============================================================
     # WHATSAPP MESSAGING
     # ============================================================
+    specific = re.match(r"^send\s+(.+?)\s+a\s+message\s+on\s+whatsapp\s+saying\s+(.+)$", normalized)
+    if specific:
+        return 'send_whatsapp', {'contact_name': specific.group(1).strip(), 'message': specific.group(2).strip()}
+    specific = re.match(r"^(?:send|message)\s+(.+?)\s+message\s+on\s+whatsapp(?:\s+saying\s+)?(.+)$", normalized)
+    if specific:
+        return 'send_whatsapp', {'contact_name': specific.group(1).strip(), 'message': specific.group(2).strip()}
+    specific = re.match(r"^(?:send|message)\s+(.+?)\s+on\s+whatsapp\s+saying\s+(.+)$", normalized)
+    if specific:
+        return 'send_whatsapp', {'contact_name': specific.group(1).strip(), 'message': specific.group(2).strip()}
     whatsapp_patterns = [
-        r'\b(?:send|message|text|whatsapp)\s+(.+?)\s+(?:message|text|to)\s+(.+?)\b',
+        r'\b(?:send|message|text|whatsapp)\s+(.+?)\s+(?:a\s+message|message|text|to)\s+(.+?)\b',
         r'\b(?:message|text)\s+(.+?)\s+(?:saying|with|that)\s+(.+?)\b',
     ]
     for pattern in whatsapp_patterns:

@@ -105,7 +105,6 @@ class ToolRegistry:
         declared = set(schema.parameters.keys()) if schema.parameters else set()
         for k in args.keys():
             if declared and k not in declared:
-                errors.append(f"Unknown parameter '{k}' for tool {name}")
                 errors.append(f"InvalidArguments: unknown parameter '{k}' for tool {name}")
 
         for p, ptype in (schema.param_types or {}).items():

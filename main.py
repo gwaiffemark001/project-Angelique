@@ -85,8 +85,6 @@ def _import_runtime_modules():
             bridge_manager = DummyBridge()
 
 
-def get_wake_phrase() -> str:
-    return get_intro_phrase()
 
 def is_port_free(host: str, port: int, timeout: float = 0.1) -> bool:
     try:
@@ -282,6 +280,8 @@ def launch_mt5_bridge_if_needed() -> bool:
 
     print("🔧 [Bootstrap] Launching MT5 Bridge Server under Wine...")
     bridge_env = os.environ.copy()
+    if getattr(config, "MT5_WINE_PREFIX", ""):
+        bridge_env["WINEPREFIX"] = config.MT5_WINE_PREFIX
     bridge_env[config.MT5_BRIDGE_HOST_ENV] = BRIDGE_HOST
     bridge_env[config.MT5_BRIDGE_PORT_ENV] = str(BRIDGE_PORT)
     bridge_env[config.MT5_BRIDGE_FD_ENV] = ""
