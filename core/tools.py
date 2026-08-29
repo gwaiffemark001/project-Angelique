@@ -21,6 +21,7 @@ from skills.self_evolution.code_generator import (
     get_evolution_log,
 )
 from skills.vision.image_generator import generate_image
+from skills.media.playback import play_media
 from skills.vision.file_analyzer import analyze_file, analyze_directory
 from skills.web.browser_tools import open_browser_and_search
 from skills.web.search_tools import search_web
@@ -109,11 +110,12 @@ def _load_screen_tools():
     return _screen_tools
 from core import config
 from skills.trading.engine.mt5_bridge import bridge
-from skills.trading.trading_skill import analyze_and_recommend, execute_approved_trade
+from skills.trading.trading_skill import analyze_and_recommend
 from skills.trading_skill.service import prepare_trade_payload
+from skills.trading_skill.health import trading_hub_health
 from skills.trading.news import get_forex_news, get_market_calendar
 from skills.messaging.whatsapp_tools import (
-    send_whatsapp, draft_whatsapp, send_whatsapp_approved,
+    send_whatsapp, draft_whatsapp, send_whatsapp_approved, execute_whatsapp_send,
     check_messaging_status,
 )
 from skills.conversation.chat_skill import (
@@ -126,6 +128,14 @@ from core.adapters import jarvis_adapter as jarvis_adapter
 from core.adapters import jarviscli_adapter as jarviscli_adapter
 from core.adapters import local_calendar_adapter as local_calendar_adapter
 from core.adapters import image_pdf_adapter as image_pdf_adapter
+
+
+
+def _execute_approved_trade_tool(confirmation_phrase):
+    """Canonical tool wrapper: execute an already-approved plan through the gateway."""
+    from core.trading_gateway import execute_approved_trade as _execute
+    return _execute(confirmation_phrase)
+
 
 TOOL_REGISTRY = {
     # ============================================================
@@ -446,27 +456,6 @@ TOOL_REGISTRY = {
         "parameters": {"contact_name": "Contact name", "message": "Message to send"},
         "function": send_whatsapp,
     },
-    "prepare_whatsapp_message": {
-        "description": "Prepare a WhatsApp message (search contact + draft) using Playwright when available.",
-        "parameters": {"contact_name": "Contact name", "message": "Message to send"},
-        "function": lambda contact_name, message=None: __import__('skills.messaging.whatsapp_playwright', fromlist=['prepare_whatsapp_message_sync']).prepare_whatsapp_message_sync(contact_name, message or ""),
-    },
-    "draft_whatsapp": {
-        "description": "Draft a WhatsApp message for a contact (does not send).",
-        "parameters": {"contact_name": "Contact name", "message": "Message to draft"},
-        "function": draft_whatsapp,
-    },
-    "send_whatsapp_approved": {
-        "description": "Send WhatsApp message with explicit confirmation required.",
-        "parameters": {"contact_name": "Contact name", "message": "Message to send", "confirm": "Must be True to send"},
-        "function": send_whatsapp_approved,
-        "requires_confirmation": True,
-    },
-    "execute_whatsapp_send": {
-        "description": "Execute previously prepared WhatsApp send (requires confirmation).",
-        "parameters": {},
-        "function": lambda: __import__('skills.messaging.whatsapp_playwright', fromlist=['execute_whatsapp_send_sync']).execute_whatsapp_send_sync(),
-    },
     "check_messaging_status": {
         "description": "Check availability of messaging services.",
         "parameters": {},
@@ -477,6 +466,30 @@ TOOL_REGISTRY = {
         "parameters": {"to": "Recipient email", "subject": "Email subject", "body": "Email body"},
         "function": lambda to, subject, body: f"📧 Email draft created: To: {to} | Subject: {subject}",
     },
+    # Direct skill endpoints that must remain discoverable by the cognitive router.
+    "media.play_media": {"description": "Play media through a local player/service.", "parameters": {"app_name": "Application", "service": "Optional service", "query": "Optional media query"}, "function": play_media},
+    "file.write_text": {"description": "Write text to a local file.", "parameters": {"file_path": "Destination path", "content": "Text content", "mode": "Write mode"}, "function": __import__("skills.file_management.document_writer", fromlist=["write_text_file"]).write_text_file},
+    "file.write_word_document": {"description": "Create a Word document.", "parameters": {"file_path": "Destination path", "content": "Document content"}, "function": __import__("skills.file_management.document_writer", fromlist=["write_word_document"]).write_word_document},
+    "file.convert_images_to_pdf": {"description": "Convert image files into a PDF.", "parameters": {"image_paths": "Image paths", "output_path": "PDF path"}, "function": __import__("skills.file_management.file_converter", fromlist=["convert_images_to_pdf"]).convert_images_to_pdf},
+    "file.convert_word_to_pdf": {"description": "Convert a Word document to PDF.", "parameters": {"docx_path": "DOCX path", "pdf_path": "PDF path"}, "function": __import__("skills.file_management.file_converter", fromlist=["convert_word_to_pdf"]).convert_word_to_pdf},
+    "voice.speak": {"description": "Speak text aloud using the configured voice providers.", "parameters": {"text": "Text to speak"}, "function": __import__("skills.voice.voice_interface", fromlist=["speak"]).speak},
+    "voice.listen": {"description": "Listen for spoken input using the configured microphone provider.", "parameters": {}, "function": __import__("skills.voice.voice_interface", fromlist=["listen"]).listen},
+    "voice.set_enabled": {"description": "Enable or disable speech output.", "parameters": {"enabled": "Boolean"}, "function": __import__("skills.voice.voice_interface", fromlist=["set_speech_enabled"]).set_speech_enabled},
+    "voice.wake_up": {"description": "Wake Angelique's voice activation state.", "parameters": {}, "function": __import__("skills.voice.wake_word_system", fromlist=["wake_up"]).wake_up},
+    "voice.sleep": {"description": "Put Angelique's voice activation state to sleep.", "parameters": {}, "function": __import__("skills.voice.wake_word_system", fromlist=["sleep"]).sleep},
+    "voice.is_awake": {"description": "Read Angelique's voice activation state.", "parameters": {}, "function": __import__("skills.voice.wake_word_system", fromlist=["is_awake"]).is_awake},
+    "voice.activation_protocol": {"description": "Process a wake-word activation event.", "parameters": {"audio_text": "Recognized speech text", "audio_samples": "Optional audio samples"}, "function": __import__("skills.voice.wake_word_system", fromlist=["activation_protocol"]).activation_protocol},
+    "automation.schedule": {"description": "Schedule an Angelique command.", "parameters": {"command": "Command", "delay_seconds": "Delay in seconds", "repeat_seconds": "Optional repeat interval"}, "function": __import__("skills.automation.automation", fromlist=["schedule"]).schedule},
+    "automation.cancel": {"description": "Cancel an Angelique scheduled command.", "parameters": {"job_id": "Schedule id"}, "function": __import__("skills.automation.automation", fromlist=["cancel"]).cancel},
+    "automation.list": {"description": "List Angelique scheduled commands.", "parameters": {}, "function": __import__("skills.automation.automation", fromlist=["list_schedules"]).list_schedules},
+    "conversation.new_session": {"description": "Start a new Angelique conversation session.", "parameters": {}, "function": __import__("skills.conversation.chat_skill", fromlist=["new_session"]).new_session},
+    "conversation.history": {"description": "Read conversation history.", "parameters": {"session_id": "Session id", "limit": "Maximum entries"}, "function": __import__("skills.conversation.chat_skill", fromlist=["get_conversation_history"]).get_conversation_history},
+    "conversation.context": {"description": "Read current session context.", "parameters": {"session_id": "Session id"}, "function": __import__("skills.conversation.chat_skill", fromlist=["get_session_context"]).get_session_context},
+    "memory.entities": {"description": "List memory entities.", "parameters": {}, "function": __import__("skills.memory.memory_tools", fromlist=["get_all_entities"]).get_all_entities},
+    "memory.friends": {"description": "List remembered friends/contacts.", "parameters": {}, "function": __import__("skills.memory.memory_tools", fromlist=["get_friends_list"]).get_friends_list},
+    "vision.camera": {"description": "Analyze the connected camera scene.", "parameters": {}, "function": __import__("skills.vision.camera_tools", fromlist=["analyze_camera_scene"]).analyze_camera_scene},
+    "vision.capture_photo": {"description": "Capture a photo from the camera.", "parameters": {"save_path": "Optional output path"}, "function": __import__("skills.vision.camera_tools", fromlist=["capture_photo"]).capture_photo},
+    "voice.clap_available": {"description": "Check whether the double-clap listener is available.", "parameters": {}, "function": __import__("skills.voice.clap_listener", fromlist=["ClapListener"]).ClapListener.is_available},
 
     # ============================================================
     # TRADING ENGINE TOOLS
@@ -562,21 +575,26 @@ TOOL_REGISTRY = {
         "parameters": {
             "symbol": "Trading pair (e.g., 'EURUSD', 'XAUUSD')",
             "timeframe": "Chart timeframe (e.g., 'M15', 'H1', 'H4')",
-            "risk_percent": "Risk percentage per trade (default 1.0)",
+            "risk_percent": "Optional risk percentage override; cannot exceed the account's automatic tier (0.5% below $50, 1% at/above $50).",
         },
-        "function": lambda symbol, timeframe=config.DEFAULT_TRADING_TIMEFRAME, risk_percent=1.0: prepare_trade_payload(symbol, risk_percent=risk_percent),
+        "function": lambda symbol, timeframe=config.DEFAULT_TRADING_TIMEFRAME, risk_percent=None, account_mode="demo", trading_mode="DAY_TRADING": prepare_trade_payload(symbol, account_mode=account_mode, risk_percent=risk_percent, trading_mode=trading_mode),
     },
     "execute_approved_trade": {
         "description": "Execute a market order. ONLY use after explicit user confirmation.",
         "parameters": {
-            "symbol": "Trading pair (e.g., 'EURUSD')",
-            "order_type": "BUY or SELL.",
-            "lot_size": "Calculated lot size (float).",
-            "sl": "Stop Loss price (float).",
-            "tp": "Take Profit price (float).",
+            "confirmation_phrase": "Exact confirmation phrase returned with the approved trade plan.",
         },
-        "function": execute_approved_trade,
+        "function": _execute_approved_trade_tool,
         "requires_confirmation": True,
+    },
+    "trading_hub_health": {
+        "description": "Read-only diagnostic for the MT5/Valetax trading hub. Never places or modifies trades.",
+        "parameters": {
+            "account_mode": "demo or real",
+            "symbol": "Optional trading symbol",
+            "trading_mode": "DAY_TRADING or SWING_TRADING",
+        },
+        "function": trading_hub_health,
     },
     "get_forex_news": {
         "description": "Fetch latest forex market news for a specific pair or general market.",
@@ -606,139 +624,87 @@ except Exception:
 
 import json
 
-def execute_tool(tool_name: str, args: dict, user_request: str = None, session_id: str = None, timeout: float = 30.0) -> str:
-    """Execute a tool via the centralized ExecutionGateway.
+# Extended capabilities added without changing the existing UI contract.
+try:
+    from skills.os_control.desktop_control import mouse_move as _mouse_move, mouse_click as _mouse_click, type_text as _type_text, hotkey as _hotkey, key_press as _key_press, clipboard_get as _clipboard_get, clipboard_set as _clipboard_set, active_window as _active_window
+    from skills.automation.automation import schedule as _schedule, cancel as _cancel_schedule, list_schedules as _list_schedules
+    from skills.vision.ollama_vision import analyze_image_with_model as _analyze_image_with_model
+    from skills.web.download_tools import download_file as _download_file
+    TOOL_REGISTRY.update({
+        "mouse_move": {"description":"Move the desktop pointer.","parameters":{"x":"integer","y":"integer"},"function":_mouse_move},
+        "mouse_click": {"description":"Click the desktop pointer.","parameters":{"x":"optional integer","y":"optional integer","button":"left/right/middle","clicks":"integer"},"function":_mouse_click,"requires_confirmation":True},
+        "type_text": {"description":"Type text into the focused application.","parameters":{"text":"text","interval":"seconds"},"function":_type_text,"requires_confirmation":True},
+        "hotkey": {"description":"Send a keyboard shortcut.","parameters":{"keys":"e.g. ctrl+l"},"function":_hotkey,"requires_confirmation":True},
+        "key_press": {"description":"Press a keyboard key.","parameters":{"key":"key name"},"function":_key_press,"requires_confirmation":True},
+        "clipboard_get": {"description":"Read the desktop clipboard.","parameters":{},"function":_clipboard_get},
+        "clipboard_set": {"description":"Set the desktop clipboard.","parameters":{"text":"clipboard text"},"function":_clipboard_set,"requires_confirmation":True},
+        "active_window": {"description":"Read the active desktop window.","parameters":{},"function":_active_window},
+        "schedule_task": {"description":"Schedule an Angelique command.","parameters":{"command":"command text","delay_seconds":"seconds","repeat_seconds":"optional seconds"},"function":_schedule,"requires_confirmation":True},
+        "cancel_scheduled_task": {"description":"Cancel a scheduled Angelique command.","parameters":{"job_id":"schedule id"},"function":_cancel_schedule,"requires_confirmation":True},
+        "list_scheduled_tasks": {"description":"List scheduled Angelique commands.","parameters":{},"function":_list_schedules},
+        "analyze_image_with_local_model": {"description":"Analyze an image with a discovered local Ollama vision model.","parameters":{"image_path":"path","prompt":"question"},"function":_analyze_image_with_model},
+        "download_file": {"description":"Download an HTTP(S) file to disk.","parameters":{"url":"URL","output_path":"destination path","timeout":"seconds"},"function":_download_file},
+        "send_whatsapp_direct": {"description":"Resolve a contact from contacts.csv and send WhatsApp through the configured direct HTTP provider without opening a browser.","parameters":{"contact_name":"contact name","message":"message"},"function":send_whatsapp,"requires_confirmation":True},
+    })
+except Exception:
+    pass
 
-    Compatibility behavior: unknown tools may still fall back to legacy skill
-    lookup, but validation remains authoritative.
+
+def execute_tool(tool_name: str, args: dict, user_request: str = None, session_id: str = None, timeout: float = 30.0):
+    """Execute a registered tool through the centralized ExecutionGateway.
+
+    No known tool is allowed to bypass schema validation, permission policy,
+    confirmation policy, timeout handling, or audit logging.
     """
     try:
-        import core.tools_adapter  # type: ignore
+        from core.tools_adapter import migrate_registry
+        migrate_registry()
     except Exception:
         pass
 
     try:
         from core.execution_gateway import GATEWAY
-    except Exception:
-        GATEWAY = None
+        from core.tool_registry import GLOBAL_TOOL_REGISTRY
+    except Exception as exc:
+        return f"Error: execution gateway unavailable: {exc}"
 
-    if GATEWAY is not None:
-        exec_timeout = timeout
-        try:
-            if (tool_name or "").strip().lower() == "run_shell_command":
-                exec_timeout = max(timeout or 0, 300.0)
-        except Exception:
-            exec_timeout = timeout
+    normalized = str(tool_name or '').strip()
+    if not normalized:
+        return "Error: no tool name provided."
 
-        # Prefer canonical GLOBAL_TOOL_REGISTRY entry. If present, execute via
-        # the centralized ExecutionGateway. If the tool is not registered
-        # globally, fall back to the legacy `TOOL_REGISTRY` function only as
-        # a migration path (audit logged). Dynamic `call_skill` fallbacks are
-        # removed to keep execution canonical.
-        try:
-            from core.tool_registry import GLOBAL_TOOL_REGISTRY as _GTR
-            schema = _GTR.get(tool_name)
-        except Exception:
-            schema = None
+    schema = GLOBAL_TOOL_REGISTRY.get(normalized)
+    if schema is None:
+        alias_map = {
+            "bash": "run_shell_command",
+            "sh": "run_shell_command",
+            "shell": "run_shell_command",
+            "mkdir": "manage_files",
+            "rmdir": "manage_files",
+            "rm": "manage_files",
+            "search": "search_files",
+            "find": "search_files",
+            "ls": "cli_ls",
+        }
+        candidate = alias_map.get(normalized.lower())
+        if candidate:
+            normalized = candidate
+            schema = GLOBAL_TOOL_REGISTRY.get(normalized)
 
-        # If a legacy TOOL_REGISTRY entry exists for this tool, prefer the
-        # direct legacy function during tests or when callers have replaced
-        # TOOL_REGISTRY entries (keeps behavior predictable for unit tests).
-        try:
-            if tool_name in TOOL_REGISTRY:
-                func = TOOL_REGISTRY[tool_name]["function"]
-                try:
-                    sig = inspect.signature(func)
-                    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
-                    valid_args = args if accepts_kwargs else {k: v for k, v in (args or {}).items() if k in sig.parameters}
-                    return func(**valid_args)
-                except Exception:
-                    # fall through to gateway execution
-                    pass
-        except Exception:
-            pass
+    if schema is None:
+        return f"Error: Tool '{tool_name}' not found in the canonical registry."
 
-        if schema is not None:
-            res = GATEWAY.execute(tool_name, args or {}, user_request=user_request, session_id=session_id, timeout=exec_timeout)
-        else:
-            # Legacy direct function (migration only)
-            try:
-                if tool_name in TOOL_REGISTRY:
-                    try:
-                        # audit may not be available in some runtimes
-                        audit.record({"action": "legacy_tool_used", "tool": tool_name, "note": "Tool not registered in GLOBAL_TOOL_REGISTRY; using legacy TOOL_REGISTRY function."})
-                    except Exception:
-                        pass
-                    func = TOOL_REGISTRY[tool_name]["function"]
-                    try:
-                        sig = inspect.signature(func)
-                        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
-                        valid_args = args if accepts_kwargs else {k: v for k, v in (args or {}).items() if k in sig.parameters}
-                        return func(**valid_args)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            # No global schema and legacy direct function did not succeed — fall back to dynamic skill lookup
-            try:
-                fallback = call_skill(tool_name, args or {})
-            except Exception:
-                fallback = None
-            if fallback is not None and not str(fallback).lower().startswith("error: skill"):
-                return fallback
-
-            # No fallback succeeded
-            return f"Error: Tool '{tool_name}' not found."
-        if res.success:
-            return res.output
-        err = res.error or ""
-        # If gateway rejected due to validation of unknown params, fall back
-        # to the legacy TOOL_REGISTRY function (ignoring unexpected kwargs).
-        if isinstance(err, str) and ("Unknown parameter" in err or "Validation failed" in err or "InvalidArguments" in err):
-            try:
-                if tool_name in TOOL_REGISTRY:
-                    func = TOOL_REGISTRY[tool_name]["function"]
-                    sig = inspect.signature(func)
-                    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
-                    valid_args = args if accepts_kwargs else {k: v for k, v in (args or {}).items() if k in sig.parameters}
-                    return func(**valid_args)
-            except Exception:
-                pass
-        if res.timed_out:
-            return f"Error: Execution timed out for {tool_name}."
-        return f"Error executing {tool_name}: {res.error}"
-
-    normalized_tool = (tool_name or "").strip().lower()
-    alias_map = {
-        "bash": "run_shell_command",
-        "sh": "run_shell_command",
-        "shell": "run_shell_command",
-        "xdg-open": "run_shell_command",
-        "open": "open_browser_and_search",
-        "mkdir": "manage_files",
-        "rmdir": "manage_files",
-        "rm": "manage_files",
-        "search": "search_files",
-        "find": "search_files",
-        "ls": "cli_ls",
-    }
-    if normalized_tool in alias_map:
-        tool_name = alias_map[normalized_tool]
-    if tool_name not in TOOL_REGISTRY:
-        try:
-            fallback = call_skill(tool_name, args or {})
-        except Exception:
-            fallback = None
-        if fallback is not None and not str(fallback).startswith("Error: skill "):
-            return fallback
-        return f"Error: Tool '{tool_name}' not found."
-    func = TOOL_REGISTRY[tool_name]["function"]
-    try:
-        sig = inspect.signature(func)
-        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
-        valid_args = args if accepts_kwargs else {k: v for k, v in (args or {}).items() if k in sig.parameters}
-        return func(**valid_args)
-    except Exception as e:
-        return f"Error executing {tool_name}: {e}"
-
+    exec_timeout = timeout
+    if normalized == "run_shell_command":
+        exec_timeout = max(float(timeout or 0), 300.0)
+    result = GATEWAY.execute(
+        normalized,
+        args or {},
+        user_request=user_request,
+        session_id=session_id,
+        timeout=exec_timeout,
+    )
+    if result.success:
+        return result.output
+    if result.timed_out:
+        return f"Error: Execution timed out for {normalized}."
+    return f"Error executing {normalized}: {result.error}"

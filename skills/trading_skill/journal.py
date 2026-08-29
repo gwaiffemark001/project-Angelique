@@ -39,6 +39,7 @@ def record_trade(plan: dict[str, Any], execution: dict[str, Any]) -> dict[str, A
         "trading_mode": plan.get("trading_mode", "DAY_TRADING"),
         "profile": plan.get("profile", {}),
         "smc_analysis": plan.get("smc_analysis", {}),
+        "analysis_audit": plan.get("analysis_audit", {}),
         "news_context": plan.get("news_context", {}),
         "risk": {
             "risk_percent": plan.get("risk_percent"),

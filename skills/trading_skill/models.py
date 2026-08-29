@@ -26,6 +26,12 @@ class WorkflowState(str, Enum):
     CANCELLED = "CANCELLED"
     NO_SETUP = "NO_SETUP"
     TRADE_READY = "TRADE_READY"
+    BLOCKED_BY_DATA = "BLOCKED_BY_DATA"
+    WAIT = "WAIT"
+    BUY_PLAN_READY = "BUY_PLAN_READY"
+    SELL_PLAN_READY = "SELL_PLAN_READY"
+    BLOCKED_BY_RISK = "BLOCKED_BY_RISK"
+    INVALID_SETUP = "INVALID_SETUP"
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,10 @@ class AccountSnapshot:
     error: str | None = None
     broker: str = ""
     platform: str = "MT5"
+    daily_loss_percent: float | None = None
+    weekly_loss_percent: float | None = None
+    drawdown_percent: float = 0.0
+    consecutive_losses: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,6 +71,9 @@ class MarketSnapshot:
     spread_pips: float | None = None
     stale: bool = False
     error: str | None = None
+    spread_points: float | None = None
+    spread_price: float | None = None
+    spread_unit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +116,15 @@ class TradePlan:
     broker: str = ""
     platform: str = "MT5"
     account_login: int | None = None
+    analysis_audit: dict[str, Any] = field(default_factory=dict)
+    # When True, this plan is NOT auto-executable: a high-impact calendar
+    # event is imminent or scraped news bias conflicts with the SMC
+    # direction. Every other gate (setup completeness, risk, margin,
+    # spread, RR, portfolio limits) has already passed by the time this
+    # plan exists -- this is the one condition where a human should look
+    # at it before it goes live.
+    requires_manual_approval: bool = False
+    manual_approval_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -145,6 +167,9 @@ class TradePlan:
             "broker": self.broker,
             "platform": self.platform,
             "account_login": self.account_login,
+            "analysis_audit": dict(self.analysis_audit),
+            "requires_manual_approval": self.requires_manual_approval,
+            "manual_approval_reason": self.manual_approval_reason,
         }
 
 
@@ -152,6 +177,7 @@ class TradePlan:
 class WorkflowResult:
     state: WorkflowState
     message: str
+    decision_state: str | None = None
     plan: TradePlan | None = None
     account: AccountSnapshot | None = None
     market: MarketSnapshot | None = None

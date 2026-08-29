@@ -41,12 +41,25 @@ class AccountSessionManager:
 
     def validate_authorization(self, requested_mode: str = DEFAULT_MODE) -> tuple[bool, str, AccountSnapshot]:
         mode = self.resolve_mode(requested_mode)
-        snapshot = self.get_snapshot(mode, force_refresh=(mode == "real"))
-        if mode == "real" and not snapshot.connected:
-            message = "LIVE authorization required and the actual MT5 account does not match the requested real mode."
-            log_event(40, "account_manager.live_authorization_failed", requested_mode=requested_mode, actual_mode=snapshot.actual_mode, error=snapshot.error)
+        # Trading operations must never use a stale account identity. The MT5
+        # bridge is process-global and can switch environments, so every
+        # authorization check gets a fresh broker/account identity.
+        snapshot = self.get_snapshot(mode, force_refresh=True)
+        if not snapshot.connected:
+            message = snapshot.error or "MT5 account is not connected to the requested trading mode."
+            log_event(40, "account_manager.authorization_failed", requested_mode=requested_mode, actual_mode=snapshot.actual_mode, error=snapshot.error)
             return False, message, snapshot
         return True, "Authorization valid.", snapshot
+
+    def switch_mode(self, requested_mode: str) -> AccountSnapshot:
+        """Invalidate all cached identities and synchronously verify the
+        requested mode against the actual MT5 account. This is used by the
+        GUI before a new signal/trading refresh is started."""
+        self._cache.clear()
+        return self.get_snapshot(self.resolve_mode(requested_mode), force_refresh=True)
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
 
 
 account_manager = AccountSessionManager()

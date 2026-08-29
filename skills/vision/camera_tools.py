@@ -6,6 +6,7 @@ import tempfile
 import os
 import re
 from typing import Any
+from core import config
 
 _YOLO_MODEL = None
 

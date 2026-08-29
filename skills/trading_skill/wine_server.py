@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import sys
+from threading import RLock
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,8 @@ if PROJECT_ROOT not in sys.path:
 
 import asyncio
 from core import config
+
+_MT5_SESSION_LOCK = RLock()
 
 TIMEFRAMES = {
     "M1": 1,
@@ -52,47 +55,218 @@ def _raw(value: Any) -> dict[str, Any]:
 
 
 def _connect(mt5: Any, mode: str) -> bool:
-    prefix = "ANGELIQUE_MT5_LIVE" if mode == "live" else "ANGELIQUE_MT5_DEMO"
-    values = {name: os.getenv(f"{prefix}_{name}") for name in ("PATH", "LOGIN", "PASSWORD", "SERVER")}
-    options: dict[str, Any] = {name.lower(): value for name, value in values.items() if value}
-    if "login" in options:
-        options["login"] = int(options["login"])
-    try:
-        return bool(mt5.initialize(**options)) if options else bool(mt5.initialize())
-    except TypeError:
-        return bool(mt5.initialize())
+    """Ensure the process-global MetaTrader5 session is on the requested mode.
 
+    MT5's Python binding is process-global: one Python process cannot hold a
+    demo and real terminal session simultaneously. We therefore verify the
+    currently attached account first, cleanly shut it down when the requested
+    mode differs, initialize the requested environment, and verify the result.
+    The public bridge operations are serialized with _MT5_SESSION_LOCK so an
+    old/background request cannot switch the session mid-operation.
+    """
+    requested = _mode(mode)
+    prefix = "ANGELIQUE_MT5_LIVE" if requested == "live" else "ANGELIQUE_MT5_DEMO"
+    values = {name: os.getenv(f"{prefix}_{name}") for name in ("PATH", "LOGIN", "PASSWORD", "SERVER")}
+
+    try:
+        current = mt5.account_info()
+    except Exception:
+        current = None
+
+    if current is not None:
+        current_raw = _raw(current)
+        current_mode = _account_mode(current_raw)
+        if current_mode == requested:
+            return True
+        # The attached terminal is the wrong environment. Do not let the
+        # caller accidentally use it for the requested mode.
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+
+    path = values.get("PATH")
+    if path:
+        path = path.replace("\\\\", "\\")
+
+    initialized = False
+    if path:
+        try:
+            initialized = bool(mt5.initialize(path=path))
+        except (TypeError, RuntimeError):
+            initialized = False
+
+    if not initialized:
+        options: dict[str, Any] = {name.lower(): value for name, value in values.items() if value}
+        if "login" in options:
+            try:
+                options["login"] = int(options["login"])
+            except (TypeError, ValueError):
+                return False
+        try:
+            initialized = bool(mt5.initialize(**options)) if options else bool(mt5.initialize())
+        except TypeError:
+            initialized = bool(mt5.initialize())
+        except Exception:
+            initialized = False
+
+    if not initialized:
+        return False
+
+    try:
+        info = mt5.account_info()
+        if info is None:
+            return False
+        actual = _account_mode(_raw(info))
+        if actual != requested:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _connect_error(mt5: Any, mode: str) -> str:
+    prefix = "ANGELIQUE_MT5_LIVE" if mode == "live" else "ANGELIQUE_MT5_DEMO"
+    configured = any(os.getenv(f"{prefix}_{name}") for name in ("PATH", "LOGIN", "PASSWORD", "SERVER"))
+    detail = "MT5.initialize() returned false"
+    try:
+        last_error = mt5.last_error()
+        if last_error:
+            detail = f"MT5.initialize() failed: {last_error}"
+    except Exception:
+        pass
+    if not configured:
+        detail += f"; configure {prefix}_PATH or start the Valetax MT5 terminal first"
+    return detail
+
+
+def _mt5_session_locked(fn):
+    """Serialize the entire bridge operation, not merely initialization."""
+    def wrapped(request: dict[str, Any]) -> dict[str, Any]:
+        with _MT5_SESSION_LOCK:
+            return fn(request)
+    wrapped.__name__ = getattr(fn, "__name__", "wrapped")
+    return wrapped
+
+
+def _expected_broker_matches(expected: str | None, raw: dict[str, Any]) -> bool:
+    if not expected:
+        return True
+    expected_key = str(expected).strip().upper()
+    identity = " ".join(str(raw.get(field) or "") for field in ("company", "server")).upper()
+    if expected_key == "VALETAX":
+        return "VALETAX" in identity
+    return False
+
+def _broker_guard_error(mt5: Any, expected_broker: str | None) -> str | None:
+    if not expected_broker:
+        return None
+    try:
+        info = mt5.account_info()
+        raw = _raw(info) if info is not None else {}
+        if not _expected_broker_matches(expected_broker, raw):
+            actual = raw.get("company") or raw.get("server") or "unknown broker"
+            return f"Broker mismatch: expected {expected_broker}, connected to {actual}."
+    except Exception as exc:
+        return f"Broker identity check failed: {exc}"
+    return None
+
+
+def _account_guard_error(mt5: Any, requested_mode: str, expected_broker: str | None = None) -> str | None:
+    broker_error = _broker_guard_error(mt5, expected_broker)
+    if broker_error:
+        return broker_error
+    try:
+        info = mt5.account_info()
+        if info is None:
+            return "Account identity check failed: no MT5 account is logged in."
+        actual_mode = _account_mode(_raw(info))
+        if actual_mode != requested_mode:
+            return f"Requested {requested_mode} account mode but MT5 is connected to {actual_mode} account"
+    except Exception as exc:
+        return f"Account identity check failed: {exc}"
+    return None
 
 def _account_mode(raw: dict[str, Any]) -> str:
+    # MT5's ACCOUNT_TRADE_MODE constants: DEMO=0, CONTEST=1, REAL=2.
+    # Only an explicit REAL (2) account is ever treated as live; demo (0),
+    # contest (1), and anything unrecognized default to demo. Getting this
+    # backwards (treating trade_mode==1 as demo) misclassifies real demo
+    # accounts as "live", which fails the requested-vs-actual mode check
+    # on every single call and silently kills the pipeline before any
+    # market analysis ever runs.
+    trade_mode = raw.get("trade_mode")
+    if trade_mode in (0, 1, 2):
+        return "live" if trade_mode == 2 else "demo"
     server = str(raw.get("server") or "").lower()
     if any(word in server for word in ("demo", "trial", "test", "sandbox")):
         return "demo"
-    return "demo" if raw.get("trade_mode") == 1 else "live"
+    if any(word in server for word in ("live", "real")):
+        return "live"
+    return "demo"
 
 
-def _period_loss_percent(mt5: Any, equity: float, days: int) -> float:
+def _period_loss_percent(mt5: Any, equity: float, days: int) -> float | None:
+    """Calculate realized trading loss against the period opening balance.
+
+    Balance/deposit/withdrawal operations and entry deals are excluded. The
+    denominator is reconstructed from current balance minus the period's net
+    realized trading result, preventing the limit from moving merely because
+    the current equity has changed.
+    """
     if equity <= 0 or not hasattr(mt5, "history_deals_get"):
-        return 0.0
+        return None
     try:
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=days)
-        deals = mt5.history_deals_get(start, now) or []
-        net = sum(
-            float(getattr(deal, field, 0) or 0)
-            for deal in deals
-            for field in ("profit", "commission", "swap")
-        )
-        return max(0.0, -net / equity * 100)
+        now=datetime.now(timezone.utc); start=now-timedelta(days=days)
+        deals=mt5.history_deals_get(start,now) or []
+        buy=getattr(mt5,"DEAL_TYPE_BUY",None); sell=getattr(mt5,"DEAL_TYPE_SELL",None)
+        out=getattr(mt5,"DEAL_ENTRY_OUT",None); out_by=getattr(mt5,"DEAL_ENTRY_OUT_BY",None)
+        net=0.0
+        for deal in deals:
+            deal_type=getattr(deal,"type",None); deal_entry=getattr(deal,"entry",None)
+            if buy is not None and sell is not None and deal_type not in {buy,sell}: continue
+            if out is not None and out_by is not None and deal_entry not in {out,out_by}: continue
+            net += float(getattr(deal,"profit",0) or 0)+float(getattr(deal,"commission",0) or 0)+float(getattr(deal,"swap",0) or 0)
+        info=mt5.account_info(); balance=float(getattr(info,"balance",0) or 0) if info is not None else equity
+        opening=max(0.0,balance-net)
+        return max(0.0,-net/opening*100) if opening>0 else 0.0
     except Exception:
-        return 0.0
+        return None
+
+def _choose_filling_mode(mt5: Any, symbol_info: Any) -> int:
+    """Choose a filling policy supported by the symbol, without retrying a sent order."""
+    flags=int(getattr(symbol_info,"filling_mode",0) or 0)
+    fok_flag=int(getattr(mt5,"SYMBOL_FILLING_FOK",1))
+    ioc_flag=int(getattr(mt5,"SYMBOL_FILLING_IOC",2))
+    order_fok=getattr(mt5,"ORDER_FILLING_FOK",0)
+    order_ioc=getattr(mt5,"ORDER_FILLING_IOC",1)
+    order_return=getattr(mt5,"ORDER_FILLING_RETURN",2)
+    trade_exemode=getattr(symbol_info,"trade_exemode",None)
+    market_execution=getattr(mt5,"SYMBOL_TRADE_EXECUTION_MARKET",2)
+    if trade_exemode == market_execution:
+        if flags & ioc_flag: return order_ioc
+        if flags & fok_flag: return order_fok
+        return order_ioc
+    if flags & ioc_flag: return order_ioc
+    if flags & fok_flag: return order_fok
+    return order_return
 
 
+@_mt5_session_locked
 def account(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker = str(request.get("expected_broker") or "").upper() or None
     requested = _mode(request.get("account_mode"))
     try:
         mt5 = importlib.import_module("MetaTrader5")
         if not _connect(mt5, requested):
-            return {"status": "error", "mode": requested, "mode_match": False, "login": None, "error": "MT5 initialization failed"}
+            return {"status": "error", "mode": requested, "mode_match": False, "login": None, "error": _connect_error(mt5, requested)}
+        broker_error = _broker_guard_error(mt5, expected_broker)
+        if broker_error:
+            return {"status": "error", "mode": requested, "mode_match": False, "login": None, "error": broker_error}
         info = mt5.account_info()
         if info is None:
             return {"status": "unavailable", "mode": requested, "mode_match": False, "login": None, "error": "No MT5 account is logged in"}
@@ -101,9 +275,19 @@ def account(request: dict[str, Any]) -> dict[str, Any]:
         used_margin = float(raw.get("margin", 0) or 0)
         equity = float(raw.get("equity", 0) or 0)
         margin_level = float(raw.get("margin_level", 0) or 0)
+        daily_loss = _period_loss_percent(mt5, equity, 1)
+        weekly_loss = _period_loss_percent(mt5, equity, 7)
+        if daily_loss is None or weekly_loss is None:
+            return {
+                "status": "error",
+                "mode": requested,
+                "mode_match": False,
+                "login": raw.get("login"),
+                "error": "MT5 realized-loss history is unavailable; trading is blocked until daily/weekly loss metrics can be verified.",
+            }
         if margin_level <= 0 and used_margin > 0:
             margin_level = equity / used_margin * 100
-        result = {"status": "connected", "mode": actual, "requested_mode": requested, "mode_match": actual == requested, "login": raw.get("login"), "balance": float(raw.get("balance", 0) or 0), "equity": equity, "used_margin": used_margin, "margin": used_margin, "free_margin": float(raw.get("margin_free", 0) or 0), "margin_level": margin_level, "leverage": int(raw.get("leverage", 0) or 0), "currency": raw.get("currency", "USD"), "broker": raw.get("company", raw.get("server", "")), "platform": "MT5", "daily_loss_percent": _period_loss_percent(mt5, equity, 1), "weekly_loss_percent": _period_loss_percent(mt5, equity, 7)}
+        result = {"status": "connected", "mode": actual, "requested_mode": requested, "mode_match": actual == requested, "login": raw.get("login"), "balance": float(raw.get("balance", 0) or 0), "equity": equity, "used_margin": used_margin, "margin": used_margin, "free_margin": float(raw.get("margin_free", 0) or 0), "margin_level": margin_level, "leverage": int(raw.get("leverage", 0) or 0), "currency": raw.get("currency", "USD"), "broker": raw.get("company", raw.get("server", "")), "platform": "MT5", "daily_loss_percent": daily_loss, "weekly_loss_percent": weekly_loss}
         if actual != requested:
             result["error"] = f"MT5 is connected to {actual}; requested {requested}."
         return result
@@ -111,12 +295,17 @@ def account(request: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "mode": requested, "mode_match": False, "login": None, "error": str(exc)}
 
 
+@_mt5_session_locked
 def symbols(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker = str(request.get("expected_broker") or "").upper() or None
     requested = _mode(request.get("account_mode"))
     try:
         mt5 = importlib.import_module("MetaTrader5")
         if not _connect(mt5, requested):
-            return {"status": "error", "symbols": [], "error": "MT5 initialization failed"}
+            return {"status": "error", "symbols": [], "error": _connect_error(mt5, requested)}
+        broker_error = _broker_guard_error(mt5, expected_broker)
+        if broker_error:
+            return {"status": "error", "symbols": [], "error": broker_error}
         return {"status": "connected", "symbols": sorted({str(item.name) for item in (mt5.symbols_get() or []) if getattr(item, "name", None)})}
     except Exception as exc:
         return {"status": "error", "symbols": [], "error": str(exc)}
@@ -132,7 +321,9 @@ def _resolve(mt5: Any, requested: str) -> str | None:
     return sorted(matches, key=lambda name: (len(name), name))[0] if matches else None
 
 
+@_mt5_session_locked
 def market(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker = str(request.get("expected_broker") or "").upper() or None
     requested_mode = _mode(request.get("account_mode"))
     requested_symbol = str(request.get("symbol") or "")
     timeframes = tuple(str(item).upper() for item in request.get("timeframes", ("H4", "H1", "M15", "M5")))
@@ -140,8 +331,16 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
     try:
         mt5 = importlib.import_module("MetaTrader5")
         if not _connect(mt5, requested_mode):
-            return {"status": "error", "error": "MT5 initialization failed", "timeframes": {}}
+            return {"status": "error", "error": _connect_error(mt5, requested_mode), "timeframes": {}}
+        broker_error = _broker_guard_error(mt5, expected_broker)
+        if broker_error:
+            return {"status": "error", "error": broker_error, "timeframes": {}}
         symbol = _resolve(mt5, str(requested_symbol))
+        account_info = mt5.account_info()
+        if account_info is not None:
+            actual_mode = _account_mode(_raw(account_info))
+            if actual_mode != requested_mode:
+                return {"status": "error", "error": f"Requested {requested_mode} account mode but MT5 is connected to {actual_mode} account", "timeframes": {}}
         if not symbol:
             return {"status": "error", "error": f"Symbol {requested_symbol} is unavailable", "timeframes": {}, "suggestions": symbols(request).get("symbols", [])[:10]}
         if not mt5.symbol_select(symbol, True):
@@ -177,23 +376,20 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
         raw_spread = ask - bid
         tick_size = info.get("trade_tick_size")
         tick_value = info.get("trade_tick_value")
+        point = float(info.get("point", 0) or 0)
+        digits = int(info.get("digits", 0) or 0)
         # Compute spread in pips when tick_size is available. Pip definition:
         # - For most FX pairs a pip = 0.0001 (4th decimal) but brokers may use
         #   fractional pricing; use tick_size to normalize.
         spread_pips = None
         try:
+            from core.price_units import pip_size_from_specs
             if tick_size:
-                tick = float(tick_size)
-                # pips = raw_spread / pip_size, where pip_size is tick * (10 if tick has extra precision)
-                # A robust approach: pip_size = 10**(-int(round(abs(math.log10(tick)))))? Avoid math; use ratio to 0.0001/0.01 for JPY.
-                # Simpler: define a pip reference for common pairs: if tick < 0.001 -> pip_unit = 0.0001 else 0.01
-                pip_unit = 0.0001 if float(tick) < 0.001 else 0.01
-                spread_pips = raw_spread / pip_unit
+                pip_unit = pip_size_from_specs(symbol, {"point": point, "digits": digits})
+                spread_pips = raw_spread / pip_unit if pip_unit > 0 else None
         except Exception:
             spread_pips = None
 
-        point = float(info.get("point", 0) or 0)
-        digits = int(info.get("digits", 0) or 0)
         spread_points = raw_spread / point if point > 0 else None
         return {
             "status": "connected",
@@ -229,71 +425,115 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "error": str(exc), "timeframes": {}}
 
 
+@_mt5_session_locked
 def execute(request: dict[str, Any]) -> dict[str, Any]:
-    requested_mode = _mode(request.get("account_mode"))
-    order = request.get("order") or {}
+    expected_broker=str(request.get("expected_broker") or "").upper() or None
+    requested_mode=_mode(request.get("account_mode")); order=request.get("order") or {}
     try:
-        mt5 = importlib.import_module("MetaTrader5")
-        if not _connect(mt5, requested_mode):
-            return {"success": False, "error": "MT5 initialization failed"}
-        symbol = _resolve(mt5, str(order.get("mt5_symbol") or ""))
-        if not symbol or symbol != order.get("mt5_symbol"):
-            return {"success": False, "error": "The plan symbol is no longer available in MT5."}
-        direction = str(order.get("direction", "")).upper()
-        action = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL if direction == "SELL" else None
-        if action is None:
-            return {"success": False, "error": "Invalid direction"}
-        request_data = {"action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(order["volume"]), "type": action, "price": float(order["entry"]), "sl": float(order["stop_loss"]), "tp": float(order["take_profit"]), "deviation": 20, "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC, "comment": "Angelique approved plan"}
-        result = mt5.order_send(request_data)
-        raw = _raw(result) if result is not None else {}
-        success = result is not None and getattr(result, "retcode", None) in {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
-        return {"success": success, "retcode": raw.get("retcode"), "order": raw.get("order"), "deal": raw.get("deal"), "error": None if success else raw.get("comment", "MT5 rejected the order")}
+        mt5=importlib.import_module("MetaTrader5")
+        if not _connect(mt5,requested_mode): return {"success":False,"error":_connect_error(mt5,requested_mode)}
+        broker_error=_broker_guard_error(mt5,expected_broker)
+        if broker_error: return {"success":False,"error":broker_error}
+        # Fail closed before symbol resolution or order submission when MT5
+        # explicitly disables trading. This check must happen early so a
+        # disabled terminal cannot generate repeated, pointless attempts.
+        terminal = mt5.terminal_info() if hasattr(mt5, "terminal_info") else None
+        if terminal is not None and hasattr(terminal, "trade_allowed") and not bool(getattr(terminal, "trade_allowed")):
+            return {"success":False,"failure_stage":"trading_disabled","error":"MT5 terminal trading is disabled. Enable AutoTrading in the terminal before execution."}
+        account_info = mt5.account_info()
+        if account_info is not None and hasattr(account_info, "trade_allowed") and not bool(getattr(account_info, "trade_allowed")):
+            return {"success":False,"failure_stage":"trading_disabled","error":"MT5 account trading is disabled."}
+
+        symbol=str(order.get("mt5_symbol") or order.get("symbol") or "").strip()
+        resolved=_resolve(mt5,symbol)
+        if not resolved or resolved != symbol: return {"success":False,"error":"The plan symbol is no longer available in MT5."}
+        direction=str(order.get("direction","" )).upper()
+        if direction not in {"BUY", "SELL"}: return {"success":False,"error":"Invalid direction."}
+        info=mt5.symbol_info(symbol); tick=mt5.symbol_info_tick(symbol)
+        if info is None or tick is None: return {"success":False,"error":"MT5 symbol information/tick is unavailable."}
+        if hasattr(info, "trade_mode") and int(getattr(info, "trade_mode") or 0) == int(getattr(mt5, "SYMBOL_TRADE_MODE_DISABLED", 0)):
+            return {"success":False,"failure_stage":"symbol_trading_disabled","error":f"Trading is disabled for MT5 symbol {symbol}."}
+        digits=int(getattr(info,"digits",5) or 5)
+        price=float(getattr(tick,"ask",0) if direction=="BUY" else getattr(tick,"bid",0))
+        if price<=0: return {"success":False,"error":"Current executable price is unavailable."}
+        volume=float(order.get("volume",0) or 0)
+        sl=float(order.get("stop_loss",0) or 0); tp=float(order.get("take_profit",0) or 0)
+        if volume<=0 or sl<=0 or tp<=0: return {"success":False,"error":"Volume, stop loss and take profit must be positive."}
+        comment=str(order.get("comment") or f"Angelique:{order.get('plan_id','')}")[:31]
+        request_data={"action":mt5.TRADE_ACTION_DEAL,"symbol":symbol,"volume":volume,"type":action,"price":round(price,digits),"sl":round(sl,digits),"tp":round(tp,digits),"deviation":int(order.get("deviation",20) or 20),"type_time":getattr(mt5,"ORDER_TIME_GTC",0),"type_filling":_choose_filling_mode(mt5,info),"comment":comment}
+        if hasattr(mt5,"order_check"):
+            checked=mt5.order_check(request_data); raw_check=_raw(checked) if checked is not None else {}
+            check_code=getattr(checked,"retcode",None) if checked is not None else None
+            if checked is None or (check_code is not None and check_code not in {0,getattr(mt5,"TRADE_RETCODE_DONE",10009)}):
+                return {"success":False,"failure_stage":"order_check","retcode":check_code,"error":raw_check.get("comment") or "MT5 order_check rejected the request.","order_check":raw_check}
+        result=mt5.order_send(request_data); raw=_raw(result) if result is not None else {}
+        retcode=getattr(result,"retcode",None) if result is not None else None
+        accepted_codes={getattr(mt5,"TRADE_RETCODE_DONE",10009),getattr(mt5,"TRADE_RETCODE_PLACED",10008),getattr(mt5,"TRADE_RETCODE_DONE_PARTIAL",10010)}
+        if result is None or retcode not in accepted_codes:
+            return {"success":False,"failure_stage":"mt5_order_send","retcode":retcode,"order":raw.get("order"),"deal":raw.get("deal"),"error":raw.get("comment") or "MT5 rejected the order."}
+        # Never resend after an accepted order. Reconciliation is read-only and may be delayed by MT5.
+        deal_ticket=raw.get("deal"); order_ticket=raw.get("order")
+        verified=False; verification="accepted_no_position_readback"
+        try:
+            positions=mt5.positions_get(symbol=symbol) or []
+            expected_ticket=raw.get("position")
+            for pos in positions:
+                same_ticket=expected_ticket and int(getattr(pos,"ticket",0) or 0)==int(expected_ticket)
+                same_comment=str(getattr(pos,"comment","") or "") == comment
+                same_side=getattr(pos,"type",None)==getattr(mt5,"POSITION_TYPE_BUY",0 if direction=="BUY" else -1) if direction=="BUY" else getattr(pos,"type",None)==getattr(mt5,"POSITION_TYPE_SELL",1)
+                same_volume=abs(float(getattr(pos,"volume",0) or 0)-volume)<=max(1e-9,volume*1e-8)
+                if same_ticket or (same_comment and same_side and same_volume): verified=True; verification="position_verified"; break
+        except Exception:
+            pass
+        return {"success":True,"accepted":True,"retcode":retcode,"order":order_ticket,"deal":deal_ticket,"position_verified":verified,"verification":verification,"requested_price":round(price,digits),"fill_mode":request_data["type_filling"],"error":None}
     except Exception as exc:
-        return {"success": False, "error": str(exc)}
+        return {"success":False,"failure_stage":"bridge_exception","error":str(exc)}
 
 
+@_mt5_session_locked
 def positions(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker=str(request.get("expected_broker") or "").upper() or None
+    requested_mode=_mode(request.get("account_mode")); symbol=str(request.get("symbol") or "").strip()
+    try:
+        mt5=importlib.import_module("MetaTrader5")
+        if not _connect(mt5,requested_mode): return {"status":"error","error":_connect_error(mt5,requested_mode),"positions":[]}
+        guard=_account_guard_error(mt5,requested_mode,expected_broker)
+        if guard: return {"status":"error","error":guard,"positions":[]}
+        positions=(mt5.positions_get(symbol=_resolve(mt5,symbol) or symbol) if symbol else mt5.positions_get()) or []
+        info=mt5.account_info(); equity=float(getattr(info,"equity",0) or 0) if info else 0.0
+        rows=[]
+        for pos in positions:
+            sym=str(getattr(pos,"symbol","") or ""); ptype="BUY" if getattr(pos,"type",None)==getattr(mt5,"POSITION_TYPE_BUY",0) else "SELL"
+            volume=float(getattr(pos,"volume",0) or 0); entry=float(getattr(pos,"price_open",0) or 0); sl=float(getattr(pos,"sl",0) or 0)
+            risk_amount=None; risk_percent=None
+            sinfo=mt5.symbol_info(sym)
+            ts=float(getattr(sinfo,"trade_tick_size",0) or 0) if sinfo else 0.0; tv=float(getattr(sinfo,"trade_tick_value",0) or 0) if sinfo else 0.0
+            if sl>0 and entry>0 and volume>0 and ts>0 and tv>0:
+                risk_amount=abs(entry-sl)/ts*tv*volume
+                if equity>0: risk_percent=risk_amount/equity*100
+            rows.append({"ticket":int(getattr(pos,"ticket",0) or 0),"symbol":sym,"type":ptype,"volume":volume,"price_open":entry,"sl":sl,"tp":float(getattr(pos,"tp",0) or 0),"profit":float(getattr(pos,"profit",0) or 0),"risk_amount":risk_amount,"risk_percent":risk_percent,"comment":str(getattr(pos,"comment","") or "")})
+        return {"status":"connected","positions":rows}
+    except Exception as exc:
+        return {"status":"error","error":str(exc),"positions":[]}
+
+
+@_mt5_session_locked
+def recent_deals(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker = str(request.get("expected_broker") or "").upper() or None
     requested_mode = _mode(request.get("account_mode"))
-    symbol = str(request.get("symbol") or "").strip()
-    requested_ticket = request.get("ticket")
-
-    def _normalize(value: str) -> str:
-        return "".join(char for char in value.upper() if char.isalnum())
-
+    minutes = max(1, int(request.get("minutes", 60)))
     try:
         mt5 = importlib.import_module("MetaTrader5")
         if not _connect(mt5, requested_mode):
-            return {"status": "error", "error": "MT5 initialization failed", "positions": []}
-
-        if symbol:
-            resolved_symbol = _resolve(mt5, symbol) or symbol
-            positions_result = mt5.positions_get(symbol=resolved_symbol) or []
-            if not positions_result:
-                all_positions = mt5.positions_get() or []
-                normalized_target = _normalize(symbol)
-                positions_result = [pos for pos in all_positions if _normalize(str(getattr(pos, "symbol", ""))) == normalized_target]
-        else:
-            positions_result = mt5.positions_get() or []
-
-        return {
-            "status": "connected",
-            "positions": [
-                {
-                    "ticket": int(getattr(pos, "ticket", 0)),
-                    "symbol": str(getattr(pos, "symbol", "")),
-                    "type": "BUY" if getattr(pos, "type", None) == mt5.POSITION_TYPE_BUY else "SELL",
-                    "volume": float(getattr(pos, "volume", 0) or 0),
-                    "price_open": float(getattr(pos, "price_open", 0) or 0),
-                    "sl": float(getattr(pos, "sl", 0) or 0),
-                    "tp": float(getattr(pos, "tp", 0) or 0),
-                    "profit": float(getattr(pos, "profit", 0) or 0),
-                    "expected_profit": _expected_position_profit(mt5, pos),
-                }
-                for pos in positions_result
-            ],
-        }
+            return {"status": "error", "deals": [], "error": "MT5 initialization failed"}
+        guard_error = _account_guard_error(mt5, requested_mode, expected_broker)
+        if guard_error:
+            return {"status": "error", "deals": [], "error": guard_error}
+        now = datetime.now(timezone.utc)
+        deals = mt5.history_deals_get(now - timedelta(minutes=minutes), now) or []
+        return {"status": "connected", "deals": [_raw(deal) for deal in deals]}
     except Exception as exc:
-        return {"status": "error", "error": str(exc), "positions": []}
+        return {"status": "error", "deals": [], "error": str(exc)}
 
 
 def _expected_position_profit(mt5: Any, position: Any) -> float | None:
@@ -311,9 +551,12 @@ def _expected_position_profit(mt5: Any, position: Any) -> float | None:
     return round(abs(take_profit - entry) / tick_size * tick_value * volume, 2)
 
 
+@_mt5_session_locked
 def close_position(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker = str(request.get("expected_broker") or "").upper() or None
     requested_mode = _mode(request.get("account_mode"))
     symbol = str(request.get("symbol") or "").strip()
+    requested_ticket = request.get("ticket")
 
     def _normalize(value: str) -> str:
         return "".join(char for char in value.upper() if char.isalnum())
@@ -322,6 +565,9 @@ def close_position(request: dict[str, Any]) -> dict[str, Any]:
         mt5 = importlib.import_module("MetaTrader5")
         if not _connect(mt5, requested_mode):
             return {"success": False, "status": "error", "error": "MT5 initialization failed"}
+        guard_error = _account_guard_error(mt5, requested_mode, expected_broker)
+        if guard_error:
+            return {"success": False, "status": "error", "error": guard_error}
 
         positions = []
         if symbol:
@@ -356,7 +602,7 @@ def close_position(request: dict[str, Any]) -> dict[str, Any]:
             "position": int(position.ticket),
             "deviation": 20,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": _choose_filling_mode(mt5, mt5.symbol_info(position.symbol)),
             "comment": "Angelique manual exit"
         }
         result = mt5.order_send(close_request)
@@ -374,6 +620,128 @@ def close_position(request: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "status": "error", "error": str(exc), "message": str(exc)}
 
 
+@_mt5_session_locked
+def modify_position(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker = str(request.get("expected_broker") or "").upper() or None
+    """Move a position's stop loss (and optionally take profit) without
+    closing it. This is how break-even and trailing-stop management
+    actually take effect on the broker side, instead of only being
+    calculated and never applied."""
+    requested_mode = _mode(request.get("account_mode"))
+    symbol = str(request.get("symbol") or "").strip()
+    ticket = request.get("ticket")
+
+    def _normalize(value: str) -> str:
+        return "".join(char for char in value.upper() if char.isalnum())
+
+    try:
+        ticket = int(ticket)
+    except (TypeError, ValueError):
+        return {"success": False, "status": "error", "error": "Position ticket must be an integer."}
+
+    try:
+        mt5 = importlib.import_module("MetaTrader5")
+        if not _connect(mt5, requested_mode):
+            return {"success": False, "status": "error", "error": "MT5 initialization failed"}
+        guard_error = _account_guard_error(mt5, requested_mode, expected_broker)
+        if guard_error:
+            return {"success": False, "status": "error", "error": guard_error}
+
+        positions = mt5.positions_get(ticket=ticket) or []
+        if not positions and symbol:
+            resolved_symbol = _resolve(mt5, symbol) or symbol
+            candidates = mt5.positions_get(symbol=resolved_symbol) or []
+            if not candidates:
+                all_positions = mt5.positions_get() or []
+                normalized_target = _normalize(symbol)
+                candidates = [pos for pos in all_positions if _normalize(str(getattr(pos, "symbol", ""))) == normalized_target]
+            positions = [pos for pos in candidates if int(getattr(pos, "ticket", 0)) == ticket]
+        if not positions:
+            return {"success": False, "status": "error", "error": f"Position ticket {ticket} was not found."}
+
+        position = positions[0]
+        stop_loss = request.get("stop_loss")
+        take_profit = request.get("take_profit")
+        modify_request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": position.symbol,
+            "position": int(position.ticket),
+            "sl": float(stop_loss) if stop_loss is not None else float(getattr(position, "sl", 0) or 0),
+            "tp": float(take_profit) if take_profit is not None else float(getattr(position, "tp", 0) or 0),
+        }
+        result = mt5.order_send(modify_request)
+        raw = _raw(result) if result is not None else {}
+        success = result is not None and getattr(result, "retcode", None) in {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
+        return {
+            "success": success,
+            "status": "modified" if success else "error",
+            "symbol": position.symbol,
+            "ticket": int(position.ticket),
+            "sl": modify_request["sl"],
+            "tp": modify_request["tp"],
+            "message": "Position stop updated." if success else raw.get("comment", "MT5 rejected the stop update."),
+            "error": None if success else raw.get("comment", "MT5 rejected the stop update."),
+        }
+    except Exception as exc:
+        return {"success": False, "status": "error", "error": str(exc), "message": str(exc)}
+
+
+def _close_single_position(mt5: Any, position: Any) -> dict[str, Any]:
+    closing_type = mt5.ORDER_TYPE_SELL if position.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+    close_request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": position.symbol,
+        "volume": float(position.volume),
+        "type": closing_type,
+        "position": int(position.ticket),
+        "deviation": 20,
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": _choose_filling_mode(mt5, mt5.symbol_info(str(getattr(position, "symbol", "")))),
+        "comment": "Angelique emergency exit",
+    }
+    result = mt5.order_send(close_request)
+    raw = _raw(result) if result is not None else {}
+    success = result is not None and getattr(result, "retcode", None) in {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
+    return {
+        "success": success,
+        "symbol": position.symbol,
+        "ticket": int(position.ticket),
+        "error": None if success else raw.get("comment", "MT5 rejected the exit."),
+    }
+
+
+@_mt5_session_locked
+def close_all_positions(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker = str(request.get("expected_broker") or "").upper() or None
+    """Flatten every open position on the account. Used by the daily-loss
+    kill switch and by manual 'stop trading now' requests. Best-effort:
+    keeps closing remaining positions even if one fails, and reports
+    every individual result so nothing fails silently."""
+    requested_mode = _mode(request.get("account_mode"))
+    try:
+        mt5 = importlib.import_module("MetaTrader5")
+        if not _connect(mt5, requested_mode):
+            return {"success": False, "status": "error", "error": "MT5 initialization failed", "closed": [], "failed": []}
+        guard_error = _account_guard_error(mt5, requested_mode, expected_broker)
+        if guard_error:
+            return {"success": False, "status": "error", "error": guard_error, "closed": [], "failed": []}
+        open_positions = mt5.positions_get() or []
+        if not open_positions:
+            return {"success": True, "status": "no_positions", "closed": [], "failed": []}
+        closed, failed = [], []
+        for position in open_positions:
+            outcome = _close_single_position(mt5, position)
+            (closed if outcome["success"] else failed).append(outcome)
+        return {
+            "success": not failed,
+            "status": "flattened" if not failed else "partial",
+            "closed": closed,
+            "failed": failed,
+        }
+    except Exception as exc:
+        return {"success": False, "status": "error", "error": str(exc), "closed": [], "failed": []}
+
+
 async def handle(websocket, path=None):
     async for message in websocket:
         payload = json.loads(message)
@@ -387,6 +755,9 @@ async def handle(websocket, path=None):
                 "get_rates": "market",
                 "place_order": "execute",
                 "get_positions": "positions",
+                "close_all_positions": "close_all_positions",
+                "modify_position": "modify_position",
+                "recent_deals": "recent_deals",
             }.get(payload.get("action"))
         if operation == "ping":
             await websocket.send(json.dumps({"status": "pong"}))
@@ -403,6 +774,12 @@ async def handle(websocket, path=None):
             result = positions(payload)
         elif operation == "close_position":
             result = close_position(payload)
+        elif operation == "modify_position":
+            result = modify_position(payload)
+        elif operation == "close_all_positions":
+            result = close_all_positions(payload)
+        elif operation == "recent_deals":
+            result = recent_deals(payload)
         else:
             result = {"status": "error", "error": f"Unknown operation: {operation}"}
         await websocket.send(json.dumps(result))

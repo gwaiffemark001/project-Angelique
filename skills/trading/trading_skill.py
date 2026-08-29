@@ -7,8 +7,8 @@ from typing import Any, Callable
 from skills.trading_skill.models import TradePlan, WorkflowState
 from skills.trading_skill.workflow import TradingWorkflow
 from skills.trading_skill.symbols import resolve
-from skills.trading.market.fresh_market import market
-from skills.trading.engine.account import get_account_summary
+from skills.trading.market.fresh_market import market as _market_module
+from skills.trading.engine.account import get_account_summary as _get_account_summary
 from skills.trading.engine.mt5_bridge import execute as _legacy_execute
 
 
@@ -17,18 +17,33 @@ class LegacyTradingAdapter:
         self._account_func_getter = account_func_getter
         self._market_getter = market_getter
 
-    def account(self, mode: str) -> dict[str, Any]:
+    def account(self, mode: str, symbol: str | None = None) -> dict[str, Any]:
         account_func = self._account_func_getter()
-        return (account_func(mode) if account_func else {}) or {}
+        if callable(account_func):
+            try:
+                return (account_func(mode) if account_func else {}) or {}
+            except TypeError:
+                return (account_func() if account_func else {}) or {}
+        return {}
 
-    def symbols(self, mode: str) -> list[str]:
-        return ["EURUSD", "EURUSDm", "GBPUSD", "USDJPY", "XAUUSD", "AUDUSD", "NZDUSD", "USDCHF"]
+    def symbols(self, mode: str, symbol: str | None = None) -> list[str]:
+        return ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD", "XAUUSD", "AUDCAD", "XAGUSD", "BTCUSD", "ETHUSD", "EURGBP", "EURJPY", "GBPJPY"]
 
     def market(self, symbol: str, timeframes: tuple[str, ...], mode: str, count: int) -> dict[str, Any]:
         timeframes_data: dict[str, list[dict[str, Any]]] = {}
         market_module = self._market_getter()
         for timeframe in timeframes:
-            market_data = (market_module.get_candles_and_indicators(symbol, timeframe, account_mode=mode) if market_module else {}) or {}
+            if not market_module:
+                market_data = {}
+            else:
+                try:
+                    market_data = market_module.get_candles_and_indicators(
+                        symbol, timeframe, account_mode=mode, count=count
+                    ) or {}
+                except TypeError:
+                    market_data = market_module.get_candles_and_indicators(
+                        symbol, timeframe, account_mode=mode
+                    ) or {}
             candles = market_data.get("candles") or []
             timeframes_data[timeframe] = candles
 
@@ -55,7 +70,7 @@ class LegacyTradingAdapter:
         return _legacy_execute(wrapped)
 
 
-_ADAPTER = LegacyTradingAdapter(lambda: get_account_summary, lambda: market)
+_ADAPTER = LegacyTradingAdapter(lambda: _get_account_summary, lambda: _market_module)
 _LEGACY_WORKFLOW = TradingWorkflow(_ADAPTER)
 
 
@@ -72,8 +87,8 @@ def _build_analysis(result: dict[str, Any], plan: TradePlan | None) -> dict[str,
     return analysis
 
 
-def create_trade_plan(symbol, timeframe="H1", risk_percent=1.0, entry_price=None, account_mode="demo"):
-    result = _LEGACY_WORKFLOW.prepare(symbol, account_mode)
+def create_trade_plan(symbol, timeframe="H1", risk_percent=None, entry_price=None, account_mode="demo"):
+    result = _LEGACY_WORKFLOW.prepare(symbol, account_mode, risk_percent=risk_percent)
     plan = result.plan
     if plan is None:
         return {
@@ -101,7 +116,7 @@ def create_trade_plan(symbol, timeframe="H1", risk_percent=1.0, entry_price=None
     return payload
 
 
-def analyze_and_recommend(symbol, timeframe="H1", risk_percent=1.0, entry_price=None, auto_execute=False, account_mode="demo"):
+def analyze_and_recommend(symbol, timeframe="H1", risk_percent=None, entry_price=None, auto_execute=False, account_mode="demo"):
     result = create_trade_plan(symbol, timeframe, risk_percent, entry_price, account_mode)
     if auto_execute:
         return "AUTO-TRADE BLOCKED: exact approval is required before execution."
@@ -128,9 +143,11 @@ def execute_approved_trade(plan, confirmation):
     }
 
 
-def get_account_summary(account_mode='demo'):
+def get_account_summary(account_mode="demo"):
+    """Backward-compatible facade without recursive self-shadowing."""
     return _get_account_summary(account_mode)
 
 
 def market(symbol, timeframe="H1", account_mode="demo"):
-    return _market.get_candles_and_indicators(symbol, timeframe=timeframe, account_mode=account_mode)
+    """Backward-compatible facade without recursive self-shadowing."""
+    return _market_module.get_candles_and_indicators(symbol, timeframe=timeframe, account_mode=account_mode)

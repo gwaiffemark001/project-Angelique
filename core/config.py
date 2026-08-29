@@ -21,6 +21,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- LLM Configuration ---
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_REQUEST_TIMEOUT_S = float(os.getenv("OLLAMA_REQUEST_TIMEOUT_S", "8"))
 PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "qwen2.5:3b")
 CODER_MODEL = os.getenv("CODER_MODEL", "qwen2.5-coder:7b")
 LOCAL_FALLBACK_MODEL = os.getenv("LOCAL_FALLBACK_MODEL", "qwen2.5:3b")
@@ -35,31 +36,41 @@ NVIDIA_API_URL = os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v
 API_PRIORITY = os.getenv("API_PRIORITY", "openrouter,nvidia,bluesminds,gemini,ollama").split(",")
 FOREX_FACTORY_URLS = [s.strip() for s in os.getenv("FOREX_FACTORY_URLS", "https://www.forexfactory.com/ffcal/calendar.php,https://www.forexfactory.com/calendar/").split(",") if s.strip()]
 FOREX_FACTORY_BASE_URL = os.getenv("FOREX_FACTORY_BASE_URL", "https://www.forexfactory.com")
-WHATSAPP_WEB_URL = os.getenv("WHATSAPP_WEB_URL", "https://web.whatsapp.com")
 WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "")
 WHATSAPP_API_TOKEN = os.getenv("WHATSAPP_API_TOKEN", "")
+WHATSAPP_PROVIDER = os.getenv("WHATSAPP_PROVIDER", "meta")
+WHATSAPP_GRAPH_VERSION = os.getenv("WHATSAPP_GRAPH_VERSION", "v23.0")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_CONTACTS_FILE = Path(os.getenv("WHATSAPP_CONTACTS_FILE", str(PROJECT_ROOT / "skills" / "messaging" / "contacts.csv")))
+if not WHATSAPP_CONTACTS_FILE.is_absolute(): WHATSAPP_CONTACTS_FILE = (PROJECT_ROOT / WHATSAPP_CONTACTS_FILE).resolve()
 # By default do not use Playwright automation unless explicitly enabled
-WHATSAPP_USE_PLAYWRIGHT = os.getenv("WHATSAPP_USE_PLAYWRIGHT", "false").lower() in ("1", "true", "yes")
 
 # --- MT5 Bridge / Trading Configuration ---
 MT5_BRIDGE_HOST_ENV = os.getenv("ANGELIQUE_MT5_BRIDGE_HOST_ENV", "ANGELIQUE_MT5_BRIDGE_HOST")
 MT5_BRIDGE_PORT_ENV = os.getenv("ANGELIQUE_MT5_BRIDGE_PORT_ENV", "ANGELIQUE_MT5_BRIDGE_PORT")
 MT5_BRIDGE_FD_ENV = os.getenv("ANGELIQUE_MT5_BRIDGE_FD_ENV", "ANGELIQUE_MT5_BRIDGE_FD")
 MT5_BRIDGE_HOST = os.getenv(MT5_BRIDGE_HOST_ENV, "127.0.0.1")
-MT5_BRIDGE_PORT = int(os.getenv(MT5_BRIDGE_PORT_ENV, "10001"))
-MT5_BRIDGE_RESERVED_PORTS = [int(p.strip()) for p in os.getenv("ANGELIQUE_MT5_BRIDGE_RESERVED_PORTS", "10001,10002").split(",") if p.strip().isdigit()]
+MT5_BRIDGE_PORT = int(os.getenv(MT5_BRIDGE_PORT_ENV, "10011"))
+MT5_BRIDGE_RESERVED_PORTS = [int(p.strip()) for p in os.getenv("ANGELIQUE_MT5_BRIDGE_RESERVED_PORTS", "10011").split(",") if p.strip().isdigit()]
+TRADING_VALETAX_BRIDGE_PORT = int(os.getenv("ANGELIQUE_VALETAX_BRIDGE_PORT", "10011"))
 MT5_BRIDGE_LAUNCHER = os.getenv("ANGELIQUE_MT5_BRIDGE_LAUNCHER", "wine cmd /c python")
+MT5_WINE_PREFIX = os.getenv("ANGELIQUE_MT5_WINE_PREFIX", "")
 MT5_BRIDGE_CONNECT_TIMEOUT = float(os.getenv("ANGELIQUE_MT5_CONNECT_TIMEOUT", "10.0"))
 MT5_BRIDGE_RECONNECT_INTERVAL = float(os.getenv("ANGELIQUE_MT5_RECONNECT_INTERVAL", "1.0"))
 MT5_BRIDGE_HEALTH_CHECK_INTERVAL = float(os.getenv("ANGELIQUE_MT5_HEALTH_CHECK_INTERVAL", "5.0"))
 
 TRADING_MIN_FREE_MARGIN = float(os.getenv("ANGELIQUE_TRADING_MIN_FREE_MARGIN", "0.0"))
 TRADING_MIN_FREE_MARGIN_PERCENT = float(os.getenv("TRADING_MIN_FREE_MARGIN_PERCENT", "10.0"))
-TRADING_DEFAULT_RISK_PERCENT = float(os.getenv(
-    "TRADING_DEFAULT_RISK_PERCENT",
-    os.getenv("ANGELIQUE_TRADING_DEFAULT_RISK_PERCENT", "0.5"),
-))
-TRADING_MAX_RISK_PERCENT = float(os.getenv("TRADING_MAX_RISK_PERCENT", "1.0"))
+# Account-equity risk policy:
+#   equity < $50  -> 0.50% per trade
+#   equity >= $50 -> 1.00% per trade
+# The 1.00% ceiling is hard and cannot be raised by environment configuration.
+TRADING_RISK_TIER_THRESHOLD_EQUITY = float(os.getenv("TRADING_RISK_TIER_THRESHOLD_EQUITY", "50.0"))
+TRADING_LOW_ACCOUNT_RISK_PERCENT = float(os.getenv("TRADING_LOW_ACCOUNT_RISK_PERCENT", "0.5"))
+TRADING_HIGH_ACCOUNT_RISK_PERCENT = float(os.getenv("TRADING_HIGH_ACCOUNT_RISK_PERCENT", "1.0"))
+TRADING_DEFAULT_RISK_PERCENT = TRADING_HIGH_ACCOUNT_RISK_PERCENT
+TRADING_MAX_RISK_PERCENT = 1.0
 TRADING_DAILY_LOSS_LIMIT_PERCENT = float(os.getenv("TRADING_DAILY_LOSS_LIMIT_PERCENT", "2.0"))
 TRADING_WEEKLY_LOSS_LIMIT_PERCENT = float(os.getenv("TRADING_WEEKLY_LOSS_LIMIT_PERCENT", "5.0"))
 TRADING_MIN_RR = float(os.getenv("TRADING_MIN_RR", "2.5"))
@@ -68,6 +79,10 @@ TRADING_MAX_SIMULTANEOUS_TRADES = int(os.getenv("TRADING_MAX_SIMULTANEOUS_TRADES
 TRADING_MINIMUM_LOT_PROTECTION = os.getenv("TRADING_MINIMUM_LOT_PROTECTION", "true").lower() in ("1", "true", "yes")
 TRADING_MARGIN_PROTECTION = os.getenv("TRADING_MARGIN_PROTECTION", "true").lower() in ("1", "true", "yes")
 TRADING_MARTINGALE_ENABLED = os.getenv("TRADING_MARTINGALE_ENABLED", "false").lower() in ("1", "true", "yes")
+TRADING_MAX_DRAWDOWN_PERCENT = float(os.getenv("TRADING_MAX_DRAWDOWN_PERCENT", "8.0"))
+TRADING_MAX_CONSECUTIVE_LOSSES = int(os.getenv("TRADING_MAX_CONSECUTIVE_LOSSES", "3"))
+TRADING_AUTO_EXECUTION = os.getenv("TRADING_AUTO_EXECUTION", "false").lower() in ("1", "true", "yes")
+TRADING_LIVE_AUTO_EXECUTION = os.getenv("TRADING_LIVE_AUTO_EXECUTION", "false").lower() in ("1", "true", "yes")
 TRADING_SWING_EXPECTED_HOLD_DAYS = int(os.getenv("TRADING_SWING_EXPECTED_HOLD_DAYS", "7"))
 TRADING_SWING_ALLOW_WEEKEND_HOLDING = os.getenv("TRADING_SWING_ALLOW_WEEKEND_HOLDING", "true").lower() in ("1", "true", "yes")
 TRADING_MIN_RR_RATIO = float(os.getenv("ANGELIQUE_TRADING_MIN_RR_RATIO", "2.0"))
@@ -131,20 +146,23 @@ WOLFRAM_APPID = os.getenv("WOLFRAM_APPID", "")
 HUGGINGFACE_LOCAL = os.getenv("HUGGINGFACE_LOCAL", "true").lower() in ("1", "true", "yes")
 
 # WhatsApp: prefer server-side API if configured, otherwise use local libraries/browser
-WHATSAPP_FALLBACKS = os.getenv("WHATSAPP_FALLBACKS", "pywhatkit,browser").split(",")
+WHATSAPP_FALLBACKS = []  # browser/desktop fallbacks are deliberately disabled
 
 # TTS preference: 'edge' | 'elevenlabs' | 'local'
 ANGELIQUE_TTS_PREFERENCE = os.getenv("ANGELIQUE_TTS_PREFERENCE", os.getenv("ANGELIQUE_TTS_PROVIDER", "edge"))
+ANGELIQUE_UI_WORKERS = int(os.getenv("ANGELIQUE_UI_WORKERS", "8"))
+ANGELIQUE_UI_POLL_MS = int(os.getenv("ANGELIQUE_UI_POLL_MS", "80"))
 
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-coder-32b-instruct")
 BLUESMINDS_MODEL = os.getenv("BLUESMINDS_MODEL", "meta/llama-3.1-8b-instruct")
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-70b-instruct")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
-OLLAMA_MODEL_CANDIDATES = [s.strip() for s in os.getenv(
-    "OLLAMA_MODEL_CANDIDATES",
-    f"{LOCAL_FALLBACK_MODEL},{PRIMARY_MODEL},{CODER_MODEL},qwen2.5:3b,llama3.1",
-).split(",") if s.strip()]
+_OLLAMA_CONFIGURED_MODELS = os.getenv("OLLAMA_MODEL_CANDIDATES", "").strip()
+_OLLAMA_DEFAULT_MODELS = f"{LOCAL_FALLBACK_MODEL},{PRIMARY_MODEL},{CODER_MODEL},qwen2.5:3b,llama3.1"
+OLLAMA_MODEL_CANDIDATES = [
+    s.strip() for s in (_OLLAMA_CONFIGURED_MODELS or _OLLAMA_DEFAULT_MODELS).split(",") if s.strip()
+]
 API_DEFAULT_REFERER = os.getenv("API_DEFAULT_REFERER", "http://localhost")
 API_CLIENT_TITLE = os.getenv("API_CLIENT_TITLE", "Angelique AI")
 ANGELIQUE_DEFAULT_MODE_ENV = os.getenv("ANGELIQUE_DEFAULT_MODE_ENV", "ANGELIQUE_DEFAULT_MODE")

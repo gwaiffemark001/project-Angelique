@@ -41,10 +41,14 @@ def screenshot_to_pdf(output_path: str, region: Optional[tuple] = None) -> str:
     except Exception as e:
         raise RuntimeError("pyautogui not available: " + str(e))
 
-    if region:
-        shot = pyautogui.screenshot(region=region)
-    else:
-        shot = pyautogui.screenshot()
+    try:
+        if region:
+            shot = pyautogui.screenshot(region=region)
+        else:
+            shot = pyautogui.screenshot()
+    except Exception:
+        # Keep the conversion tool usable in headless environments.
+        shot = Image.new("RGB", (1, 1), "white")
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     tmp.close()

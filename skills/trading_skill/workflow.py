@@ -1,21 +1,22 @@
 from __future__ import annotations
 
-from __future__ import annotations
-
-from dataclasses import replace
+from threading import RLock
 from datetime import datetime, timezone
 from typing import Any
 from .account import account_snapshot, normalize_mode
 from .account_manager import account_manager
 from .analysis import analyze_structure
+from .data_quality import assess_candles
 from .event_logging import log_event
 from .models import MarketSnapshot, TradePlan, WorkflowResult, WorkflowState
-from .profiles import TradingMode, get_trading_profile, normalize_trading_mode
+from .smc import ZoneRegistry
+from .profiles import TradingMode, get_trading_profile, max_spread_for_symbol, max_spread_points_for_symbol, normalize_trading_mode
 from core import config
-from .risk import build_risk, validate_profile_limits
+from .risk import build_risk, validate_profile_limits, effective_risk_percent
 from .safety import validate_trade_setup
 from .news_context import assess_news
 from .symbols import resolve
+from core.price_units import normalize_spread
 
 
 class TradingWorkflow:
@@ -25,18 +26,18 @@ class TradingWorkflow:
         self.adapter = adapter
         self.trading_mode = normalize_trading_mode(trading_mode)
         self.profile = get_trading_profile(self.trading_mode)
-        if trading_mode is None:
-            self.profile = replace(self.profile, minimum_score=6)
         self.risk_percent = self.profile.risk_per_trade if risk_percent is None else risk_percent
         self.minimum_rr = self.profile.minimum_rr if minimum_rr is None else minimum_rr
         self._plans: dict[str, TradePlan] = {}
         self._active_plans: dict[str, TradePlan] = {}
+        self._execution_lock = RLock()
+        self._zone_registry = ZoneRegistry()
 
     def _is_expired(self, plan: TradePlan) -> bool:
         try:
             return datetime.fromisoformat(plan.expires_at) <= datetime.now(timezone.utc)
         except Exception:
-            return False
+            return True
 
     def _build_plan_id(self, symbol: str, direction: str) -> str:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -59,7 +60,7 @@ class TradingWorkflow:
         plan_profile = get_trading_profile(plan.trading_mode)
 
         fresh_news = assess_news(plan.mt5_symbol, plan.direction)
-        if fresh_news.get("high_impact_imminent") or fresh_news.get("directional_conflict"):
+        if (fresh_news.get("high_impact_imminent") or fresh_news.get("directional_conflict")) and not plan.requires_manual_approval:
             return False, f"News risk changed before execution: {fresh_news.get('reason', 'material news risk detected.')}"
 
         raw_account = self.adapter.account(plan.account_mode)
@@ -81,29 +82,38 @@ class TradingWorkflow:
                 raw_account,
                 list(positions_response.get("positions", []) or []),
                 plan_profile,
+                new_risk_percent=plan.risk_percent,
             )
             if not portfolio["valid"]:
                 return False, f"Portfolio limit failed during revalidation: {'; '.join(portfolio['reasons'])}"
 
-        required_timeframes = plan_profile.required_timeframes
-        raw_market = self.adapter.market(plan.mt5_symbol, required_timeframes, plan.account_mode, 100)
+        required_timeframes = plan_profile.analysis_required_timeframes
+        revalidation_count = max(plan_profile.candle_count(timeframe) for timeframe in required_timeframes)
+        raw_market = self.adapter.market(plan.mt5_symbol, required_timeframes, plan.account_mode, revalidation_count)
         specs = raw_market.get("symbol_specs", {}) or {}
         tick_size = specs.get("tick_size")
         tick_value = specs.get("tick_value")
         spread_raw = raw_market.get("spread")
         spread_pips = None
+        spread_points = None
+        spread_price = float(spread_raw) if spread_raw is not None else None
+        spread_unit = None
         try:
-            if spread_raw is not None and tick_size:
-                raw = float(spread_raw)
-                ts = float(tick_size)
-                pip_unit = 0.0001 if ts <= 0.0001 else 0.01 if ts >= 0.01 else 0.0001
-                spread_pips = raw / pip_unit
+            if spread_raw is not None:
+                normalized = normalize_spread(plan.mt5_symbol, float(spread_raw), specs)
+                spread_pips = normalized.get("spread_pips")
+                spread_points = normalized.get("spread_points")
+                spread_price = normalized.get("spread_price")
+                spread_unit = normalized.get("spread_unit")
         except Exception:
-            spread_pips = None
+            spread_pips = spread_points = None
 
-        market = MarketSnapshot(plan.requested_symbol, plan.mt5_symbol, raw_market.get("timeframes", {}), raw_market.get("bid"), raw_market.get("ask"), spread_raw, tick_size, tick_value, spread_pips, bool(raw_market.get("stale")), raw_market.get("error"))
+
+        market = MarketSnapshot(plan.requested_symbol, plan.mt5_symbol, raw_market.get("timeframes", {}), raw_market.get("bid"), raw_market.get("ask"), spread_raw, tick_size, tick_value, spread_pips, bool(raw_market.get("stale")), raw_market.get("error"), spread_points=spread_points, spread_price=spread_price, spread_unit=spread_unit)
         if market.error or market.stale or any(not market.timeframes.get(tf) for tf in required_timeframes):
             return False, "Market data unavailable or stale during revalidation."
+        if any(assess_candles(market.timeframes.get(tf, []), tf)["status"] == "stale" for tf in required_timeframes):
+            return False, "Required candle data is stale during revalidation."
 
         if market.bid is None or market.ask is None:
             return False, "Fresh bid/ask data unavailable during revalidation."
@@ -113,6 +123,17 @@ class TradingWorkflow:
         acceptable_slippage = max(plan.entry * 0.0005, 0.0005)
         if slippage > acceptable_slippage:
             return False, f"Price moved too far from the approved entry ({current_price:.6f} vs {plan.entry:.6f})."
+
+        fresh_analysis = analyze_structure(market.timeframes, profile=plan_profile, registry=self._zone_registry)
+        expected_decision = "BUY_PLAN_READY" if plan.direction == "BUY" else "SELL_PLAN_READY"
+        if not fresh_analysis.get("valid"):
+            return False, "Technical setup changed before execution; the approved plan is stale."
+        fresh_score = float((fresh_analysis.get("confluence") or {}).get("score", 0) or 0)
+        fresh_minimum = int(plan_profile.minimum_score)
+        if fresh_score < fresh_minimum:
+            return False, f"Fresh confluence score {fresh_score:.0f}/10 is below the required {fresh_minimum}/10."
+        if fresh_analysis.get("decision") != expected_decision:
+            return False, "Technical setup changed before execution; the approved plan is stale."
 
         try:
             risk = build_risk(
@@ -130,6 +151,7 @@ class TradingWorkflow:
             return False, f"Risk revalidation failed: {exc}"
 
         safety = validate_trade_setup(
+            symbol=plan.mt5_symbol,
             direction=plan.direction,
             entry=plan.entry,
             stop_loss=plan.stop_loss,
@@ -140,11 +162,13 @@ class TradingWorkflow:
             margin_required=risk["margin_required"],
             free_margin_after=risk["free_margin_after"],
             minimum_free_margin=risk["minimum_free_margin"],
-            current_margin_level=fresh_account.margin_level,
+            projected_margin_level=risk["projected_margin_level"],
             spread=market.spread,
             spread_pips=market.spread_pips,
+            spread_points=market.spread_points,
             minimum_rr=plan_profile.minimum_rr,
-            maximum_spread_pips=plan_profile.max_spread_pips,
+            maximum_spread_pips=max_spread_for_symbol(plan.mt5_symbol, plan_profile.mode),
+            maximum_spread_points=max_spread_points_for_symbol(plan.mt5_symbol, plan_profile.mode),
         )
         if not safety["valid"]:
             return False, f"Revalidation safety failed: {'; '.join(safety['reasons'])}"
@@ -153,16 +177,31 @@ class TradingWorkflow:
             return False, "Calculated volume changed during revalidation."
         return True, "Revalidation passed."
 
-    def prepare(self, requested_symbol: str, account_mode: str = "demo", count: int = 200) -> WorkflowResult:
+    def prepare(self, requested_symbol: str, account_mode: str = "demo", count: int | None = None, risk_percent: float | None = None) -> WorkflowResult:
         mode = normalize_mode(account_mode)
-        raw_account = self.adapter.account(mode)
+        try:
+            raw_account = self.adapter.account(mode, symbol=requested_symbol)
+        except TypeError:
+            raw_account = self.adapter.account(mode)
         account = account_snapshot(raw_account, mode)
+        try:
+            effective_risk = effective_risk_percent(
+                account.equity,
+                self.risk_percent if risk_percent is None else risk_percent,
+            )
+        except ValueError as exc:
+            return WorkflowResult(
+                WorkflowState.REJECTED,
+                f"REJECTED: risk policy could not be determined: {exc}",
+                decision_state="REJECTED",
+                account=account,
+            )
         if not account.connected:
-            return WorkflowResult(WorkflowState.NO_SETUP, "NO_SETUP: the selected MT5 account is not connected.", account=account)
+            return WorkflowResult(WorkflowState.NO_SETUP, "NO_SETUP: the selected MT5 account is not connected.", decision_state="NO_SETUP", account=account)
         authorized, authorization_message, _ = account_manager.validate_authorization(mode)
         if not authorized:
             log_event(30, "workflow.authorization_rejected", requested_mode=account_mode, resolved_mode=mode, message=authorization_message)
-            return WorkflowResult(WorkflowState.NO_SETUP, f"NO_SETUP: {authorization_message}", account=account, details={"authorization": authorization_message})
+            return WorkflowResult(WorkflowState.NO_SETUP, f"NO_SETUP: authorization failed: {authorization_message}", decision_state="NO_SETUP", account=account, details={"authorization": authorization_message})
 
         positions_response: dict[str, Any] = {"positions": []}
         positions_reader = getattr(self.adapter, "positions", None)
@@ -177,10 +216,20 @@ class TradingWorkflow:
                     account=account,
                     details={"portfolio_limits": {"valid": False, "reasons": ["Position snapshot unavailable."]}},
                 )
+        try:
+            available = self.adapter.symbols(mode, requested_symbol)
+        except TypeError:
+            available = self.adapter.symbols(mode)
+        mt5_symbol = resolve(requested_symbol, available)
+        if not mt5_symbol:
+            return WorkflowResult(WorkflowState.NO_SETUP, "NO_SETUP: the requested symbol is not available in MT5.", account=account, details={"available_symbols": available})
+
         portfolio = validate_profile_limits(
             raw_account,
             list(positions_response.get("positions", []) or []),
             self.profile,
+            new_risk_percent=effective_risk,
+            symbol=mt5_symbol,
         )
         if not portfolio["valid"]:
             return WorkflowResult(
@@ -189,11 +238,6 @@ class TradingWorkflow:
                 account=account,
                 details={"portfolio_limits": portfolio},
             )
-
-        available = self.adapter.symbols(mode)
-        mt5_symbol = resolve(requested_symbol, available)
-        if not mt5_symbol:
-            return WorkflowResult(WorkflowState.NO_SETUP, "NO_SETUP: the requested symbol is not available in MT5.", account=account, details={"available_symbols": available})
 
         active_key = f"{mt5_symbol}:{mode}"
         existing_plan = self._active_plans.get(active_key)
@@ -209,8 +253,9 @@ class TradingWorkflow:
                     account=account,
                 )
 
-        required_timeframes = self.profile.required_timeframes
-        raw_market = self.adapter.market(mt5_symbol, required_timeframes, mode, count)
+        required_timeframes = self.profile.analysis_required_timeframes
+        request_count = count if count is not None else max(self.profile.candle_count(timeframe) for timeframe in required_timeframes)
+        raw_market = self.adapter.market(mt5_symbol, required_timeframes, mode, request_count)
         # Extract tick specs when provided by the bridge so we can normalize
         # spread into pips (symbol-dependent). The bridge returns 'symbol_specs'
         # with 'tick_size' and 'tick_value' where available.
@@ -219,39 +264,60 @@ class TradingWorkflow:
         tick_value = specs.get("tick_value")
         spread_raw = raw_market.get("spread")
         spread_pips = None
+        spread_points = None
+        spread_price = float(spread_raw) if spread_raw is not None else None
+        spread_unit = None
         try:
-            if spread_raw is not None and tick_size:
-                # pips = (ask - bid) / tick_size * (tick_size / pip_unit)
-                # For most brokers pip unit is 0.0001 for 5-digit pairs and
-                # 0.01 for JPY-like pairs. We compute pips as raw / tick_size
-                # multiplied by a standard pip size derived from tick_size.
-                raw = float(spread_raw)
-                ts = float(tick_size)
-                # Determine pip unit: if tick_size < 0.001 use 0.0001, else 0.01
-                pip_unit = 0.0001 if ts <= 0.0001 else 0.01 if ts >= 0.01 else 0.0001
-                spread_pips = raw / pip_unit
+            if spread_raw is not None:
+                normalized = normalize_spread(mt5_symbol, float(spread_raw), specs)
+                spread_pips = normalized.get("spread_pips")
+                spread_points = normalized.get("spread_points")
+                spread_price = normalized.get("spread_price")
+                spread_unit = normalized.get("spread_unit")
         except Exception:
-            spread_pips = None
+            spread_pips = spread_points = None
+
 
         market = MarketSnapshot(
-            requested_symbol,
-            mt5_symbol,
-            raw_market.get("timeframes", {}),
-            raw_market.get("bid"),
-            raw_market.get("ask"),
-            spread_raw,
-            tick_size,
-            tick_value,
-            spread_pips,
-            bool(raw_market.get("stale")),
-            raw_market.get("error"),
+            requested_symbol, mt5_symbol, raw_market.get("timeframes", {}),
+            raw_market.get("bid"), raw_market.get("ask"), spread_raw,
+            tick_size, tick_value, spread_pips, bool(raw_market.get("stale")),
+            raw_market.get("error"), spread_points=spread_points,
+            spread_price=spread_price, spread_unit=spread_unit,
         )
-        if market.error or market.stale or any(not market.timeframes.get(tf) for tf in required_timeframes):
-            return WorkflowResult(WorkflowState.NO_SETUP, "NO_SETUP: MT5 market data is missing or stale.", account=account, market=market)
+        quality = {tf: assess_candles(market.timeframes.get(tf, []), tf) for tf in required_timeframes}
+        missing_data = [tf for tf, result in quality.items() if result["status"] != "fresh"]
+        missing_specs = [name for name, value in {
+            "tick_size": tick_size,
+            "tick_value": tick_value,
+            "volume_min": specs.get("volume_min"),
+            "volume_step": specs.get("volume_step"),
+        }.items() if value in (None, 0, "")]
+        missing_market = [name for name, value in {"bid": market.bid, "ask": market.ask, "spread": market.spread}.items() if value is None]
+        missing_specs.extend(name for name, value in {"point": specs.get("point"), "digits": specs.get("digits")}.items() if value in (None, 0, ""))
+        if market.error or market.stale or missing_data or missing_specs or missing_market or (spread_pips is None and spread_points is None):
+            blockers = {
+                "candles": {tf: quality[tf] for tf in missing_data},
+                "symbol_specs": missing_specs,
+                "market": missing_market,
+                "spread": ["normalized_spread"] if (spread_pips is None and spread_points is None) else [],
+            }
+            return WorkflowResult(WorkflowState.BLOCKED_BY_DATA, "BLOCKED_BY_DATA: required broker data is missing, invalid, or stale.", decision_state="BLOCKED_BY_DATA", account=account, market=market, details={"data_blockers": blockers})
 
-        analysis = analyze_structure(market.timeframes, profile=self.profile)
+        analysis = analyze_structure(market.timeframes, profile=self.profile, registry=self._zone_registry)
         if not analysis["valid"]:
-            return WorkflowResult(WorkflowState.REJECTED, f"REJECTED: {analysis['reason']}", account=account, market=market, details={"analysis": analysis})
+            return WorkflowResult(WorkflowState.NO_SETUP, f"NO_SETUP: {analysis['reason']}", decision_state="NO_SETUP", account=account, market=market, details={"analysis": analysis})
+        if analysis.get("decision") != ("BUY_PLAN_READY" if analysis.get("direction") == "BUY" else "SELL_PLAN_READY"):
+            decision = analysis.get("decision", "NO_SETUP")
+            state = WorkflowState.WAITING if decision == "WAIT" else WorkflowState.NO_SETUP
+            return WorkflowResult(
+                state,
+                f"{decision}: {analysis.get('reason', 'SMC sequence is incomplete.')}",
+                decision_state=decision,
+                account=account,
+                market=market,
+                details={"analysis": analysis, "decision": decision, "audit": analysis.get("setup_assessment", {})},
+            )
 
         news_context = assess_news(mt5_symbol, analysis["direction"])
         analysis = {**analysis, "news_context": news_context}
@@ -265,14 +331,33 @@ class TradingWorkflow:
             "news_reason": news_context.get("reason", ""),
             "ready": adjusted_score >= self.profile.minimum_score,
         }
-        if adjusted_score < self.profile.minimum_score:
+        score_passed = adjusted_score >= self.profile.minimum_score
+        analysis["confluence"] = {**analysis["confluence"], "score_passed": score_passed, "minimum_score": self.profile.minimum_score}
+        if not score_passed:
             return WorkflowResult(
-                WorkflowState.REJECTED,
-                f"REJECTED: SMC/indicator score {base_score}/10 adjusted to {adjusted_score}/10 by news risk.",
+                WorkflowState.WAIT,
+                f"WAIT: confluence score {adjusted_score:.0f}/10 is below the required {self.profile.minimum_score}/10.",
+                decision_state="WAIT",
                 account=account,
                 market=market,
-                details={"analysis": analysis, "news_context": news_context},
+                details={
+                    "analysis": analysis,
+                    "failure_stage": "confluence_score",
+                    "score": adjusted_score,
+                    "minimum_score": self.profile.minimum_score,
+                    "score_passed": False,
+                },
             )
+
+        # A high-impact calendar release is imminent, or scraped headline
+        # bias conflicts with the SMC direction: don't block the plan
+        # outright, hold it for explicit approval instead. Every other
+        # gate below (structure, risk, margin, spread, RR, portfolio
+        # limits) still applies in full; this only changes whether the
+        # finished plan is allowed to auto-execute at the bottom of this
+        # method.
+        manual_hold = bool(news_context.get("high_impact_imminent") or news_context.get("directional_conflict"))
+        manual_hold_reason = news_context.get("reason", "") if manual_hold else ""
 
         latest = market.timeframes[self.profile.entry_timeframe][-1]
         entry = float(market.ask if analysis["direction"] == "BUY" and market.ask else market.bid if analysis["direction"] == "SELL" and market.bid else latest["close"])
@@ -281,14 +366,24 @@ class TradingWorkflow:
         highs = [float(c["high"]) for c in setup_candles]
         tick_size = float(specs.get("tick_size", 0) or 0)
         structural_buffer = tick_size * 2 if tick_size > 0 else 0.0
+        selected_zone = analysis.get("setup_assessment", {}).get("zone")
+        if not isinstance(selected_zone, dict):
+            selected_zone = ((analysis.get("strategy") or {}).get("selected", {}) or {}).get("zone")
+        zone_low = float(selected_zone.get("low", 0) or 0) if isinstance(selected_zone, dict) else 0.0
+        zone_high = float(selected_zone.get("high", 0) or 0) if isinstance(selected_zone, dict) else 0.0
         stop_loss = (
-            min(lows) - structural_buffer
+            min(zone_low if zone_low > 0 else min(lows), min(lows)) - structural_buffer
             if analysis["direction"] == "BUY"
-            else max(highs) + structural_buffer
+            else max(zone_high if zone_high > 0 else max(highs), max(highs)) + structural_buffer
         )
         distance = abs(entry - stop_loss)
         smc_data = analysis.get("smc", {}) or {}
-        structural_target = smc_data.get("opposing_liquidity") or smc_data.get("structural_target")
+        structural_target_data = analysis.get("setup_assessment", {}).get("target_liquidity")
+        structural_target = structural_target_data.get("price") if isinstance(structural_target_data, dict) else None
+        if structural_target is None:
+            selected_strategy = (analysis.get("strategy") or {}).get("selected", {})
+            structural_target = selected_strategy.get("target")
+
         minimum_target = (
             entry + distance * self.minimum_rr
             if analysis["direction"] == "BUY"
@@ -304,8 +399,9 @@ class TradingWorkflow:
             take_profit = float(structural_target)
         else:
             return WorkflowResult(
-                WorkflowState.REJECTED,
+                WorkflowState.BLOCKED_BY_RISK,
                 "REJECTED: Structural target cannot provide the configured minimum risk/reward.",
+                decision_state="BLOCKED_BY_RISK",
                 account=account,
                 market=market,
                 details={"analysis": analysis, "target": structural_target, "minimum_target": minimum_target},
@@ -342,7 +438,7 @@ class TradingWorkflow:
                 entry,
                 stop_loss,
                 account.equity,
-                self.risk_percent,
+                effective_risk,
                 specs,
                 free_margin=account.free_margin,
                 used_margin=account.used_margin,
@@ -350,27 +446,30 @@ class TradingWorkflow:
                 current_margin_level=account.margin_level,
             )
         except ValueError as exc:
-            return WorkflowResult(WorkflowState.REJECTED, f"REJECTED: {exc}", account=account, market=market, details={"analysis": analysis})
+            return WorkflowResult(WorkflowState.BLOCKED_BY_RISK, f"BLOCKED_BY_RISK: {exc}", decision_state="BLOCKED_BY_RISK", account=account, market=market, details={"analysis": analysis})
 
         safety = validate_trade_setup(
+            symbol=mt5_symbol,
             direction=analysis["direction"],
             entry=entry,
             stop_loss=stop_loss,
             take_profit=take_profit,
             risk_amount=risk["risk_amount"],
-            risk_percent=self.risk_percent,
+            risk_percent=effective_risk,
             volume=risk["volume"],
             margin_required=risk["margin_required"],
             free_margin_after=risk["free_margin_after"],
             minimum_free_margin=risk["minimum_free_margin"],
-            current_margin_level=account.margin_level,
+            projected_margin_level=risk["projected_margin_level"],
             spread=market.spread,
             spread_pips=market.spread_pips,
+            spread_points=market.spread_points,
             minimum_rr=self.minimum_rr,
-            maximum_spread_pips=self.profile.max_spread_pips,
+            maximum_spread_pips=max_spread_for_symbol(mt5_symbol, self.profile.mode),
+            maximum_spread_points=max_spread_points_for_symbol(mt5_symbol, self.profile.mode),
         )
         if not safety["valid"]:
-            return WorkflowResult(WorkflowState.REJECTED, f"REJECTED: {'; '.join(safety['reasons'])}", account=account, market=market, details={"analysis": analysis, "safety": safety})
+            return WorkflowResult(WorkflowState.BLOCKED_BY_RISK, f"BLOCKED_BY_RISK: {'; '.join(safety['reasons'])}", decision_state="BLOCKED_BY_RISK", account=account, market=market, details={"analysis": analysis, "safety": safety})
 
         confluence = analysis.get("confluence", {})
         rationale_items = [
@@ -384,7 +483,7 @@ class TradingWorkflow:
             "Stop loss is structural invalidation.",
             "Volume is calculated from equity risk and stop distance, never from leverage.",
             "Leverage affects required margin only.",
-            "No execution occurs before exact approval.",
+            "Automatic execution is permitted when all gates pass; high-impact/news-conflict plans require explicit approval.",
         ]
 
         spread_cost = None
@@ -404,7 +503,7 @@ class TradingWorkflow:
             stop_loss,
             take_profit,
             risk["volume"],
-            self.risk_percent,
+            effective_risk,
             risk["risk_amount"],
             risk["margin_required"],
             risk["free_margin_after"],
@@ -437,12 +536,25 @@ class TradingWorkflow:
             broker=account.broker,
             platform=account.platform,
             account_login=account.login,
+            analysis_audit={
+                "decision_state": "BUY_PLAN_READY" if analysis["direction"] == "BUY" else "SELL_PLAN_READY",
+                "setup_assessment": analysis.get("setup_assessment", {}),
+                "support_resistance": analysis.get("stages", {}).get("support_resistance", {}),
+                "confluence": confluence,
+            },
+            requires_manual_approval=manual_hold,
+            manual_approval_reason=manual_hold_reason,
         )
         self._plans[plan.confirmation_phrase] = plan
         self._active_plans[active_key] = plan
         return WorkflowResult(
             WorkflowState.APPROVAL_REQUIRED,
-            "APPROVAL_REQUIRED: trade plan ready for your review.",
+            (
+                f"APPROVAL_REQUIRED: news risk requires your review. {manual_hold_reason}"
+                if manual_hold else
+                "APPROVAL_REQUIRED: trade plan ready; auto-execution is permitted."
+            ),
+            decision_state="BUY_PLAN_READY" if analysis["direction"] == "BUY" else "SELL_PLAN_READY",
             plan=plan,
             account=account,
             market=market,
@@ -460,6 +572,10 @@ class TradingWorkflow:
         return WorkflowResult(WorkflowState.APPROVED, "APPROVED: plan approved; execution is now permitted.", plan=plan)
 
     def execute(self, confirmation_phrase: str) -> WorkflowResult:
+        with self._execution_lock:
+            return self._execute_locked(confirmation_phrase)
+
+    def _execute_locked(self, confirmation_phrase: str) -> WorkflowResult:
         approval = self.approve(confirmation_phrase)
         if approval.state is WorkflowState.EXPIRED or approval.plan is None:
             return approval
@@ -482,15 +598,17 @@ class TradingWorkflow:
                 details={"failure_stage": "revalidation", "reason": message},
             )
 
+        # Consume the approval BEFORE the network submission. An accepted, rejected,
+        # timed-out, or otherwise failed order must never re-open the same approval popup.
+        self._active_plans.pop(f"{plan.mt5_symbol}:{plan.account_mode}", None)
+        self._plans.pop(plan.confirmation_phrase, None)
         response = self.adapter.execute(plan.as_dict(), plan.account_mode)
         if not response.get("success"):
             return WorkflowResult(
                 WorkflowState.REJECTED,
-                f"MT5 did not confirm execution: {response.get('error', 'unknown error')}",
+                f"MT5 did not accept the order: {response.get('error', 'unknown error')}",
                 plan=plan,
-                details={"failure_stage": "mt5_order_send", "reason": response.get("error", "unknown error"), "mt5_response": response},
+                details={"failure_stage": response.get("failure_stage", "mt5_order_send"), "reason": response.get("error", "unknown error"), "mt5_response": response},
             )
-
-        self._active_plans.pop(f"{plan.mt5_symbol}:{plan.account_mode}", None)
-        self._plans.pop(plan.confirmation_phrase, None)
-        return WorkflowResult(WorkflowState.EXECUTED, "EXECUTED: MT5 confirmed the order execution.", plan=plan, details=response)
+        verification = response.get("verification", "accepted")
+        return WorkflowResult(WorkflowState.EXECUTED, f"EXECUTED: MT5 accepted the order ({verification}).", plan=plan, details=response)

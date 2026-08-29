@@ -4,16 +4,33 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .indicators import snapshot
-from .smc import detect_smc
+from .evidence import detect_amd_phase, detect_candle_pattern, detect_ifvg, detect_wave_context
+from .smc import ZoneRegistry, detect_smc
 
 
 def _trend(candles: list[dict[str, Any]]) -> str:
-    closes = [float(c.get("close", 0)) for c in candles if float(c.get("close", 0)) > 0]
-    if len(closes) < 3:
+    """Use structure first; fall back to a smoothed price slope.
+
+    A single last-candle comparison was too noisy and could label a whole
+    timeframe bullish/bearish from a tiny move.
+    """
+    if len(candles) < 9:
         return "unknown"
-    if closes[-1] > closes[0] and closes[-1] > closes[-2]:
+    try:
+        from .smc import _structure
+        bias = _structure(candles[-200:]).get("bias")
+        if bias in {"bullish", "bearish"}:
+            return bias
+    except Exception:
+        pass
+    closes = [float(c.get("close", 0) or 0) for c in candles if float(c.get("close", 0) or 0) > 0]
+    if len(closes) < 20:
+        return "unknown"
+    fast = sum(closes[-10:]) / 10
+    slow = sum(closes[-20:]) / 20
+    if fast > slow and closes[-1] > closes[-5]:
         return "bullish"
-    if closes[-1] < closes[0] and closes[-1] < closes[-2]:
+    if fast < slow and closes[-1] < closes[-5]:
         return "bearish"
     return "sideways"
 
@@ -27,8 +44,26 @@ class MarketContext:
     confluence: dict[str, Any] = field(default_factory=dict)
 
 
-def build_market_context(timeframes: dict[str, list[dict[str, Any]]]) -> MarketContext:
-    trends = {timeframe: _trend(candles) for timeframe, candles in timeframes.items()}
+def build_market_context(timeframes: dict[str, list[dict[str, Any]]], windows: dict[str, dict[str, int]] | None = None, registry: ZoneRegistry | None = None) -> MarketContext:
+    windows = windows or {}
+    trend_candles = {
+        timeframe: candles[-windows.get(timeframe, {}).get("trend", len(candles)):]
+        for timeframe, candles in timeframes.items()
+    }
+    smc_candles = {
+        timeframe: candles[-windows.get(timeframe, {}).get("smc_liquidity", len(candles)):]
+        for timeframe, candles in timeframes.items()
+    }
+    trends = {timeframe: _trend(candles) for timeframe, candles in trend_candles.items()}
     indicator_data = {timeframe: snapshot(candles) for timeframe, candles in timeframes.items()}
-    smc_data = {timeframe: detect_smc(candles) for timeframe, candles in timeframes.items()}
+    smc_data = {}
+    for timeframe, candles in smc_candles.items():
+        evidence = detect_smc(candles, timeframe=timeframe, registry=registry)
+        evidence.update({
+            "ifvg": detect_ifvg(candles, evidence.get("fair_value_gaps", [])),
+            "amd": detect_amd_phase(candles),
+            "candle_pattern": detect_candle_pattern(candles),
+            "wave_context": detect_wave_context(candles),
+        })
+        smc_data[timeframe] = evidence
     return MarketContext(trends=trends, indicators=indicator_data, smc=smc_data)

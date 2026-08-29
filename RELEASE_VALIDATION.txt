@@ -1,0 +1,22 @@
+Angelique release validation
+
+Functional skill matrix: 21/21 passed under Xvfb 1920x1080
+Python regression suite: 18/18 passed
+Skill module import scan: 86/86 passed
+Static unfinished marker scan: 0
+Original .env keys missing: 0
+Original .env values changed: 0
+Original desktop UI retained: gui/angelique_desktop.py
+
+Model policy:
+- online: cloud providers are tried first; local Ollama is fallback
+- offline: Ollama is used directly
+- installed Ollama tags are discovered dynamically
+
+Trading safety:
+- live auto-execution remains disabled by default
+- MT5 trading-disabled terminals fail closed before order submission
+- accepted/ambiguous MT5 submissions are never blindly retried
+- plan approvals are single-use
+
+The functional suite uses mocks for destructive/external operations and does not execute a real live trade or real WhatsApp message.

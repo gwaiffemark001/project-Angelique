@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.price_units import is_metal_symbol
 
-def pip_size(symbol: str) -> float:
+
+def pip_size(symbol: str, specs: dict[str, Any] | None = None) -> float:
     normalized = str(symbol or "").upper()
+    point = float((specs or {}).get("point", 0) or 0)
+    digits = int((specs or {}).get("digits", 0) or 0)
+    if point > 0:
+        return point * 10 if digits in {3, 5} else point
     if "JPY" in normalized:
         return 0.01
-    if "XAU" in normalized or "GOLD" in normalized:
-        return 0.1
     return 0.0001
 
 
@@ -29,7 +33,7 @@ def format_position_row(position: dict[str, Any], market: dict[str, Any] | None 
     entry = float(position.get("price_open", position.get("entry", position.get("open_price", 0))) or 0)
     stop = float(position.get("sl", position.get("stop_loss", 0)) or 0)
     target = float(position.get("tp", position.get("take_profit", 0)) or 0)
-    unit = pip_size(symbol)
+    unit = pip_size(symbol, market.get("symbol_specs") or {})
     favorable = current - entry if direction == "BUY" else entry - current
     risk_distance = abs(entry - stop)
     to_stop = round(abs(current - stop) / unit, 2) if stop else None
@@ -56,4 +60,6 @@ def format_position_row(position: dict[str, Any], market: dict[str, Any] | None 
         "r_multiple": round(favorable / risk_distance, 4) if risk_distance else None,
         "status": status,
         "spread_pips": float(market.get("spread_pips", 0) or 0) if market.get("spread_pips") is not None else None,
+        "spread_points": float(market.get("spread_points", 0) or 0) if market.get("spread_points") is not None else None,
+        "spread_unit": "points" if is_metal_symbol(symbol) else "pips",
     }

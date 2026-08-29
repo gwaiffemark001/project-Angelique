@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 from core import config
+from .profiles import max_spread_for_symbol
 
 
 def validate_trade_setup(
     *,
+    symbol: str | None = None,
     direction: str,
     entry: float,
     stop_loss: float,
@@ -16,13 +18,16 @@ def validate_trade_setup(
     margin_required: float,
     free_margin_after: float,
     minimum_free_margin: float,
-    current_margin_level: float,
+    projected_margin_level: float | None = None,
+    current_margin_level: float | None = None,
     # `spread` is the raw price difference (ask - bid) in price units.
     # `spread_pips` is the normalized spread expressed in pips (preferred).
     spread: float | None = None,
     spread_pips: float | None = None,
+    spread_points: float | None = None,
     minimum_rr: float = 2.0,
     maximum_spread_pips: float | None = None,
+    maximum_spread_points: float | None = None,
 ) -> dict[str, Any]:
     """Hard safety checks that gate trading decisions before execution."""
     checks: list[str] = []
@@ -36,6 +41,10 @@ def validate_trade_setup(
     distance_to_sl = abs(entry - stop_loss)
     if distance_to_sl <= 0:
         reasons.append("Stop loss is not distinct from entry.")
+    elif direction == "BUY" and stop_loss >= entry:
+        reasons.append("BUY stop loss must be below the entry price.")
+    elif direction == "SELL" and stop_loss <= entry:
+        reasons.append("SELL stop loss must be above the entry price.")
     else:
         checks.append(f"Stop distance: {distance_to_sl:.6f}")
 
@@ -60,19 +69,27 @@ def validate_trade_setup(
     else:
         checks.append("Free margin above minimum threshold.")
 
-    if current_margin_level > 0 and current_margin_level < 100:
-        reasons.append(f"Projected margin level is too low ({current_margin_level:.1f}%).")
+    margin_level = projected_margin_level if projected_margin_level is not None else current_margin_level
+    if margin_level is not None and margin_level > 0 and margin_level < 100:
+        reasons.append(f"Projected margin level is too low ({margin_level:.1f}%).")
     else:
-        checks.append("Margin level remains acceptable.")
+        checks.append("Projected margin level remains acceptable.")
 
-    # Prefer pip-normalized checks. If `spread_pips` is provided, compare it
-    # against the centrally configured `TRADING_MAX_SPREAD` (pips).
-    if spread_pips is not None:
+    # FX: enforce pips. Metals/other instruments: enforce MT5 points when
+    # an explicit point threshold is provided. Never mix the units.
+    is_metal = bool(symbol and any(token in str(symbol).upper() for token in ("XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER")))
+    if is_metal and spread_points is not None:
+        max_points = float(maximum_spread_points or 0.0)
+        if max_points > 0 and spread_points > max_points + 1e-9:
+            reasons.append(f"Spread is too wide: {spread_points:.0f} MT5 points > maximum allowed {max_points:.0f} points.")
+        else:
+            checks.append(f"Spread OK: {spread_points:.0f} MT5 points (max {max_points:.0f}).")
+    elif spread_pips is not None:
         try:
             max_allowed = float(
                 maximum_spread_pips
                 if maximum_spread_pips is not None
-                else getattr(config, "TRADING_MAX_SPREAD", 0.0)
+                else max_spread_for_symbol(symbol or "", None)
             )
         except Exception:
             max_allowed = 0.0
@@ -81,8 +98,7 @@ def validate_trade_setup(
         else:
             checks.append(f"Spread OK: {spread_pips:.2f} pips (max {max_allowed:.2f}).")
     elif spread is not None and spread > 0:
-        # Legacy fallback: if only raw spread is available, record it (no numeric enforcement)
-        checks.append(f"Raw spread observed: {spread:.6f} (no pip normalization available).")
+        reasons.append("Spread could not be normalized into the unit required for this symbol.")
 
     valid = not reasons
     return {

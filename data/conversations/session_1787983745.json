@@ -1,0 +1,22 @@
+[
+  {
+    "timestamp": "2026-08-29T06:11:56.211705Z",
+    "user": "install cmatrix",
+    "agent": "Error: AngeliqueDesktopApp._prompt_for_sudo_password() takes 1 positional argument but 2 were given"
+  },
+  {
+    "timestamp": "2026-08-29T06:12:08.433065Z",
+    "user": "install cmatrix",
+    "agent": "Error: AngeliqueDesktopApp._prompt_for_sudo_password() takes 1 positional argument but 2 were given"
+  },
+  {
+    "timestamp": "2026-08-29T06:13:52.986483Z",
+    "user": "install cmatrix",
+    "agent": "Exit code: 0\nReading package lists...\nBuilding dependency tree...\nReading state information...\nSuggested packages:\n  cmatrix-xfont\nThe following NEW packages will be installed:\n  cmatrix\n0 upgraded, 1 newly installed, 0 to remove and 36 not upgraded.\nNeed to get 33.7 kB of archives.\nAfter this operation, 75.8 kB of additional disk space will be used.\nGet:1 http://archive.ubuntu.com/ubuntu noble/universe amd64 cmatrix amd64 2.0-6 [33.7 kB]\nFetched 33.7 kB in 3s (13.2 kB/s)\nSelecting previously unselected package cmatrix.\n(Reading database ... \n(Reading database ... 5%\n(Reading database ... 10%\n(Reading database ... 15%\n(Reading database ... 20%\n(Reading database ... 25%\n(Reading database ... 30%\n(Reading database ... 35%\n(Reading database ... 40%\n(Reading database ... 45%\n(Reading database ... 50%\n(Reading database ... 55%\n(Reading database ... 60%\n(Reading database ... 65%\n(Reading database ... 70%\n(Reading database ... 75%\n(Reading database ... 80%\n(Reading database ... 85%\n(Reading database ... 90%\n(Reading database ... 95%\n(Reading database ... 100%\n(Reading database ... 276772 files and directories currently installed.)\nPreparing to unpack .../cmatrix_2.0-6_amd64.deb ...\nUnpacking cmatrix (2.0-6) ...\nSetting up cmatrix (2.0-6) ...\nProcessing triggers for desktop-file-utils (0.27-2build1) ...\nProcessing triggers for hicolor-icon-theme (0.17-2) ...\nProcessing triggers for gnome-menus (3.36.0-1.1ubuntu3) ...\nProcessing triggers for man-db (2.12.0-4build2) ..."
+  },
+  {
+    "timestamp": "2026-08-29T06:13:53.686657Z",
+    "user": "install cmatrix",
+    "agent": "Exit code: 0\nReading package lists...\nBuilding dependency tree...\nReading state information...\nSuggested packages:\n  cmatrix-xfont\nThe following NEW packages will be installed:\n  cmatrix\n0 upgraded, 1 newly installed, 0 to remove and 36 not upgraded.\nNeed to get 33.7 kB of archives.\nAfter this operation, 75.8 kB of additional disk space will be used.\nGet:1 http://archive.ubuntu.com/ubuntu noble/universe amd64 cmatrix amd64 2.0-6 [33.7 kB]\nFetched 33.7 kB in 3s (13.2 kB/s)\nSelecting previously unselected package cmatrix.\n(Reading database ... \n(Reading database ... 5%\n(Reading database ... 10%\n(Reading database ... 15%\n(Reading database ... 20%\n(Reading database ... 25%\n(Reading database ... 30%\n(Reading database ... 35%\n(Reading database ... 40%\n(Reading database ... 45%\n(Reading database ... 50%\n(Reading database ... 55%\n(Reading database ... 60%\n(Reading database ... 65%\n(Reading database ... 70%\n(Reading database ... 75%\n(Reading database ... 80%\n(Reading database ... 85%\n(Reading database ... 90%\n(Reading database ... 95%\n(Reading database ... 100%\n(Reading database ... 276772 files and directories currently installed.)\nPreparing to unpack .../cmatrix_2.0-6_amd64.deb ...\nUnpacking cmatrix (2.0-6) ...\nSetting up cmatrix (2.0-6) ...\nProcessing triggers for desktop-file-utils (0.27-2build1) ...\nProcessing triggers for hicolor-icon-theme (0.17-2) ...\nProcessing triggers for gnome-menus (3.36.0-1.1ubuntu3) ...\nProcessing triggers for man-db (2.12.0-4build2) ..."
+  }
+]

@@ -84,8 +84,23 @@ def get_rates_for_symbol(symbol: str, timeframe: str, count: int = 200, seed=Non
         info = mt5.account_info()
         if info is None:
             return {"status": "error", "error": "No MT5 account is logged in"}
-        actual_mode = "demo" if getattr(info, "trade_mode", None) == 1 else "live"
-        if requested_mode == "live" and actual_mode == "demo":
+        trade_mode = getattr(info, "trade_mode", None)
+        actual_mode = (
+            "real" if trade_mode == getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2)
+            else "demo" if trade_mode == getattr(mt5, "ACCOUNT_TRADE_MODE_DEMO", 0)
+            else "contest" if trade_mode == getattr(mt5, "ACCOUNT_TRADE_MODE_CONTEST", 1)
+            else "unknown"
+        )
+        server = str(getattr(info, "server", "")).lower()
+        if any(word in server for word in ("demo", "trial", "test", "sandbox")):
+            actual_mode = "demo"
+        elif any(word in server for word in ("live", "real")):
+            actual_mode = "live"
+        elif trade_mode == 2:
+            actual_mode = "real"
+        else:
+            actual_mode = "demo"
+        if requested_mode == "live" and actual_mode in ("demo", "unknown"):
             return {"status": "error", "error": "Requested live account mode but MT5 is connected to demo account"}
         if not mt5.symbol_select(symbol, True):
             return {"status": "error", "error": f"MT5 could not select {symbol}"}

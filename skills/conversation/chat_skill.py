@@ -196,12 +196,16 @@ def handle_user_message(session_id: str, user_message: str) -> dict:
     except Exception:
         return {"error": "Cognitive resolver unavailable"}
 
-    with SESSION_MESSAGE_LOCK:
-        result = resolve_user_query(user_message, session_id=session_id)
+    # Do not hold the session lock while waiting on an LLM, MT5, browser, or
+    # other tool. That used to serialize the entire desktop assistant behind one
+    # slow request. The resolver is responsible for its own side effects; the
+    # history write below is protected separately.
+    result = resolve_user_query(user_message, session_id=session_id)
     # Save conversation (best-effort)
     try:
         agent_text = result.get("answer") if isinstance(result, dict) else str(result)
-        save_conversation(session_id, user_message, agent_text)
+        with SESSION_MESSAGE_LOCK:
+            save_conversation(session_id, user_message, agent_text)
     except Exception:
         pass
 

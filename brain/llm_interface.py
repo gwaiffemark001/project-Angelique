@@ -3,36 +3,108 @@ import re
 import requests
 import socket
 from typing import Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import os
+import time
 from core import config
+
+_OLLAMA_DISCOVERY_CACHE = {"at": 0.0, "models": []}
 
 
 def _is_online() -> bool:
+    """Fast connectivity probe that does not rely on DNS/53 egress being allowed.
+
+    The previous check used a raw TCP connection to 8.8.8.8:53. On many
+    networks that port is blocked even though normal HTTPS internet access is
+    working, which incorrectly forced Angelique into offline/local mode.
+    """
+    probes = (
+        "https://www.google.com/generate_204",
+        "https://www.cloudflare.com/cdn-cgi/trace",
+    )
+    for url in probes:
+        try:
+            response = requests.get(
+                url,
+                timeout=0.8,
+                allow_redirects=False,
+                headers={"User-Agent": getattr(config, "DEFAULT_HTTP_USER_AGENT", "Angelique/1.0")},
+            )
+            if response.status_code < 500:
+                return True
+        except Exception:
+            continue
     try:
-        with socket.create_connection((config.NETWORK_CHECK_HOST, config.NETWORK_CHECK_PORT), timeout=1):
+        with socket.create_connection((config.NETWORK_CHECK_HOST, config.NETWORK_CHECK_PORT), timeout=0.4):
             return True
     except Exception:
         return False
 
+def _discover_ollama_models() -> list[str]:
+    now = time.monotonic()
+    if now - float(_OLLAMA_DISCOVERY_CACHE.get("at", 0.0)) < 30.0:
+        return list(_OLLAMA_DISCOVERY_CACHE.get("models", []))
+    try:
+        response = requests.get(
+            f"{config.OLLAMA_BASE_URL}/api/tags",
+            timeout=min(float(getattr(config, "OLLAMA_REQUEST_TIMEOUT_S", 8)), 3.0),
+        )
+        if not response.ok:
+            return []
+        payload = response.json()
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        discovered = [
+            str(item.get("name", "")).strip()
+            for item in models
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
+        ]
+        _OLLAMA_DISCOVERY_CACHE.update({"at": now, "models": discovered})
+        return discovered
+    except Exception:
+        _OLLAMA_DISCOVERY_CACHE.update({"at": now, "models": []})
+        return []
+
+
 def _ordered_ollama_candidates() -> list[str]:
+    configured = list(getattr(config, "OLLAMA_MODEL_CANDIDATES", []) or [])
+    discovered = _discover_ollama_models()
+    preferred = []
+    for candidate in (config.CODER_MODEL, config.PRIMARY_MODEL, config.LOCAL_FALLBACK_MODEL):
+        if candidate:
+            preferred.append(candidate)
+    # Prefer configured models, then explicit primary/coder/fallback models,
+    # then any models discovered from the running Ollama server.
     seen = set()
     ordered = []
-    for model_name in config.OLLAMA_MODEL_CANDIDATES:
+    discovered_cf = {m.casefold(): m for m in discovered}
+    for model_name in configured + preferred + discovered:
         candidate = (model_name or "").strip()
-        if not candidate or candidate in seen:
+        if not candidate:
+            continue
+        # If an env alias is missing but a discovered tag shares its base name,
+        # use the actual Ollama tag (e.g. qwen2.5-coder:latest).
+        actual = discovered_cf.get(candidate.casefold())
+        if not actual:
+            base = candidate.split(":", 1)[0].casefold()
+            actual = next((m for m in discovered if m.split(":",1)[0].casefold() == base), None)
+        candidate = actual or candidate
+        if candidate in seen:
+            continue
+        if discovered and actual is None:
             continue
         seen.add(candidate)
         ordered.append(candidate)
-    return ordered
+    return ordered[:3]
 
 
 def _try_ollama_model(model_name: str, messages: list) -> Optional[str]:
     try:
+        timeout = float(getattr(config, "OLLAMA_REQUEST_TIMEOUT_S", 8.0))
         response = requests.post(
             f"{config.OLLAMA_BASE_URL}/api/chat",
-            json={"model": model_name, "messages": messages, "stream": False},
-            timeout=15,
+            json={"model": model_name, "messages": messages, "stream": False, "options": {"temperature": 0.2}},
+            timeout=max(2.0, min(timeout, 8.0)),
         )
         if response.status_code == 200:
             j = response.json()
@@ -67,33 +139,44 @@ def query_llm(messages: list, temperature: float = 0.7) -> str:
         provider.strip().lower()
         for provider in (config.API_PRIORITY or [])
         if provider and provider.strip() and provider.strip().lower() != "ollama"
-    ]
-    if not ordered_providers:
-        ordered_providers = ["openrouter", "nvidia", "bluesminds", "gemini"]
+    ] or ["openrouter", "nvidia", "bluesminds", "gemini"]
 
     provider_handlers = {
         "nvidia": lambda: _call_nvidia(messages, temperature),
         "openrouter": lambda: _call_openrouter(messages, temperature),
         "bluesminds": lambda: _call_bluesminds(messages, temperature),
         "gemini": lambda: _call_gemini(messages, temperature),
-        "ollama": lambda: _call_ollama(messages),
     }
 
-    for provider in ordered_providers:
-        if provider not in provider_handlers:
-            continue
+    # Online: race configured cloud providers so one slow/dead provider cannot
+    # stall Angelique behind a chain of 12-second requests.
+    futures = {}
+    pool = ThreadPoolExecutor(max_workers=min(4, max(1, len(ordered_providers))))
+    try:
+        for provider in ordered_providers:
+            handler = provider_handlers.get(provider)
+            if handler:
+                futures[pool.submit(handler)] = provider
         try:
-            result = provider_handlers[provider]()
-            if result:
-                return result
-        except Exception as exc:
-            print(f"⚠️ [LLM] {provider} failed: {exc}")
+            for future in as_completed(futures, timeout=10):
+                provider = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        return result
+                except Exception as exc:
+                    print(f"⚠️ [LLM] {provider} failed: {exc}")
+        except TimeoutError:
+            pass
+    finally:
+        # Do not wait for a dead cloud provider before falling back locally.
+        pool.shutdown(wait=False, cancel_futures=True)
 
+    # Online fallback: choose one installed local model, not every guessed alias.
     result = _call_ollama(messages)
     if result:
         return result
-
-    print("[LLM] Cloud providers and all local Ollama candidates failed; see the provider diagnostics above.")
+    print("[LLM] Cloud providers and local Ollama fallback failed.")
     return "I'm having a little trouble connecting to my brain right now."
 
 
@@ -180,8 +263,39 @@ def _call_gemini(messages: list, temperature: float) -> Optional[str]:
 
 
 def _call_ollama(messages: list) -> Optional[str]:
-    for model_name in _ordered_ollama_candidates():
-        result = _try_ollama_model(model_name, messages)
+    candidates = _ordered_ollama_candidates()
+    if not candidates:
+        return None
+
+    # Do not load several local models simultaneously. Racing a 3B model
+    # against a 7B coder model can thrash RAM/VRAM and make both slower.
+    # Pick the first installed candidate and keep it warm for subsequent turns.
+    model = candidates[0]
+    try:
+        timeout = max(2.0, float(getattr(config, "OLLAMA_REQUEST_TIMEOUT_S", 8.0)))
+        response = requests.post(
+            f"{config.OLLAMA_BASE_URL}/api/chat",
+            json={
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "keep_alive": "15m",
+                "options": {"temperature": 0.2},
+            },
+            timeout=min(timeout, 12.0),
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            message = payload.get("message") if isinstance(payload, dict) else None
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, str) and content.strip():
+                return content
+    except Exception as exc:
+        print(f"⚠️ [LLM] Ollama model '{model}' failed: {exc}")
+
+    # One bounded fallback only if the preferred model really failed.
+    for fallback in candidates[1:2]:
+        result = _try_ollama_model(fallback, messages)
         if result:
             return result
     return None

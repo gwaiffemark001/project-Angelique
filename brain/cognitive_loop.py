@@ -3,6 +3,7 @@ import json
 import re
 import threading
 import uuid
+from pathlib import Path
 from core import audit
 from core.tool_registry import GLOBAL_TOOL_REGISTRY
 from core.pending_actions import add_pending, find_pending_for_session, confirm_and_remove, get_pending, PENDING_PLAN_SERVICE
@@ -259,17 +260,6 @@ def _execute_validated_plan(calls: list, user_input: str, session_id: str | None
             audit.record({"action": "pending_create_failed", "session_id": session_id})
         return {"source": "confirmation_required", "answer": f"The requested action includes sensitive operations and requires confirmation. Reply 'yes' to proceed or 'no' to cancel. To confirm a specific pending action, reply 'confirm {plan_id}'.", "details": {"plan_id": plan_id}}
 
-    def _call_through_execute_tool(name, args, user_request=None, session_id=None, timeout=None):
-        res = execute_tool(name, args or {}, user_request=user_request, session_id=session_id, timeout=timeout)
-        class _ER:
-            def __init__(self, success, output=None, error=None):
-                self.success = success
-                self.output = output
-                self.error = error
-        if isinstance(res, str) and (res.startswith("Error") or res.lower().startswith("error")):
-            return _ER(False, output=None, error=res)
-        return _ER(True, output=res, error=None)
-
     outputs = []
     for call in validated_calls:
         tname = call.get("tool")
@@ -293,6 +283,66 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
     Returns a dict with keys: `source` (one of 'conversation','fact','tool','llm'), `answer`, and `details`.
     """
     text = _strip_training_mode_prefix(user_input)
+
+    # Deterministic facts/actions must never be hallucinated by an LLM.
+    normalized_text = (text or "").strip().lower()
+    try:
+        if (re.search(r"\b(?:what(?:'s| is)?|tell me|give me|show me)\s+(?:the\s+)?(?:current\s+)?(?:time|date|day)\b", normalized_text)
+                or re.fullmatch(r"(?:time|date|today|what time is it|what is the date|what is the time and date|what's the time and date)", normalized_text)):
+            from datetime import datetime
+            now = datetime.now().astimezone()
+            wants_time = "time" in normalized_text
+            wants_date = any(token in normalized_text for token in ("date", "today", "day"))
+            if wants_time and wants_date:
+                answer = now.strftime("It is %A, %B %d, %Y and the current time is %I:%M:%S %p (%Z).")
+            elif wants_time:
+                answer = now.strftime("The current time is %I:%M:%S %p (%Z).")
+            else:
+                answer = now.strftime("Today is %A, %B %d, %Y (%Y-%m-%d).")
+            conv_save(session_id, user_input, answer)
+            return {"source": "system", "answer": answer, "details": {"timestamp": now.isoformat()}}
+    except Exception:
+        pass
+
+    # File-name searches are deterministic. Do not ask an LLM to infer whether a
+    # file exists; it should delegate the actual filesystem query.
+    try:
+        exact_name = re.search(
+            r"(?:find|search|look(?:\s+for)?|locate).*?(?:file|folder|directory)\s+(?:named|called|with\s+name)\s+(.+?)(?:\s+(?:on|in|under|within)\s+(?:my\s+)?(?:laptop|computer|pc|home|filesystem).*|$)",
+            text, re.IGNORECASE,
+        )
+        if not exact_name:
+            exact_name = re.search(
+                r"(?:find|search|look(?:\s+for)?|locate).*?\b(?:named|called)\s+(.+?)(?:\s+(?:on|in|under|within)\s+(?:my\s+)?(?:laptop|computer|pc|home|filesystem).*|$)",
+                text, re.IGNORECASE,
+            )
+        if exact_name:
+            query = exact_name.group(1).strip().strip('\"\'')
+            query = re.split(r"\s+and\s+(?:tell|show|read)\s+me\b", query, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+            query = re.sub(r"\s+(?:on|in|under|within)\s+(?:my\s+)?(?:laptop|computer|pc|home|filesystem).*?$", "", query, flags=re.IGNORECASE).strip()
+            result = _call_through_execute_tool("search_files", {"query": query, "root": str(Path.home()), "max_results": 100, "max_depth": 12}, user_request=user_input, session_id=session_id)
+            answer = result.output if result.success else result.error
+            conv_save(session_id, user_input, answer)
+            return {"source": "tool", "answer": answer, "details": {"tool": "search_files", "args": {"query": query, "root": str(Path.home())}}}
+    except Exception:
+        pass
+
+    # Deterministic action routing must happen before any LLM probe. This keeps
+    # filesystem, browser, messaging, system and other explicit actions fast and
+    # prevents a slow model from blocking a command that does not need reasoning.
+    try:
+        h_tool, h_args = nlp_to_tool_mapping(text)
+        if h_tool:
+            result = _execute_validated_plan(
+                [{"tool": h_tool, "args": h_args or {}}],
+                user_input=text,
+                session_id=session_id,
+            )
+            answer = result.get("answer")
+            conv_save(session_id, user_input, answer)
+            return result
+    except Exception as exc:
+        audit.record({"action": "deterministic_route_failed", "error": str(exc), "user_request": user_input})
 
     # --- Pending plan follow-up handling -------------------------------------------------
     try:
@@ -498,6 +548,27 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
                 raise RuntimeError("heuristic_ambiguous")
 
         # ========== MESSAGING / WHATSAPP ==========
+        # High-confidence natural language forms are parsed deterministically so
+        # trailing words like "a message" or "on WhatsApp" never become part of
+        # the contact name.
+        whatsapp_specific = [
+            r"^send\s+(?P<contact>.+?)\s+a\s+message\s+on\s+whatsapp\s+saying\s+(?P<message>.+)$",
+            r"^send\s+(?P<contact>.+?)\s+on\s+whatsapp\s+saying\s+(?P<message>.+)$",
+            r"^send\s+(?P<contact>.+?)\s+message\s+on\s+whatsapp\s+(?:saying\s+)?(?P<message>.+)$",
+            r"^message\s+(?P<contact>.+?)\s+on\s+whatsapp\s+saying\s+(?P<message>.+)$",
+        ]
+        for pattern in whatsapp_specific:
+            m = re.match(pattern, lower.strip(), re.IGNORECASE)
+            if m:
+                contact = m.group('contact').strip(' ,')
+                msg = m.group('message').strip()
+                try:
+                    tool_result = _exec_tool('send_whatsapp', {'contact_name': contact, 'message': msg})
+                except Exception as e:
+                    tool_result = f"Error sending WhatsApp: {e}"
+                conv_save(session_id, user_input, tool_result)
+                return {"source": "tool", "answer": tool_result, "details": {"tool": "send_whatsapp", "args": {"contact_name": contact, "message": msg}}}
+
         msg_patterns = [
             (r"\b(?:send|message|text|whatsapp|msg)\s+(.+?)\s+(?:to|to:)\s+(.+?)(?:\s+(?:on|via|through|using))?\s*$", lambda m: (m.group(2).strip(), m.group(1).strip())),
             (r"\b(?:tell|message|text|say)\s+(.+?)\s+(?:that|this):\s+(.+)$", lambda m: (m.group(1).strip(), m.group(2).strip())),

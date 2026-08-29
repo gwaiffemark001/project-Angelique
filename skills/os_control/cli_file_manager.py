@@ -63,40 +63,52 @@ def _normalize_search_root(root: str | None) -> str:
     return candidate
 
 
-def search_files(query: str, root: str | None = None, max_results: int = 100, max_depth: int = 6) -> str:
+def search_files(query: str, root: str | None = None, max_results: int = 100, max_depth: int = 12) -> str:
+    """Find files/directories by name anywhere below *root*.
+
+    The old implementation silently missed projects nested deeper than six
+    levels and relied only on substring matching. This version gives exact
+    basename matches priority, is case-insensitive, prunes common virtual
+    trees, and then falls back to substring/path matching.
+    """
     try:
         root_dir = _normalize_search_root(root)
         if not os.path.isdir(root_dir):
             return f"❌ Root path not found or not a directory: {root_dir}"
-
-        query = (query or "").strip()
+        query = (query or "").strip().strip('\"\'')
         if not query:
             return "Please provide a search query for files or folders."
 
-        query_lower = query.lower()
-        results: list[tuple[str, str]] = []
+        query_lower = query.casefold()
+        results: list[tuple[int, str, str]] = []
         root_dir = os.path.abspath(root_dir)
         root_depth = root_dir.rstrip(os.sep).count(os.sep)
+        ignored = {'.cache', '.git', '__pycache__', '.venv', 'node_modules', '.npm', '.local/share/Trash'}
 
-        for dirpath, dirnames, filenames in os.walk(root_dir):
+        for dirpath, dirnames, filenames in os.walk(root_dir, topdown=True, followlinks=False):
+            dirnames[:] = [d for d in dirnames if d not in ignored and not d.startswith('.Trash')]
             current_depth = dirpath.rstrip(os.sep).count(os.sep) - root_depth
-            if current_depth > max_depth:
+            if current_depth >= max_depth:
                 dirnames[:] = []
-                continue
-
             for name in dirnames + filenames:
+                name_cf = name.casefold()
                 path = os.path.join(dirpath, name)
-                if query_lower in name.lower() or query_lower in path.lower():
-                    results.append(("dir" if os.path.isdir(path) else "file", path))
-                    if len(results) >= max_results:
-                        break
-            if len(results) >= max_results:
-                break
+                if name_cf == query_lower:
+                    priority = 0
+                elif query_lower in name_cf:
+                    priority = 1
+                elif query_lower in path.casefold():
+                    priority = 2
+                else:
+                    continue
+                kind = "dir" if os.path.isdir(path) else "file"
+                results.append((priority, kind, path))
 
+        results.sort(key=lambda row: (row[0], row[2].casefold()))
+        results = results[:max_results]
         if not results:
             return f"No matching files or folders found for '{query}' under {root_dir}."
-
-        lines = [f"{typ}: {path}" for typ, path in results]
+        lines = [f"{kind}: {path}" for _, kind, path in results]
         if len(results) >= max_results:
             lines.append(f"...stopped after {max_results} results. Narrow the query or increase max_results.")
         return "\n".join(lines)
