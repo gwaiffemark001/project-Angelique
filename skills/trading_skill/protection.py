@@ -43,7 +43,13 @@ def drawdown_percent(login: int, equity: float) -> float:
 
 def consecutive_losses(deals: list[dict[str,Any]]) -> int:
     count=0
+    # Only completed exit deals represent a finished trade outcome. MT5
+    # distinguishes opening/closing deal entries; do not count entries or
+    # their commissions as standalone losses.
     for deal in sorted(deals,key=lambda d: str(d.get("time") or d.get("timestamp") or ""), reverse=True):
+        entry = deal.get("entry")
+        if entry is not None and str(entry) not in {"1", "2", "DEAL_ENTRY_OUT", "DEAL_ENTRY_OUT_BY", "INOUT"}:
+            continue
         profit=float(deal.get("profit",0) or 0)+float(deal.get("commission",0) or 0)+float(deal.get("swap",0) or 0)
         if profit < 0: count+=1
         elif profit > 0: break

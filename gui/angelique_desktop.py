@@ -536,7 +536,7 @@ class AngeliqueDesktopApp(tk.Tk):
             bg=self._theme("panel"),
             font=("Consolas", 16, "bold"),
         )
-        title.pack(anchor="nw", padx=20, pady=(16, 8))
+        title.pack(anchor="nw", padx=20, pady=(10, 4))
 
         self.trading_status_var = tk.StringVar(value="Trading status initializing...")
         status = tk.Label(
@@ -548,13 +548,13 @@ class AngeliqueDesktopApp(tk.Tk):
             justify="left",
             wraplength=1100,
         )
-        status.pack(anchor="nw", padx=20, pady=(0, 8))
+        status.pack(anchor="nw", padx=20, pady=(0, 4))
 
         self._trading_bridge_error_var = tk.StringVar(value="Bridge status unknown.")
         self._trading_mode_banner_var = tk.StringVar(value="Preparing trading status...")
         self._strategy_mode_var = tk.StringVar(value=f"ACTIVE MODE: {self._trading_hub_controller.trading_mode}")
         self._strategy_profile_var = tk.StringVar(value="")
-        self._risk_policy_var = tk.StringVar(value="RISK POLICY: < $50 = 0.50% | $50+ = 1.00% | HARD CEILING 1.00%")
+        self._risk_policy_var = tk.StringVar(value="RISK POLICY: TARGET 1.00% | MAXIMUM 1.00% | NEVER EXCEED THE RISK CEILING")
         bridge_error_label = tk.Label(
             self.trading_view_frame,
             textvariable=self._trading_bridge_error_var,
@@ -564,7 +564,7 @@ class AngeliqueDesktopApp(tk.Tk):
             justify="left",
             wraplength=1100,
         )
-        bridge_error_label.pack(anchor="nw", padx=20, pady=(0, 8))
+        bridge_error_label.pack(anchor="nw", padx=20, pady=(0, 4))
 
         banner_label = tk.Label(
             self.trading_view_frame,
@@ -575,47 +575,49 @@ class AngeliqueDesktopApp(tk.Tk):
             justify="left",
             wraplength=1100,
         )
-        banner_label.pack(anchor="nw", padx=20, pady=(0, 14))
+        banner_label.pack(anchor="nw", padx=20, pady=(0, 6))
         self._trading_mode_label_widget = banner_label
 
+        # Compact, responsive strategy/risk controls.  Keep controls on two rows so
+        # they never crush each other on narrower screens.
         strategy_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
-        strategy_frame.pack(anchor="nw", padx=20, pady=(0, 12))
+        strategy_frame.pack(fill="x", padx=20, pady=(0, 10))
+
+        strategy_controls = tk.Frame(strategy_frame, bg=self._theme("panel"))
+        strategy_controls.pack(fill="x", pady=(0, 5))
         tk.Label(
-            strategy_frame,
-            text="TRADING MODE:",
-            fg=self._theme("text"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "bold"),
+            strategy_controls, text="TRADING MODE:", fg=self._theme("text"),
+            bg=self._theme("panel"), font=("Consolas", 10, "bold")
         ).pack(side="left", padx=(0, 8))
         for mode, label in (("DAY_TRADING", "DAY TRADING"), ("SWING_TRADING", "SWING TRADING")):
             tk.Button(
-                strategy_frame,
-                text=label,
+                strategy_controls, text=label,
                 command=lambda selected=mode: self._on_strategy_mode_change(selected),
-                fg=self._theme("text"),
-                bg=self._theme("button_bg"),
+                fg=self._theme("text"), bg=self._theme("button_bg"),
                 activebackground=self._theme("button_active"),
-                activeforeground=self._theme("accent"),
-                bd=0,
-                padx=12,
-                pady=6,
-                font=("Consolas", 9, "bold"),
+                activeforeground=self._theme("accent"), bd=0, padx=12, pady=5,
+                font=("Consolas", 9, "bold")
             ).pack(side="left", padx=(0, 8))
         tk.Label(
-            strategy_frame,
-            textvariable=self._strategy_mode_var,
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "bold"),
-        ).pack(side="left", padx=(4, 12))
-        tk.Label(strategy_frame, textvariable=self._risk_policy_var, fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 9, "bold")).pack(side="left", padx=(4, 12))
+            strategy_controls, textvariable=self._strategy_mode_var,
+            fg=self._theme("accent"), bg=self._theme("panel"),
+            font=("Consolas", 10, "bold")
+        ).pack(side="left", padx=(4, 14))
+
+        policy_row = tk.Frame(strategy_frame, bg=self._theme("panel"))
+        policy_row.pack(fill="x")
         tk.Label(
-            strategy_frame,
-            textvariable=self._strategy_profile_var,
-            fg=self._theme("text"),
-            bg=self._theme("panel"),
-            font=("Consolas", 9),
-        ).pack(side="left")
+            policy_row, textvariable=self._risk_policy_var,
+            fg=self._theme("accent"), bg=self._theme("panel"),
+            font=("Consolas", 9, "bold"), justify="left", anchor="w",
+            wraplength=820
+        ).pack(side="left", fill="x", expand=False, padx=(0, 18))
+        tk.Label(
+            policy_row, textvariable=self._strategy_profile_var,
+            fg=self._theme("text"), bg=self._theme("panel"),
+            font=("Consolas", 9), justify="left", anchor="w",
+            wraplength=500
+        ).pack(side="left", fill="x", expand=True)
         self._update_strategy_profile_display()
 
         # MT5 data availability badge (shows whether real MT5 data is being used)
@@ -643,11 +645,11 @@ class AngeliqueDesktopApp(tk.Tk):
             textvariable=self.trading_detail_var,
             fg=self._theme("text"),
             bg=self._theme("panel"),
-            font=("Consolas", 11, "italic"),
+            font=("Consolas", 10, "italic"),
             justify="left",
             wraplength=1100,
         )
-        detail_label.pack(anchor="nw", padx=20, pady=(0, 12))
+        detail_label.pack(anchor="nw", padx=20, pady=(0, 5))
 
         self._trading_monitor_status_var = tk.StringVar(value="ANGELIQUE MONITOR: STARTING...")
         monitor_label = tk.Label(
@@ -659,7 +661,7 @@ class AngeliqueDesktopApp(tk.Tk):
             justify="left",
             wraplength=1100,
         )
-        monitor_label.pack(anchor="nw", padx=20, pady=(0, 12))
+        monitor_label.pack(anchor="nw", padx=20, pady=(0, 5))
         self._trading_health_var = tk.StringVar(value="TRADING HEALTH: CHECKING...")
         tk.Label(
             self.trading_view_frame,
@@ -669,10 +671,10 @@ class AngeliqueDesktopApp(tk.Tk):
             font=("Consolas", 9),
             justify="left",
             wraplength=1100,
-        ).pack(anchor="nw", padx=20, pady=(0, 12))
+        ).pack(anchor="nw", padx=20, pady=(0, 5))
 
         timeframe_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
-        timeframe_frame.pack(anchor="nw", padx=20, pady=(0, 14))
+        timeframe_frame.pack(anchor="nw", padx=20, pady=(0, 8))
 
         tk.Label(
             timeframe_frame,
@@ -747,7 +749,7 @@ class AngeliqueDesktopApp(tk.Tk):
         account_mode_menu.pack(side="left", padx=(0, 16))
 
         trading_navigation = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
-        trading_navigation.pack(anchor="nw", padx=20, pady=(0, 14))
+        trading_navigation.pack(anchor="nw", padx=20, pady=(0, 8))
         self._position_monitor_button = tk.Button(
             trading_navigation,
             text="OPEN POSITION MONITOR",
@@ -777,12 +779,15 @@ class AngeliqueDesktopApp(tk.Tk):
         )
         self._signal_button.pack(side="left", padx=(10, 0))
 
-        dashboard_container = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), height=350)
-        dashboard_container.pack(fill="x", expand=False, padx=20, pady=(0, 10))
+        dashboard_container = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), height=360)
+        # Expand the main dashboard into the available vertical space instead of
+        # leaving the unused lower portion of the Trading Hub empty.
+        dashboard_container.pack(fill="both", expand=True, padx=20, pady=(0, 10))
         dashboard_container.pack_propagate(False)
 
-        account_frame = tk.Frame(dashboard_container, bg=self._theme("panel"), bd=1, relief="solid")
+        account_frame = tk.Frame(dashboard_container, bg=self._theme("panel"), bd=1, relief="solid", width=385)
         account_frame.pack(side="left", fill="y", padx=(0, 12), pady=0)
+        account_frame.pack_propagate(False)
         tk.Label(
             account_frame,
             text="ACCOUNT SUMMARY",
@@ -804,10 +809,20 @@ class AngeliqueDesktopApp(tk.Tk):
             row, col = divmod(index, 3)
             container = tk.Frame(account_grid, bg=self._theme("panel_alt"), bd=0)
             container.grid(row=row, column=col, sticky="ew", padx=3, pady=2)
-            tk.Label(container, text=label, fg=self._theme("text"), bg=self._theme("panel_alt"), font=("Consolas", 8)).pack(anchor="w", padx=5, pady=(3, 0))
-            value_label = tk.Label(container, text="—", fg=self._theme("accent"), bg=self._theme("panel_alt"), font=("Consolas", 9, "bold"))
-            value_label.pack(anchor="w", padx=5, pady=(0, 3))
-            self._account_labels[label.lower().replace(" ", "_")] = value_label
+            tk.Label(
+                container, text=label, fg=self._theme("text"), bg=self._theme("panel_alt"),
+                font=("Consolas", 8), justify="center", anchor="center", wraplength=108
+            ).pack(fill="x", padx=3, pady=(3, 0))
+            value_label = tk.Label(
+                container, text="—", fg=self._theme("accent"), bg=self._theme("panel_alt"),
+                font=("Consolas", 10, "bold"), justify="center", anchor="center"
+            )
+            value_label.pack(fill="x", padx=3, pady=(0, 3))
+            # Normalize display labels into stable backend keys. In particular,
+            # "Risk %" must map to risk_percent rather than the literal key
+            # "risk_%", otherwise a valid 1% risk value renders as "—".
+            field_key = label.lower().replace(" ", "_").replace("%", "percent")
+            self._account_labels[field_key] = value_label
         for column in range(3):
             account_grid.grid_columnconfigure(column, weight=1, uniform="account")
 
@@ -824,14 +839,14 @@ class AngeliqueDesktopApp(tk.Tk):
         self.trading_chart_canvas = tk.Canvas(
             chart_frame,
             bg=self._theme("panel_alt"),
-            height=420,
+            height=285,
             highlightthickness=0,
         )
         self.trading_chart_canvas.pack(fill="both", expand=True, padx=14, pady=(0, 14))
         self.trading_chart_canvas.bind("<Configure>", self._on_trading_chart_resize)
         self._draw_trading_placeholder_chart()
 
-        positions_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), bd=1, relief="solid")
+        positions_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), bd=1, relief="solid", height=220)
         tk.Label(
             positions_frame,
             text="POSITION MONITORING",
@@ -844,21 +859,22 @@ class AngeliqueDesktopApp(tk.Tk):
             text="Green/positive P&L means profit. Automatic position management may adjust stops or close a trade when a configured invalidation/time-stop is triggered.",
             fg=self._theme("text"),
             bg=self._theme("panel"),
-            font=("Consolas", 9),
-        ).pack(anchor="nw", padx=14, pady=(0, 8))
+            font=("Consolas", 8),
+            justify="left", anchor="w", wraplength=1400,
+        ).pack(anchor="nw", padx=14, pady=(0, 4))
         position_columns = ("position", "prices", "stop", "target", "profit", "expected_profit", "r", "status")
         self._positions_tree = ttk.Treeview(
             positions_frame,
             columns=position_columns,
             show="headings",
-            height=3,
+            height=4,
             style="Hotspot.Treeview",
         )
         headings = (
-            ("position", "POSITION", 190), ("prices", "CURRENT | ENTRY", 190),
-            ("stop", "SL REMAIN | TOTAL", 190), ("target", "TP REMAIN | TOTAL", 190),
-            ("profit", "P/L", 100), ("expected_profit", "TP PROFIT", 125),
-            ("r", "R", 80), ("status", "STATUS", 130),
+            ("position", "POSITION", 175), ("prices", "CURRENT | ENTRY", 175),
+            ("stop", "SL REMAIN | TOTAL", 175), ("target", "TP REMAIN | TOTAL", 175),
+            ("profit", "P/L", 90), ("expected_profit", "TP PROFIT", 105),
+            ("r", "R", 65), ("status", "STATUS", 115),
         )
         for column, heading, width in headings:
             self._positions_tree.heading(column, text=heading)
@@ -867,12 +883,12 @@ class AngeliqueDesktopApp(tk.Tk):
         self._positions_tree.tag_configure("loss", foreground="#ef4444")
         self._positions_tree.tag_configure("neutral", foreground=self._theme("text"))
         self._positions_tree.bind("<<TreeviewSelect>>", self._on_position_selected)
-        self._positions_tree.pack(fill="x", padx=14, pady=(0, 10))
+        self._positions_tree.pack(fill="both", expand=True, padx=14, pady=(0, 10))
         # This frame was previously constructed but never packed, which made the
         # entire position-monitor section invisible in the main Trading Hub.
-        positions_frame.configure(height=105)
+        positions_frame.configure(height=220)
         positions_frame.pack_propagate(False)
-        positions_frame.pack(fill="x", expand=False, padx=20, pady=(0, 8))
+        positions_frame.pack(fill="both", expand=False, padx=20, pady=(0, 8))
 
         # Tooltip widget for OHLC on hover (created as child of canvas so we can use create_window)
         try:
@@ -892,7 +908,7 @@ class AngeliqueDesktopApp(tk.Tk):
             pass
 
         button_row = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), height=48)
-        button_row.pack(fill="x", expand=False, padx=20, pady=(0, 8))
+        button_row.pack(fill="x", expand=False, padx=20, pady=(0, 4))
         button_row.pack_propagate(False)
 
         self._trade_action_button = None
@@ -1341,7 +1357,7 @@ class AngeliqueDesktopApp(tk.Tk):
             self.center_status_label.pack_forget()
         self._hide_main_panels()
         if self.trading_view_frame is not None:
-            self.trading_view_frame.place(relx=0.02, rely=0.055, relwidth=0.96, relheight=0.88)
+            self.trading_view_frame.place(relx=0.01, rely=0.035, relwidth=0.98, relheight=0.94)
         if getattr(self, "position_monitor_view_frame", None) is not None:
             self.position_monitor_view_frame.place_forget()
         if self.signal_view_frame is not None:
@@ -1535,7 +1551,7 @@ class AngeliqueDesktopApp(tk.Tk):
             score_text = "--"
         risk_amount = plan.get("risk_amount")
         risk_pct = plan.get("risk_percent")
-        risk_text = f"{float(risk_pct):.2f}%" if risk_pct is not None else "TIERED"
+        risk_text = f"{float(risk_pct):.2f}%" if risk_pct is not None else f"{float(config.TRADING_RISK_PER_TRADE_PERCENT):.2f}%"
         rr = display.get("reward_to_risk")
         rr_text = f"1:{float(rr):.2f}" if rr is not None else "--"
         broker_text = route.replace(" ONLY", "")
@@ -1564,7 +1580,7 @@ class AngeliqueDesktopApp(tk.Tk):
              str(display.get("model") or "No complete model")),
             ("Structure", "PASS" if analysis.get("valid") else "WAIT", str(analysis.get("reason") or report.get("reason") or "No confirmed structure")),
             ("Confluence", "PASS" if score is not None and score >= (display.get("minimum_score") or 7) else "WAIT", f"Score {score_text}"),
-            ("Spread", "PASS" if spread not in (None, "--", "-") else "CHECK", f"{_fmt_signal_spread(spread)} pips" if spread not in (None, "--", "-") else "Awaiting live spread"),
+            ("Spread", "PASS" if spread not in (None, "--", "-") else "CHECK", f"{_fmt_signal_spread(spread)} {spread_unit}" if spread not in (None, "--", "-") else "Awaiting live spread"),
             ("Entry", "PASS" if plan.get("direction") in {"BUY", "SELL"} else "WAIT", "Executable direction confirmed" if plan.get("direction") in {"BUY", "SELL"} else "Waiting for complete entry"),
             ("News", "REVIEW" if plan.get("requires_manual_approval") else "PASS", plan.get("manual_approval_reason") or "No high-impact/news conflict flagged"),
         ]
@@ -1581,8 +1597,10 @@ class AngeliqueDesktopApp(tk.Tk):
             f"Entry: {_fmt_signal_value(plan.get('entry'))}",
             f"Stop:  {_fmt_signal_value(plan.get('stop_loss'))}",
             f"Target:{_fmt_signal_value(plan.get('take_profit'))}",
-            f"Spread: {_fmt_signal_spread(spread)} pips" if spread not in (None, "--", "-") else "Spread: awaiting live feed",
-            f"Risk tier: {risk_text}" + (f"   Budget: ${float(risk_amount):.2f}" if risk_amount is not None else ""),
+            f"Spread: {_fmt_signal_spread(spread)} {spread_unit}" if spread not in (None, "--", "-") else "Spread: awaiting live feed",
+            f"Risk: {risk_text}" + (f"   Budget: ${float(risk_amount):.2f}" if risk_amount is not None else ""),
+            f"Stop basis: {plan.get('stop_basis') or 'Not available'}",
+            f"Target basis: {plan.get('target_basis') or 'Not available'}",
             "",
             "EXECUTION:",
             str(display.get("execution_state") or ("AUTO_ENABLED" if executable else "NO_EXECUTION")).replace("_", " "),
@@ -1811,8 +1829,23 @@ class AngeliqueDesktopApp(tk.Tk):
 
             generation = self._signal_generation
             threading.Thread(target=sync_worker, args=(generation,), daemon=True).start()
+            self.after(5000, lambda g=generation, m=selected_mode, s=symbol: self._account_mode_switch_timeout(m, s, g))
         else:
             self._refresh_trading_view()
+
+    def _account_mode_switch_timeout(self, selected_mode: str, symbol: str, generation: int):
+        if generation != self._signal_generation or self._active_center_view != "signals" or not self._signal_refresh_running:
+            return
+        self._signal_refresh_running = False
+        self._signal_status_var.set(f"{symbol} | [{selected_mode.upper()}] | ACCOUNT MODE TIMEOUT\nMT5 account verification did not complete within 5s. No trade plan is trusted.")
+        for item in self._signal_evidence_tree.get_children():
+            self._signal_evidence_tree.delete(item)
+        self._signal_evidence_tree.insert("", "end", values=("Account mode", "BLOCK", "Verification timeout; stale account data suppressed"), tags=("bad",))
+        self._signal_plan_text.configure(state="normal")
+        self._signal_plan_text.delete("1.0", "end")
+        self._signal_plan_text.insert("1.0", f"{symbol}   ACCOUNT MODE TIMEOUT\n\nRequested: {selected_mode.upper()}\n\nNo trade plan will be displayed until MT5 account verification succeeds.")
+        self._signal_plan_text.configure(state="disabled")
+        self._schedule_signal_refresh()
 
     def _finish_account_mode_switch(self, selected_mode: str, symbol: str, snapshot: dict, generation: int):
         if generation != self._signal_generation or self._active_center_view != "signals":
@@ -1961,11 +1994,46 @@ class AngeliqueDesktopApp(tk.Tk):
                 f"Bridge connected. Account: {account.get('login')} | Balance: ${account.get('balance', 0):,.2f} | Mode: {display_actual_mode}"
             )
 
-        if isinstance(market_data, dict) and "candles" in market_data and market_data["candles"]:
-            self._draw_trading_chart(market_data["candles"])
-            self.trading_detail_var.set("Bridge connected and ready.")
+        # The bridge normally returns candles under market_data["timeframes"].
+        # Older/alternate bridge responses may instead provide top-level
+        # "candles". Normalize both shapes here so a healthy MT5 connection is
+        # never incorrectly rendered as "Market chart unavailable".
+        chart_candles = None
+        selected_symbol, selected_timeframe = self._get_selected_symbol_and_timeframe()
+        chart_timeframe = str(selected_timeframe).upper()
+        if isinstance(market_data, dict):
+            direct_candles = market_data.get("candles")
+            if isinstance(direct_candles, list) and direct_candles:
+                chart_candles = direct_candles
+                chart_timeframe = market_data.get("timeframe") or chart_timeframe
+            else:
+                timeframe_map = market_data.get("timeframes")
+                if isinstance(timeframe_map, dict):
+                    selected_candles = timeframe_map.get(str(chart_timeframe).upper())
+                    if isinstance(selected_candles, list) and selected_candles:
+                        chart_candles = selected_candles
+                    else:
+                        # Graceful fallback: display the first valid returned
+                        # timeframe rather than showing a false connection error.
+                        for returned_tf, returned_candles in timeframe_map.items():
+                            if isinstance(returned_candles, list) and returned_candles:
+                                chart_timeframe = str(returned_tf).upper()
+                                chart_candles = returned_candles
+                                break
+
+        if chart_candles:
+            self._draw_trading_chart(chart_candles)
+            actual_count = len(chart_candles)
+            if chart_timeframe == str(selected_timeframe).upper():
+                self.trading_detail_var.set(
+                    f"Live {chart_timeframe} market data loaded • {actual_count} completed candles available for the chart."
+                )
+            else:
+                self.trading_detail_var.set(
+                    f"{str(timeframe).upper()} data was not returned; displaying live {chart_timeframe} data instead • {actual_count} candles."
+                )
             self._append_trading_transcript(
-                f"Market data loaded for {market_data.get('symbol', symbol)} ({len(market_data['candles'])} candles on {market_data.get('timeframe', 'unknown')}timeframe)."
+                f"Market data loaded for {market_data.get('symbol', symbol)} ({actual_count} candles on {chart_timeframe})."
             )
         else:
             self._draw_trading_placeholder_chart()
@@ -1976,9 +2044,11 @@ class AngeliqueDesktopApp(tk.Tk):
             elif error_text:
                 self._append_trading_transcript(f"Market data error for {symbol}: {error_text}")
             else:
-                self._append_trading_transcript(f"Market chart unavailable for {symbol}. Ensure MT5 is connected with {display_requested_mode} account.")
+                self._append_trading_transcript(
+                    f"No usable candle data returned for {symbol} on {str(timeframe).upper()} in {display_requested_mode} mode."
+                )
             self.trading_detail_var.set(
-                f"Market chart unavailable{': ' + error_text if error_text else '. Check MT5 connection.'}"
+                f"No usable market candles returned{': ' + error_text if error_text else '. MT5 is connected, but this timeframe currently has no usable data.'}"
             )
 
         self._update_bridge_error(active, bridge_error)
@@ -2124,13 +2194,9 @@ class AngeliqueDesktopApp(tk.Tk):
                 display_mode = account.get("mode", "demo")
         display_mode = self._swap_display_mode(display_mode)
         from skills.trading_skill.profiles import get_trading_profile
-        from skills.trading_skill.risk import account_risk_percent
         profile = get_trading_profile(self._trading_hub_controller.trading_mode)
         equity = float(account.get("equity", 0) or 0) if isinstance(account, dict) else 0.0
-        try:
-            risk_percent = account_risk_percent(equity) if equity > 0 else 0.0
-        except ValueError:
-            risk_percent = 0.0
+        risk_percent = float(config.TRADING_RISK_PER_TRADE_PERCENT) if equity > 0 else 0.0
 
         # Only show figures for the account mode selected in the Trading Hub.
         if not account or not account.get("login") or account.get("mode_match") is False:
@@ -2173,9 +2239,22 @@ class AngeliqueDesktopApp(tk.Tk):
                 "max_risk": config.TRADING_MAX_RISK_PERCENT,
                 "current_open_risk": account.get("current_open_risk_percent", 0),
             }
+        currency_keys = {"balance", "equity", "used_margin", "free_margin", "risk_amount"}
+        percent_keys = {"risk_percent", "daily_loss", "weekly_loss", "drawdown", "max_risk", "current_open_risk"}
         for key, label in self._account_labels.items():
             value = values.get(key, "—")
-            label.configure(text=f"{value:,}" if isinstance(value, (int, float)) else str(value))
+            if isinstance(value, (int, float)):
+                if key in percent_keys:
+                    display_value = f"{float(value):.2f}%"
+                elif key in currency_keys:
+                    display_value = f"${float(value):,.2f}"
+                elif key == "margin_level":
+                    display_value = f"{float(value):,.2f}%"
+                else:
+                    display_value = f"{value:,}"
+            else:
+                display_value = str(value)
+            label.configure(text=display_value)
 
     def _draw_trading_placeholder_chart(self):
         if self.trading_chart_canvas is None:
@@ -2673,7 +2752,8 @@ class AngeliqueDesktopApp(tk.Tk):
         confluence = (result.get("details") or {}).get("confluence", {}) if isinstance(result, dict) else {}
         analysis_details = (result.get("details") or {}).get("analysis", {}) if isinstance(result, dict) else {}
         strategy_info = (analysis_details.get("strategy") or {}).get("selected", {})
-        strategy_name = strategy_info.get("name") or profile.get("strategy_mode") or "AUTO"
+        strategy_name = plan.get("strategy") if isinstance(plan, dict) else None
+        strategy_name = strategy_name or strategy_info.get("name") or profile.get("strategy_mode") or "AUTO"
         account = result.get("account") if isinstance(result, dict) else None
         market = result.get("market") if isinstance(result, dict) else None
         if account is not None and not isinstance(account, dict):
@@ -2681,13 +2761,15 @@ class AngeliqueDesktopApp(tk.Tk):
         if market is not None and not isinstance(market, dict):
             market = market.__dict__
         risk_amount = float(get_value("risk_amount"))
-        potential_profit = risk_amount * float(get_value("reward_to_risk"))
+        expected_profit = get_value("expected_profit_at_tp")
+        potential_profit = float(expected_profit) if expected_profit not in (None, "-", "") else risk_amount * float(get_value("reward_to_risk"))
         score = confluence.get("score", "-")
         mode = plan.get("trading_mode", "DAY_TRADING") if isinstance(plan, dict) else getattr(plan, "trading_mode", "DAY_TRADING")
         structure = smc_analysis.get("structure_shift", "none") if isinstance(smc_analysis, dict) else "none"
         sweep = smc_analysis.get("liquidity_sweep", "none") if isinstance(smc_analysis, dict) else "none"
         location = smc_analysis.get("location", "unknown") if isinstance(smc_analysis, dict) else "unknown"
         news_context = plan.get("news_context", {}) if isinstance(plan, dict) else getattr(plan, "news_context", {})
+        session_context = ((plan.get("analysis_audit") or {}).get("session_context", {}) if isinstance(plan, dict) else {})
         try:
             score_value = float(score)
         except (TypeError, ValueError):
@@ -2702,12 +2784,15 @@ class AngeliqueDesktopApp(tk.Tk):
             f"Environment: {get_value('account_mode')} | Symbol: {get_value('mt5_symbol')} | Direction: {get_value('direction')}",
             f"PAIR: {get_value('mt5_symbol')}",
             f"MODE: {mode} | STRATEGY: {strategy_name} | SCORE: {score}/10 | MINIMUM: {profile.get('minimum_score', 7)}/10",
+            f"Stop basis: {get_value('stop_basis')}",
+            f"Target basis: {get_value('target_basis')}",
             "",
             "SETUP",
             f"DIRECTION: {get_value('direction')} | ORDER: {get_value('order_type')}",
             f"Structure: {structure} | Liquidity: {sweep} | Zone: {location}",
             f"News: {news_context.get('bias', 'unknown')} | {news_context.get('reason', 'No news context available.')}",
             f"Timeframes: {profile.get('context_timeframe', 'H4')} > {profile.get('trend_timeframe', 'H1')} > {profile.get('setup_timeframe', 'M15')} > {profile.get('entry_timeframe', 'M5')}",
+            f"Session: {session_context.get('session', 'UNKNOWN')} | Active: {', '.join(session_context.get('active_sessions', [])) or 'none'}",
             f"Spread: {((market or {}).get('spread_pips') if (market or {}).get('spread_pips') is not None else (market or {}).get('spread_points', (market or {}).get('spread', '-')))} {(market or {}).get('spread_unit', 'pips')}",
             "",
             "EXECUTION LEVELS",
@@ -2715,7 +2800,7 @@ class AngeliqueDesktopApp(tk.Tk):
             f"Reward/Risk: 1:{float(get_value('reward_to_risk')):.2f} | Volume: {get_value('volume')}",
             "",
             "RISK",
-            f"Risk: {get_value('risk_percent')}% | Maximum loss: ${risk_amount:.2f} | Estimated profit: ${potential_profit:.2f}",
+            f"Risk: {float(get_value('risk_percent')):.2f}% | Planned SL loss: ${float(get_value('actual_risk_amount') if get_value('actual_risk_amount') not in ('-', None) else risk_amount):.2f} | Estimated profit at TP: ${potential_profit:.2f}",
             f"Estimated spread cost: ${get_value('estimated_spread_cost')} | Commission: ${get_value('estimated_commission')} | Swap: ${get_value('estimated_swap_cost')}",
             f"Margin required: ${get_value('margin_required')} | Free margin after: ${get_value('free_margin_after')}",
             f"Equity: ${(account or {}).get('equity', '-')} | Projected margin level: {get_value('projected_margin_level')}",

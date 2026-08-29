@@ -8,6 +8,7 @@ from .position_monitor import position_monitor
 from .profiles import get_trading_profile
 from .universe import eligible_symbols
 from .protection import drawdown_percent, consecutive_losses
+from .trading_notifier import notify
 from core import config
 
 _workflows = {}
@@ -97,22 +98,12 @@ def close_all_positions_manual(account_mode: str = "demo"):
 
 
 def run_position_management(account_mode: str = "demo", trading_mode: str = "DAY_TRADING"):
-    """The automated post-trade monitor: for every open position, re-run
-    structure analysis to check whether the setup that justified the
-    trade has since been invalidated by an opposing, complete setup; if
-    so, close it. Otherwise apply break-even at +1R and trail at +2R as
-    usual. This is what makes position management act instead of just
-    advise -- call it on a timer (e.g. every 20-30s) alongside the scan
-    loop."""
+    """Run one safe post-trade management pass for all open positions."""
     from .analysis import analyze_structure
     from .data_quality import assess_candles
 
     active = workflow(trading_mode)
     profile = get_trading_profile(trading_mode)
-
-    # Enforce account-level circuit breakers before touching any open position.
-    # This guarantees the kill switch is evaluated on every management cycle,
-    # not only when a universe scan happens to run.
     loss_guard = enforce_loss_limits(account_mode, trading_mode)
     if loss_guard.get("triggered"):
         return {
@@ -122,6 +113,7 @@ def run_position_management(account_mode: str = "demo", trading_mode: str = "DAY
             "positions": loss_guard.get("flatten_result", {}).get("closed", []),
             "applied": [],
         }
+
     positions_response = position_monitor.get_open_positions(account_mode)
     if positions_response.get("status") == "error":
         return positions_response
@@ -131,41 +123,53 @@ def run_position_management(account_mode: str = "demo", trading_mode: str = "DAY
         symbol = position.get("symbol")
         if not symbol or symbol in market_by_symbol:
             continue
-        entry: dict = {}
+        entry: dict = {"data_quality": "unavailable", "data_quality_reason": "Fresh market data has not been validated."}
+        direction = "SELL" if str(position.get("type", position.get("direction", "BUY"))).upper() == "SELL" else "BUY"
         try:
             required = profile.analysis_required_timeframes
             count = max(profile.candle_count(tf) for tf in required)
             raw_market = active.adapter.market(symbol, required, account_mode, count)
-            timeframes = raw_market.get("timeframes", {})
-            entry["price"] = raw_market.get("bid") if str(position.get("type", "BUY")).upper() == "SELL" else raw_market.get("ask")
+            timeframes = raw_market.get("timeframes", {}) or {}
+            entry["price"] = raw_market.get("bid") if direction == "SELL" else raw_market.get("ask")
             entry["spread_pips"] = raw_market.get("spread_pips")
-            entry["atr"] = raw_market.get("atr")
-            if not entry["atr"]:
-                candles = timeframes.get(profile.entry_timeframe, [])
-                true_ranges = []
-                previous_close = None
-                for candle in candles[-50:]:
-                    high = float(candle.get("high", 0) or 0)
-                    low = float(candle.get("low", 0) or 0)
-                    close = float(candle.get("close", 0) or 0)
-                    if high <= 0 or low <= 0 or close <= 0:
-                        continue
-                    true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)) if previous_close else high - low)
-                    previous_close = close
-                entry["atr"] = sum(true_ranges[-14:]) / len(true_ranges[-14:]) if true_ranges else None
-            quality_ok = bool(raw_market.get("bid") and raw_market.get("ask")) and all(
-                assess_candles(timeframes.get(tf, []), tf)["status"] == "fresh" for tf in required
-            )
-            if quality_ok:
+            entry["spread_points"] = raw_market.get("spread_points")
+            entry["spread_unit"] = raw_market.get("spread_unit")
+
+            quality = {tf: assess_candles(timeframes.get(tf, []), tf) for tf in required}
+            quality_ok = bool(raw_market.get("bid") and raw_market.get("ask")) and not raw_market.get("stale") and not raw_market.get("error") and all(item.get("status") == "fresh" for item in quality.values())
+            if not quality_ok:
+                bad = [f"{tf}: {item.get('status')}" for tf, item in quality.items() if item.get("status") != "fresh"]
+                entry["data_quality"] = "stale" if raw_market.get("stale") else "unavailable"
+                entry["data_quality_reason"] = raw_market.get("error") or ("; ".join(bad) if bad else "Fresh bid/ask or candle data is unavailable.")
+            else:
                 analysis = analyze_structure(timeframes, profile=profile, registry=active._zone_registry)
-                direction = "SELL" if str(position.get("type", "BUY")).upper() == "SELL" else "BUY"
+                entry_tf = timeframes.get(profile.entry_timeframe, []) or []
+                indicators = (analysis.get("indicators") or {}).get(profile.entry_timeframe, {}) if isinstance(analysis, dict) else {}
+                entry["atr"] = indicators.get("atr_14")
+                entry["data_quality"] = "fresh"
+                entry["data_quality_reason"] = "Fresh closed-candle market data validated."
+
                 opposite_decision = "SELL_PLAN_READY" if direction == "BUY" else "BUY_PLAN_READY"
                 invalidated = bool(analysis.get("valid") and analysis.get("decision") == opposite_decision)
                 entry["setup_invalidated"] = invalidated
                 entry["invalidation_reason"] = (
                     f"An opposing, complete setup has formed: {analysis.get('reason', '')}" if invalidated else None
                 )
+                if entry["atr"] is None and len(entry_tf) >= 15:
+                    ranges = []
+                    previous_close = None
+                    for candle in entry_tf[-30:]:
+                        high = float(candle.get("high", 0) or 0)
+                        low = float(candle.get("low", 0) or 0)
+                        close = float(candle.get("close", 0) or 0)
+                        if high <= 0 or low <= 0 or close <= 0:
+                            continue
+                        ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)) if previous_close is not None else high - low)
+                        previous_close = close
+                    entry["atr"] = sum(ranges[-14:]) / len(ranges[-14:]) if ranges[-14:] else None
         except Exception as exc:
+            entry["data_quality"] = "error"
+            entry["data_quality_reason"] = f"Position-management market lookup failed: {exc}"
             log_event(30, "service.position_management.market_lookup_failed", symbol=symbol, error=str(exc))
         market_by_symbol[symbol] = entry
 
@@ -203,19 +207,19 @@ def decide_and_act(
     opportunity = scan["opportunity"]
     plan = opportunity["plan"]
     if plan.get("requires_manual_approval"):
+        notify("MANUAL_APPROVAL_REQUIRED", plan)
         return {**scan, "state": "PENDING_APPROVAL", "execution": {"state": "MANUAL_APPROVAL_REQUIRED", "reason": plan.get("manual_approval_reason", "News interference requires approval."), "plan": plan}}
 
     confirmation_phrase = plan.get("confirmation_phrase")
     if not auto_execution_enabled(account_mode):
         return {**scan, "state": "PENDING_APPROVAL", "execution": {"state": "APPROVAL_REQUIRED", "reason": "Automatic execution is disabled for this account mode.", "message": f"Automatic execution is disabled for {account_mode.upper()} mode.", "plan": plan}}
     result = execute_trade(confirmation_phrase)
-    if result.state.value != "EXECUTED":
-        failure = str(result.details.get("reason") or result.message or "").lower() if isinstance(result.details, dict) else str(result.message or "").lower()
-        if "trading is disabled" in failure or "trade disabled" in failure or "autotrading" in failure:
-            import time
-            _auto_execution_blocked_until[mode_key] = time.time() + 60.0
-    else:
+    failure = str(result.details.get("reason") or result.message or "").lower() if isinstance(result.details, dict) else str(result.message or "").lower()
+    if result.state.value == "EXECUTED":
         _auto_execution_blocked_until.pop(mode_key, None)
+    elif "trading is disabled" in failure or "trade disabled" in failure or "autotrading" in failure:
+        import time
+        _auto_execution_blocked_until[mode_key] = time.time() + 60.0
     return {
         **scan,
         "state": "AUTO_EXECUTED" if result.state.value == "EXECUTED" else f"AUTO_EXECUTE_FAILED:{result.state.value}",
@@ -235,8 +239,8 @@ def prepare_trade(symbol: str, account_mode: str = "demo", trading_mode: str = "
 def prepare_trade_payload(symbol: str, account_mode: str = "demo", risk_percent: float | None = None, trading_mode: str = "DAY_TRADING"):
     """Compatibility payload wrapper using the caller's trading mode.
 
-    Legacy callers may omit risk_percent; in that case the profile's tiered
-    risk is used rather than temporarily assigning None to the workflow.
+    Compatibility wrapper. The trading engine enforces the single 1% risk policy;
+    a caller-supplied risk_percent other than 1% is rejected by the workflow.
     """
     active = workflow(trading_mode)
     previous_risk = active.risk_percent
@@ -276,7 +280,13 @@ def execute_trade(confirmation_phrase: str):
         from .models import WorkflowResult, WorkflowState
         return WorkflowResult(WorkflowState.REJECTED, "Execution rejected: no current plan matches the confirmation phrase.", details={"failure_stage": "plan_lookup"})
     result = active.execute(confirmation_phrase)
-    if result.plan is not None and result.state.value in {"EXECUTED", "REJECTED", "EXPIRED"}:
+    if result.plan is not None and result.state.value in {"EXECUTED", "REJECTED", "EXPIRED", "EXECUTING"}:
+        if result.state.value == "EXECUTED":
+            notify("TRADE_EXECUTED", result.plan.as_dict())
+        elif result.state.value == "EXECUTING" and "VERIFICATION_PENDING" in result.message:
+            notify("EXECUTION_VERIFICATION_PENDING", result.plan.as_dict())
+        elif result.state.value == "REJECTED":
+            notify("TRADE_FAILED", result.plan.as_dict())
         record_trade(
             result.plan.as_dict(),
             {**(result.details or {}), "status": result.state.value, "message": result.message},

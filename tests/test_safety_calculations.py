@@ -7,7 +7,7 @@ def specs():
 
 
 def test_volume_never_exceeds_risk_budget():
-    result=build_risk(1.10000,1.09900,1000,0.5,specs(),free_margin=5000,used_margin=100,minimum_free_margin=100)
+    result=build_risk(1.10000,1.09900,1000,1.0,specs(),free_margin=5000,used_margin=100,minimum_free_margin=100)
     assert result["actual_risk_amount"] <= result["risk_amount"] + 1e-9
 
 

@@ -103,8 +103,8 @@ def _structure(candles: list[dict[str, Any]]) -> dict[str, Any]:
 def detect_smc(candles: list[dict[str, Any]], direction: str | None = None, timeframe: str | None = None, registry: ZoneRegistry | None = None) -> dict[str, Any]:
     """Return observable SMC evidence without treating any item as an entry signal."""
     candles = _closed_candles(candles)
-    if len(candles) < 5:
-        return {"status": "insufficient", "valid": False, "reason": "At least five candles are required for SMC context."}
+    if len(candles) < 30:
+        return {"status": "insufficient", "valid": False, "reason": "At least 30 completed candles are required for SMC context.", "required_candles": 30, "available_candles": len(candles)}
 
     recent = candles[-200:]
     highs = [_high(candle) for candle in recent]

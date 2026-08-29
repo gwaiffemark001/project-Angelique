@@ -57,6 +57,8 @@ def validate_trade_setup(
 
     if risk_percent <= 0:
         reasons.append("Risk percentage must be positive.")
+    elif abs(float(risk_percent) - float(config.TRADING_RISK_PER_TRADE_PERCENT)) > 1e-9:
+        reasons.append(f"Risk policy requires {config.TRADING_RISK_PER_TRADE_PERCENT:.2f}% per trade; received {float(risk_percent):.2f}%.")
     if risk_percent > config.TRADING_MAX_RISK_PERCENT:
         reasons.append(f"Risk percentage exceeds the configured maximum ({config.TRADING_MAX_RISK_PERCENT:.2f}%).")
     if risk_amount <= 0:

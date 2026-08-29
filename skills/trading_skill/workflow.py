@@ -13,6 +13,7 @@ from .smc import ZoneRegistry
 from .profiles import TradingMode, get_trading_profile, max_spread_for_symbol, max_spread_points_for_symbol, normalize_trading_mode
 from core import config
 from .risk import build_risk, validate_profile_limits, effective_risk_percent
+from .trade_levels import calculate_trade_levels
 from .safety import validate_trade_setup
 from .news_context import assess_news
 from .symbols import resolve
@@ -26,7 +27,7 @@ class TradingWorkflow:
         self.adapter = adapter
         self.trading_mode = normalize_trading_mode(trading_mode)
         self.profile = get_trading_profile(self.trading_mode)
-        self.risk_percent = self.profile.risk_per_trade if risk_percent is None else risk_percent
+        self.risk_percent = config.TRADING_RISK_PER_TRADE_PERCENT if risk_percent is None else risk_percent
         self.minimum_rr = self.profile.minimum_rr if minimum_rr is None else minimum_rr
         self._plans: dict[str, TradePlan] = {}
         self._active_plans: dict[str, TradePlan] = {}
@@ -46,12 +47,24 @@ class TradingWorkflow:
     def set_trading_mode(self, mode: TradingMode | str) -> None:
         self.trading_mode = normalize_trading_mode(mode)
         self.profile = get_trading_profile(self.trading_mode)
-        self.risk_percent = self.profile.risk_per_trade
+        self.risk_percent = config.TRADING_RISK_PER_TRADE_PERCENT
         self.minimum_rr = self.profile.minimum_rr
 
     def clear_pending_plans(self) -> None:
         self._plans.clear()
         self._active_plans.clear()
+
+    def _broker_profit(self, mode: str, symbol: str, direction: str, volume: float, price_open: float, price_close: float) -> float | None:
+        calculator = getattr(self.adapter, "calculate_profit", None)
+        if not callable(calculator):
+            return None
+        try:
+            response = calculator(mode, symbol, direction, volume, price_open, price_close)
+            if isinstance(response, dict) and response.get("status") != "error" and response.get("profit") is not None:
+                return float(response["profit"])
+        except Exception:
+            return None
+        return None
 
     def _revalidate_plan(self, plan: TradePlan) -> tuple[bool, str]:
         if self._is_expired(plan):
@@ -83,6 +96,8 @@ class TradingWorkflow:
                 list(positions_response.get("positions", []) or []),
                 plan_profile,
                 new_risk_percent=plan.risk_percent,
+                symbol=plan.mt5_symbol,
+                direction=plan.direction,
             )
             if not portfolio["valid"]:
                 return False, f"Portfolio limit failed during revalidation: {'; '.join(portfolio['reasons'])}"
@@ -120,7 +135,8 @@ class TradingWorkflow:
 
         current_price = market.ask if plan.direction == "BUY" else market.bid
         slippage = abs(current_price - plan.entry)
-        acceptable_slippage = max(plan.entry * 0.0005, 0.0005)
+        point = float(specs.get("point", 0) or 0)
+        acceptable_slippage = max(point * 20, float(plan.spread_price or 0) * 1.5, 1e-8)
         if slippage > acceptable_slippage:
             return False, f"Price moved too far from the approved entry ({current_price:.6f} vs {plan.entry:.6f})."
 
@@ -135,17 +151,21 @@ class TradingWorkflow:
         if fresh_analysis.get("decision") != expected_decision:
             return False, "Technical setup changed before execution; the approved plan is stale."
 
+        loss_per_lot = self._broker_profit(plan.account_mode, plan.mt5_symbol, plan.direction, 1.0, plan.entry, plan.stop_loss)
+        profit_per_lot = self._broker_profit(plan.account_mode, plan.mt5_symbol, plan.direction, 1.0, plan.entry, plan.take_profit)
         try:
             risk = build_risk(
                 plan.entry,
                 plan.stop_loss,
                 fresh_account.equity,
-                plan.risk_percent,
+                config.TRADING_RISK_PER_TRADE_PERCENT,
                 raw_market.get("symbol_specs", {}),
                 free_margin=fresh_account.free_margin,
                 used_margin=fresh_account.used_margin,
                 minimum_free_margin=config.TRADING_MIN_FREE_MARGIN,
                 current_margin_level=fresh_account.margin_level,
+                loss_per_lot=abs(loss_per_lot) if loss_per_lot is not None else None,
+                profit_per_lot_at_tp=profit_per_lot,
             )
         except ValueError as exc:
             return False, f"Risk revalidation failed: {exc}"
@@ -157,7 +177,7 @@ class TradingWorkflow:
             stop_loss=plan.stop_loss,
             take_profit=plan.take_profit,
             risk_amount=risk["risk_amount"],
-            risk_percent=plan.risk_percent,
+            risk_percent=config.TRADING_RISK_PER_TRADE_PERCENT,
             volume=risk["volume"],
             margin_required=risk["margin_required"],
             free_margin_after=risk["free_margin_after"],
@@ -185,10 +205,8 @@ class TradingWorkflow:
             raw_account = self.adapter.account(mode)
         account = account_snapshot(raw_account, mode)
         try:
-            effective_risk = effective_risk_percent(
-                account.equity,
-                self.risk_percent if risk_percent is None else risk_percent,
-            )
+            requested_risk = self.risk_percent if risk_percent is None else risk_percent
+            effective_risk = effective_risk_percent(account.equity, requested_risk)
         except ValueError as exc:
             return WorkflowResult(
                 WorkflowState.REJECTED,
@@ -230,6 +248,7 @@ class TradingWorkflow:
             self.profile,
             new_risk_percent=effective_risk,
             symbol=mt5_symbol,
+            direction="BUY",
         )
         if not portfolio["valid"]:
             return WorkflowResult(
@@ -359,66 +378,34 @@ class TradingWorkflow:
         manual_hold = bool(news_context.get("high_impact_imminent") or news_context.get("directional_conflict"))
         manual_hold_reason = news_context.get("reason", "") if manual_hold else ""
 
+        portfolio = validate_profile_limits(
+            raw_account,
+            list(positions_response.get("positions", []) or []),
+            self.profile,
+            new_risk_percent=config.TRADING_RISK_PER_TRADE_PERCENT,
+            symbol=mt5_symbol,
+            direction=analysis["direction"],
+        )
+        if not portfolio["valid"]:
+            return WorkflowResult(WorkflowState.BLOCKED_BY_RISK, f"BLOCKED_BY_RISK: {'; '.join(portfolio['reasons'])}", decision_state="BLOCKED_BY_RISK", account=account, market=market, details={"analysis": analysis, "portfolio_limits": portfolio})
+
         latest = market.timeframes[self.profile.entry_timeframe][-1]
         entry = float(market.ask if analysis["direction"] == "BUY" and market.ask else market.bid if analysis["direction"] == "SELL" and market.bid else latest["close"])
-        setup_candles = market.timeframes[self.profile.setup_timeframe][-20:]
-        lows = [float(c["low"]) for c in setup_candles]
-        highs = [float(c["high"]) for c in setup_candles]
-        tick_size = float(specs.get("tick_size", 0) or 0)
-        structural_buffer = tick_size * 2 if tick_size > 0 else 0.0
-        selected_zone = analysis.get("setup_assessment", {}).get("zone")
-        if not isinstance(selected_zone, dict):
-            selected_zone = ((analysis.get("strategy") or {}).get("selected", {}) or {}).get("zone")
-        zone_low = float(selected_zone.get("low", 0) or 0) if isinstance(selected_zone, dict) else 0.0
-        zone_high = float(selected_zone.get("high", 0) or 0) if isinstance(selected_zone, dict) else 0.0
-        stop_loss = (
-            min(zone_low if zone_low > 0 else min(lows), min(lows)) - structural_buffer
-            if analysis["direction"] == "BUY"
-            else max(zone_high if zone_high > 0 else max(highs), max(highs)) + structural_buffer
+        selected_strategy = str(analysis.get("strategy_name") or ((analysis.get("strategy") or {}).get("selected") or {}).get("name") or "SMC")
+        level_result = calculate_trade_levels(
+            symbol=mt5_symbol, direction=analysis["direction"], strategy=selected_strategy,
+            analysis=analysis, timeframes=market.timeframes, specs=specs, profile=self.profile, entry=entry,
         )
-        distance = abs(entry - stop_loss)
-        smc_data = analysis.get("smc", {}) or {}
-        structural_target_data = analysis.get("setup_assessment", {}).get("target_liquidity")
-        structural_target = structural_target_data.get("price") if isinstance(structural_target_data, dict) else None
-        if structural_target is None:
-            selected_strategy = (analysis.get("strategy") or {}).get("selected", {})
-            structural_target = selected_strategy.get("target")
-
-        minimum_target = (
-            entry + distance * self.minimum_rr
-            if analysis["direction"] == "BUY"
-            else entry - distance * self.minimum_rr
-        )
-        if structural_target is None:
-            take_profit = minimum_target
-        elif (
-            structural_target >= minimum_target
-            if analysis["direction"] == "BUY"
-            else structural_target <= minimum_target
-        ):
-            take_profit = float(structural_target)
-        else:
+        if not level_result.get("valid"):
             return WorkflowResult(
                 WorkflowState.BLOCKED_BY_RISK,
-                "REJECTED: Structural target cannot provide the configured minimum risk/reward.",
-                decision_state="BLOCKED_BY_RISK",
-                account=account,
-                market=market,
-                details={"analysis": analysis, "target": structural_target, "minimum_target": minimum_target},
+                f"BLOCKED_BY_RISK: {level_result.get('reason', 'No valid structural trade levels.')}",
+                decision_state="BLOCKED_BY_RISK", account=account, market=market,
+                details={"analysis": analysis, "trade_levels": level_result},
             )
-        specs = raw_market.get("symbol_specs", {})
-
-        point = float(specs.get("point", 0) or 0)
-        stops_level = float(specs.get("trade_stops_level", 0) or 0)
-        if point > 0 and stops_level > 0 and distance < stops_level * point:
-            return WorkflowResult(
-                WorkflowState.REJECTED,
-                "REJECTED: Structural stop is inside the broker's minimum stop distance.",
-                account=account,
-                market=market,
-                details={"analysis": analysis, "failure_stage": "broker_stop_distance", "stop_distance": distance, "minimum_stop_distance": stops_level * point},
-            )
-
+        stop_loss = float(level_result["stop_loss"])
+        take_profit = float(level_result["take_profit"])
+        distance = float(level_result["stop_distance"])
         expected_hold_days = self.profile.expected_hold_days
         weekend_exposure = (
             self.profile.mode.value == "SWING_TRADING"
@@ -433,17 +420,15 @@ class TradingWorkflow:
                 details={"analysis": analysis, "failure_stage": "weekend_policy", "expected_hold_days": expected_hold_days},
             )
 
+        loss_per_lot = self._broker_profit(mode, mt5_symbol, analysis["direction"], 1.0, entry, stop_loss)
+        profit_per_lot = self._broker_profit(mode, mt5_symbol, analysis["direction"], 1.0, entry, take_profit)
         try:
             risk = build_risk(
-                entry,
-                stop_loss,
-                account.equity,
-                effective_risk,
-                specs,
-                free_margin=account.free_margin,
-                used_margin=account.used_margin,
-                minimum_free_margin=config.TRADING_MIN_FREE_MARGIN,
-                current_margin_level=account.margin_level,
+                entry, stop_loss, account.equity, config.TRADING_RISK_PER_TRADE_PERCENT, specs,
+                free_margin=account.free_margin, used_margin=account.used_margin,
+                minimum_free_margin=config.TRADING_MIN_FREE_MARGIN, current_margin_level=account.margin_level,
+                loss_per_lot=abs(loss_per_lot) if loss_per_lot is not None else None,
+                profit_per_lot_at_tp=profit_per_lot,
             )
         except ValueError as exc:
             return WorkflowResult(WorkflowState.BLOCKED_BY_RISK, f"BLOCKED_BY_RISK: {exc}", decision_state="BLOCKED_BY_RISK", account=account, market=market, details={"analysis": analysis})
@@ -455,7 +440,7 @@ class TradingWorkflow:
             stop_loss=stop_loss,
             take_profit=take_profit,
             risk_amount=risk["risk_amount"],
-            risk_percent=effective_risk,
+            risk_percent=config.TRADING_RISK_PER_TRADE_PERCENT,
             volume=risk["volume"],
             margin_required=risk["margin_required"],
             free_margin_after=risk["free_margin_after"],
@@ -479,15 +464,16 @@ class TradingWorkflow:
             *confluence.get("disagree", [])[:5],
             *analysis.get("smc_reasons", []),
             *analysis.get("indicator_reasons", []),
-            "SMC evidence supports context but is not a standalone entry signal.",
+            "Strategy evidence is evaluated through the canonical strategy engine.",
             "Stop loss is structural invalidation.",
             "Volume is calculated from equity risk and stop distance, never from leverage.",
             "Leverage affects required margin only.",
+            f"Session context: {analysis.get('session_context', {}).get('session', 'UNKNOWN')}.",
             "Automatic execution is permitted when all gates pass; high-impact/news-conflict plans require explicit approval.",
         ]
 
         spread_cost = None
-        if market.spread is not None and market.tick_size and market.tick_value:
+        if market.spread is not None and market.tick_value and market.tick_size:
             spread_cost = abs(float(market.spread) / float(market.tick_size) * float(market.tick_value) * risk["volume"])
         commission_per_lot = specs.get("commission_per_lot")
         commission_cost = None
@@ -503,12 +489,12 @@ class TradingWorkflow:
             stop_loss,
             take_profit,
             risk["volume"],
-            effective_risk,
+            config.TRADING_RISK_PER_TRADE_PERCENT,
             risk["risk_amount"],
             risk["margin_required"],
             risk["free_margin_after"],
             risk["projected_margin_level"],
-            self.minimum_rr,
+            level_result["rr"],
             mode,
             self._build_plan_id(mt5_symbol, analysis["direction"]),
             tuple(rationale_items),
@@ -519,10 +505,21 @@ class TradingWorkflow:
             news_context=news_context,
             equity_at_decision=account.equity,
             spread_price=market.spread,
-            spread_points=(float(market.spread) / float(market.tick_size) if market.spread is not None and market.tick_size else None),
+            spread_points=market.spread_points,
             spread_pips=market.spread_pips,
             calculated_volume=risk["calculated_volume"],
             actual_risk_amount=risk["actual_risk_amount"],
+            actual_risk_percent=risk["actual_risk_percent"],
+            strategy=selected_strategy,
+            stop_basis=level_result["stop_basis"],
+            target_basis=level_result["target_basis"],
+            stop_swing_id=level_result["stop_swing"]["id"],
+            target_swing_id=level_result["target_swing"]["id"],
+            stop_swing_time=level_result["stop_swing"].get("timestamp"),
+            target_swing_time=level_result["target_swing"].get("timestamp"),
+            stop_timeframe=level_result["stop_timeframe"],
+            target_timeframe=level_result["target_timeframe"],
+            expected_profit_at_tp=risk.get("expected_profit_at_tp"),
             estimated_swap_cost=(
                 abs(float(specs.get("swap_long" if analysis["direction"] == "BUY" else "swap_short", 0) or 0))
                 * risk["volume"] * expected_hold_days
@@ -541,6 +538,7 @@ class TradingWorkflow:
                 "setup_assessment": analysis.get("setup_assessment", {}),
                 "support_resistance": analysis.get("stages", {}).get("support_resistance", {}),
                 "confluence": confluence,
+                "session_context": analysis.get("session_context", {}),
             },
             requires_manual_approval=manual_hold,
             manual_approval_reason=manual_hold_reason,
@@ -558,7 +556,7 @@ class TradingWorkflow:
             plan=plan,
             account=account,
             market=market,
-            details={"analysis": analysis, "safety": safety, "confluence": confluence, "portfolio_limits": portfolio, "pipeline": ["DETECTED", "ANALYZING", "VALIDATING_SETUP", "RISK_CHECK"]},
+            details={"analysis": analysis, "trade_levels": level_result, "safety": safety, "confluence": confluence, "portfolio_limits": portfolio, "pipeline": ["DETECTED", "ANALYZING", "VALIDATING_SETUP", "RISK_CHECK", "SL_TP", "BROKER_SAFETY"]},
         )
 
     def approve(self, confirmation_phrase: str) -> WorkflowResult:
@@ -611,4 +609,6 @@ class TradingWorkflow:
                 details={"failure_stage": response.get("failure_stage", "mt5_order_send"), "reason": response.get("error", "unknown error"), "mt5_response": response},
             )
         verification = response.get("verification", "accepted")
-        return WorkflowResult(WorkflowState.EXECUTED, f"EXECUTED: MT5 accepted the order ({verification}).", plan=plan, details=response)
+        if response.get("position_verified") is True or verification == "position_verified":
+            return WorkflowResult(WorkflowState.EXECUTED, "EXECUTED: MT5 accepted and position execution was verified.", plan=plan, details=response)
+        return WorkflowResult(WorkflowState.EXECUTING, "EXECUTION_ACCEPTED_VERIFICATION_PENDING: MT5 accepted the order but position readback is still pending.", plan=plan, details={**response, "verification_state": "EXECUTION_ACCEPTED_VERIFICATION_PENDING"})

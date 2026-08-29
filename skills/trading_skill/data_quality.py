@@ -34,10 +34,17 @@ def _timestamp_seconds(value: Any) -> float | None:
     return None
 
 
-def assess_candles(candles: list[dict[str, Any]], timeframe: str, now: datetime | None = None) -> dict[str, Any]:
-    """Validate candle shape, ordering, and freshness before analysis."""
+def assess_candles(
+    candles: list[dict[str, Any]],
+    timeframe: str,
+    now: datetime | None = None,
+    *,
+    minimum_candles: int | None = None,
+    require_closed: bool = True,
+) -> dict[str, Any]:
+    """Validate candle shape, history depth, chronology, closure, and freshness."""
     if not candles:
-        return {"status": "missing", "reason": "No candles returned."}
+        return {"status": "missing", "reason": "No candles returned.", "available_candles": 0, "required_candles": minimum_candles or 0}
     timestamps = []
     for index, candle in enumerate(candles):
         if not isinstance(candle, dict):
@@ -54,11 +61,23 @@ def assess_candles(candles: list[dict[str, Any]], timeframe: str, now: datetime 
         timestamp = _timestamp_seconds(candle.get("time", candle.get("timestamp")))
         if timestamp is None:
             return {"status": "unknown", "reason": f"Candle {index} has no valid timestamp."}
+        if require_closed and candle.get("closed") is False:
+            return {"status": "invalid", "reason": "Analysis dataset contains a forming candle."}
         timestamps.append(timestamp)
     if len(set(timestamps)) != len(timestamps):
         return {"status": "invalid", "reason": "Candle timestamps contain duplicates."}
     if timestamps != sorted(timestamps):
         return {"status": "invalid", "reason": "Candle timestamps are not chronological."}
+    available = len(candles)
+    required = int(minimum_candles or 0)
+    if required and available < required:
+        return {
+            "status": "insufficient",
+            "reason": f"Insufficient closed-candle history: {available}/{required} candles.",
+            "available_candles": available,
+            "required_candles": required,
+            "missing_candles": required - available,
+        }
     latest = timestamps[-1]
     current = (now or datetime.now(timezone.utc)).timestamp()
     interval = _TIMEFRAME_SECONDS.get(str(timeframe).upper(), 3600)
@@ -69,5 +88,8 @@ def assess_candles(candles: list[dict[str, Any]], timeframe: str, now: datetime 
         "age_seconds": age,
         "maximum_age_seconds": maximum_age,
         "latest_timestamp": latest,
-        "reason": f"Latest candle is {age:.0f}s old." if age > maximum_age else "Latest candle is within freshness window.",
+        "available_candles": available,
+        "required_candles": required,
+        "missing_candles": max(0, required - available),
+        "reason": f"Latest candle is {age:.0f}s old." if age > maximum_age else "Latest closed candle is within freshness window.",
     }

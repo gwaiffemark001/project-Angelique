@@ -10,7 +10,7 @@ def test_workflow_consumes_plan_on_failed_send(monkeypatch):
         def execute(self, order, mode):
             return {"success": False, "failure_stage": "mt5_order_send", "error": "rejected"}
     # Use a lightweight object and call the terminal block through the public method.
-    wf=TradingWorkflow(Adapter(), risk_percent=0.5, minimum_rr=2.5)
+    wf=TradingWorkflow(Adapter(), risk_percent=1.0, minimum_rr=2.5)
     plan=SimpleNamespace(mt5_symbol="EURUSD",account_mode="demo",confirmation_phrase="x",expires_at="2999-01-01T00:00:00+00:00",as_dict=lambda:{"mt5_symbol":"EURUSD"})
     wf._plans["x"]=plan; wf._active_plans["EURUSD:demo"]=plan
     wf._revalidate_plan=lambda p:(True,"ok")

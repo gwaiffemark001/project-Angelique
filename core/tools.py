@@ -575,7 +575,7 @@ TOOL_REGISTRY = {
         "parameters": {
             "symbol": "Trading pair (e.g., 'EURUSD', 'XAUUSD')",
             "timeframe": "Chart timeframe (e.g., 'M15', 'H1', 'H4')",
-            "risk_percent": "Optional risk percentage override; cannot exceed the account's automatic tier (0.5% below $50, 1% at/above $50).",
+            "risk_percent": "Risk is fixed by policy at 1.00% of current equity; values other than 1.00% are rejected.",
         },
         "function": lambda symbol, timeframe=config.DEFAULT_TRADING_TIMEFRAME, risk_percent=None, account_mode="demo", trading_mode="DAY_TRADING": prepare_trade_payload(symbol, account_mode=account_mode, risk_percent=risk_percent, trading_mode=trading_mode),
     },

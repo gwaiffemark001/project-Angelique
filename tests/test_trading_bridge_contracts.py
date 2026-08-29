@@ -20,11 +20,11 @@ def test_accepted_order_does_not_require_immediate_position_readback():
     class Adapter:
         def execute(self, order, mode):
             return {'success':True,'accepted':True,'retcode':10009,'position_verified':False,'verification':'accepted_no_position_readback'}
-    wf=TradingWorkflow(Adapter(),risk_percent=0.5,minimum_rr=2.5)
+    wf=TradingWorkflow(Adapter(),risk_percent=1.0,minimum_rr=2.5)
     plan=SimpleNamespace(mt5_symbol='EURUSD',account_mode='demo',confirmation_phrase='x',expires_at='2999-01-01T00:00:00+00:00',as_dict=lambda:{'mt5_symbol':'EURUSD'})
     wf._plans['x']=plan; wf._active_plans['EURUSD:demo']=plan; wf._revalidate_plan=lambda p:(True,'ok')
     result=wf._execute_locked('x')
-    assert result.state is WorkflowState.EXECUTED
+    assert result.state is WorkflowState.EXECUTING
     assert result.details['verification']=='accepted_no_position_readback'
 
 
@@ -32,7 +32,7 @@ def test_position_risk_from_sl_can_be_used_by_portfolio_gate():
     from skills.trading_skill.risk import validate_profile_limits
     from skills.trading_skill.profiles import get_trading_profile
     profile=get_trading_profile('DAY_TRADING')
-    result=validate_profile_limits({'equity':1000,'daily_loss_percent':0,'weekly_loss_percent':0},[{'symbol':'EURUSD','risk_percent':0.8}],profile,new_risk_percent=0.5,symbol='GBPUSD')
+    result=validate_profile_limits({'equity':1000,'daily_loss_percent':0,'weekly_loss_percent':0},[{'symbol':'EURUSD','risk_percent':0.8}],profile,new_risk_percent=1.0,symbol='GBPUSD')
     assert not result['valid']
     assert result['open_risk_percent']==0.8
 

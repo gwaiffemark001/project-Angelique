@@ -168,7 +168,7 @@ import skills.trading_skill.confluence as tconf
 check('trading','confluence',lambda:tconf.evaluate_confluence('BUY',trends,inds,{},None,'TREND_FOLLOWING'))
 import skills.trading_skill.risk as trisk
 spec={'tick_size':0.00001,'tick_value':1.0,'volume_step':0.01,'volume_min':0.01,'volume_max':10.0,'margin_per_volume':10}
-check('trading','risk math',lambda:(trisk.account_risk_percent(1000),trisk.effective_risk_percent(1000,2),trisk.build_risk(1.1,1.098,1000,1.0,spec,1000)))
+check('trading','risk math',lambda:(trisk.account_risk_percent(1000),trisk.effective_risk_percent(1000,1.0),trisk.build_risk(1.1,1.098,1000,1.0,spec,1000)))
 import skills.trading_skill.account as ta
 check('trading','account normalization',lambda:(ta.normalize_mode('real'),ta.account_snapshot({'balance':1000,'equity':1000},'demo')))
 import skills.trading_skill.profiles as tp
@@ -241,8 +241,8 @@ with patch.object(pm,'monitor_once',return_value={'status':'connected','position
 
 check('trading','profile normalization',lambda:tp.normalize_trading_mode('day_trading'))
 check('trading','profile all public limits',lambda:tp.get_trading_profile('SWING').as_dict())
-check('trading','risk profile validation',lambda:trisk.validate_profile_limits({'equity':1000,'daily_loss_percent':0,'weekly_loss_percent':0,'margin_level':500},[],tp.get_trading_profile('DAY_TRADING'),new_risk_percent=0.5,symbol='EURUSD'))
-check('trading','safety validator',lambda:__import__('skills.trading_skill.safety',fromlist=['validate_trade_setup']).validate_trade_setup(symbol='EURUSD',direction='BUY',entry=1.1,stop_loss=1.09,take_profit=1.13,risk_amount=5,risk_percent=0.5,volume=0.1,margin_required=10,free_margin_after=990,minimum_free_margin=0,projected_margin_level=1000,spread_pips=0.8,minimum_rr=2.0,maximum_spread_pips=1.5))
+check('trading','risk profile validation',lambda:trisk.validate_profile_limits({'equity':1000,'daily_loss_percent':0,'weekly_loss_percent':0,'margin_level':500},[],tp.get_trading_profile('DAY_TRADING'),new_risk_percent=1.0,symbol='EURUSD'))
+check('trading','safety validator',lambda:__import__('skills.trading_skill.safety',fromlist=['validate_trade_setup']).validate_trade_setup(symbol='EURUSD',direction='BUY',entry=1.1,stop_loss=1.09,take_profit=1.13,risk_amount=5,risk_percent=1.0,volume=0.1,margin_required=10,free_margin_after=990,minimum_free_margin=0,projected_margin_level=1000,spread_pips=0.8,minimum_rr=2.0,maximum_spread_pips=1.5))
 check('trading','smc registry prune',lambda:(zr.prune('M15',200,100),zr.snapshot()))
 check('trading','strategy identify_setup',lambda:__import__('skills.trading_skill.strategy',fromlist=['identify_setup']).identify_setup('BUY',{},{}))
 

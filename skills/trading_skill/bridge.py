@@ -69,6 +69,7 @@ class WineBridgeClient:
             "close_all_positions": "close_all_positions",
             "modify_position": "modify_position",
             "ping": "ping",
+            "calculate_profit": "calculate_profit",
         }
         request = {"operation": operation, "action": legacy_actions.get(operation, operation), **payload}
         routed_broker = self.broker
@@ -106,6 +107,7 @@ class WineBridgeClient:
             "close_all_positions": "close_all_positions",
             "modify_position": "modify_position",
             "ping": "ping",
+            "calculate_profit": "calculate_profit",
         }
         request = {"operation": operation, "action": legacy_actions.get(operation, operation), **payload}
         routed_broker = self.broker

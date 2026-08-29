@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import socket
+import time
 import sys
 from threading import RLock
 from datetime import datetime, timedelta, timezone
@@ -352,11 +353,10 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
             if timeframe not in TIMEFRAMES:
                 return {"status": "error", "error": f"Unsupported timeframe {timeframe}", "timeframes": {}}
             mt5_timeframe = getattr(mt5, f"TIMEFRAME_{timeframe}")
-            # Use position zero to request the newest bars. copy_rates_from()
-            # with a timestamp in the past returns bars up to that timestamp,
-            # which made the chart lag by one complete request window.
+            # MT5 bar index 0 is the current/forming candle. Trading analysis
+            # must use completed candles only, so request from position 1.
             if hasattr(mt5, "copy_rates_from_pos"):
-                rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, count)
+                rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 1, count)
             else:
                 rates = mt5.copy_rates_from(symbol, mt5_timeframe, datetime.now(timezone.utc), count)
             rate_rows = rates if rates is not None else []
@@ -420,6 +420,7 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
                 "trade_mode": info.get("trade_mode"),
             },
             "spread_pips": spread_pips,
+            "analysis_uses_closed_candles_only": True,
         }
     except Exception as exc:
         return {"status": "error", "error": str(exc), "timeframes": {}}
@@ -506,12 +507,23 @@ def positions(request: dict[str, Any]) -> dict[str, Any]:
             sym=str(getattr(pos,"symbol","") or ""); ptype="BUY" if getattr(pos,"type",None)==getattr(mt5,"POSITION_TYPE_BUY",0) else "SELL"
             volume=float(getattr(pos,"volume",0) or 0); entry=float(getattr(pos,"price_open",0) or 0); sl=float(getattr(pos,"sl",0) or 0)
             risk_amount=None; risk_percent=None
-            sinfo=mt5.symbol_info(sym)
-            ts=float(getattr(sinfo,"trade_tick_size",0) or 0) if sinfo else 0.0; tv=float(getattr(sinfo,"trade_tick_value",0) or 0) if sinfo else 0.0
-            if sl>0 and entry>0 and volume>0 and ts>0 and tv>0:
-                risk_amount=abs(entry-sl)/ts*tv*volume
-                if equity>0: risk_percent=risk_amount/equity*100
-            rows.append({"ticket":int(getattr(pos,"ticket",0) or 0),"symbol":sym,"type":ptype,"volume":volume,"price_open":entry,"sl":sl,"tp":float(getattr(pos,"tp",0) or 0),"profit":float(getattr(pos,"profit",0) or 0),"risk_amount":risk_amount,"risk_percent":risk_percent,"comment":str(getattr(pos,"comment","") or "")})
+            if sl>0 and entry>0 and volume>0 and hasattr(mt5, "order_calc_profit"):
+                order_type = getattr(mt5, "ORDER_TYPE_BUY") if ptype == "BUY" else getattr(mt5, "ORDER_TYPE_SELL")
+                try:
+                    calc = mt5.order_calc_profit(order_type, sym, volume, entry, sl)
+                    if calc is not None:
+                        risk_amount=abs(float(calc))
+                except Exception:
+                    risk_amount=None
+            if risk_amount is None:
+                sinfo=mt5.symbol_info(sym)
+                ts=float(getattr(sinfo,"trade_tick_size",0) or 0) if sinfo else 0.0; tv=float(getattr(sinfo,"trade_tick_value",0) or 0) if sinfo else 0.0
+                if sl>0 and entry>0 and volume>0 and ts>0 and tv>0:
+                    risk_amount=abs(entry-sl)/ts*tv*volume
+            if equity>0 and risk_amount is not None:
+                risk_percent=risk_amount/equity*100
+            opened_ts=getattr(pos, "time", None)
+            rows.append({"ticket":int(getattr(pos,"ticket",0) or 0),"identifier":int(getattr(pos,"identifier",0) or 0),"symbol":sym,"type":ptype,"volume":volume,"price_open":entry,"sl":sl,"tp":float(getattr(pos,"tp",0) or 0),"profit":float(getattr(pos,"profit",0) or 0),"risk_amount":risk_amount,"risk_percent":risk_percent,"comment":str(getattr(pos,"comment","") or ""),"magic":int(getattr(pos,"magic",0) or 0),"opened_at":opened_ts,"time_open":opened_ts})
         return {"status":"connected","positions":rows}
     except Exception as exc:
         return {"status":"error","error":str(exc),"positions":[]}
@@ -534,6 +546,34 @@ def recent_deals(request: dict[str, Any]) -> dict[str, Any]:
         return {"status": "connected", "deals": [_raw(deal) for deal in deals]}
     except Exception as exc:
         return {"status": "error", "deals": [], "error": str(exc)}
+
+
+@_mt5_session_locked
+def calculate_profit(request: dict[str, Any]) -> dict[str, Any]:
+    expected_broker = str(request.get("expected_broker") or "").upper() or None
+    requested_mode = _mode(request.get("account_mode"))
+    symbol = str(request.get("symbol") or "").strip()
+    direction = str(request.get("direction") or "BUY").upper()
+    volume = float(request.get("volume", 0) or 0)
+    price_open = float(request.get("price_open", 0) or 0)
+    price_close = float(request.get("price_close", 0) or 0)
+    if not symbol or volume <= 0 or price_open <= 0 or price_close <= 0:
+        return {"status": "error", "error": "symbol, volume, price_open and price_close are required."}
+    try:
+        mt5 = importlib.import_module("MetaTrader5")
+        if not _connect(mt5, requested_mode):
+            return {"status": "error", "error": "MT5 initialization failed"}
+        guard_error = _account_guard_error(mt5, requested_mode, expected_broker)
+        if guard_error:
+            return {"status": "error", "error": guard_error}
+        resolved = _resolve(mt5, symbol) or symbol
+        order_type = getattr(mt5, "ORDER_TYPE_BUY") if direction == "BUY" else getattr(mt5, "ORDER_TYPE_SELL")
+        value = mt5.order_calc_profit(order_type, resolved, volume, price_open, price_close)
+        if value is None:
+            return {"status": "error", "error": "MT5 order_calc_profit returned no value."}
+        return {"status": "connected", "profit": float(value), "symbol": resolved, "direction": direction, "volume": volume, "price_open": price_open, "price_close": price_close}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
 
 
 def _expected_position_profit(mt5: Any, position: Any) -> float | None:
@@ -608,14 +648,15 @@ def close_position(request: dict[str, Any]) -> dict[str, Any]:
         result = mt5.order_send(close_request)
         raw = _raw(result) if result is not None else {}
         success = result is not None and getattr(result, "retcode", None) in {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
-        return {
-            "success": success,
-            "status": "closed" if success else "error",
-            "symbol": position.symbol,
-            "ticket": int(position.ticket),
-            "message": "Position closed successfully." if success else raw.get("comment", "MT5 rejected the manual exit."),
-            "error": None if success else raw.get("comment", "MT5 rejected the manual exit."),
-        }
+        if not success:
+            return {"success": False, "status": "error", "symbol": position.symbol, "ticket": int(position.ticket), "message": raw.get("comment", "MT5 rejected the manual exit."), "error": raw.get("comment", "MT5 rejected the manual exit.")}
+        deadline = time.monotonic() + config.TRADING_POSITION_CLOSE_VERIFY_SECONDS
+        while time.monotonic() < deadline:
+            remaining = mt5.positions_get(ticket=int(position.ticket)) or []
+            if not remaining:
+                return {"success": True, "status": "closed", "symbol": position.symbol, "ticket": int(position.ticket), "message": "Position close confirmed by MT5.", "retcode": getattr(result, "retcode", None)}
+            time.sleep(config.TRADING_POSITION_CLOSE_VERIFY_INTERVAL)
+        return {"success": True, "status": "verification_pending", "symbol": position.symbol, "ticket": int(position.ticket), "message": "Close request accepted; position closure verification is still pending.", "retcode": getattr(result, "retcode", None)}
     except Exception as exc:
         return {"success": False, "status": "error", "error": str(exc), "message": str(exc)}
 
@@ -672,16 +713,16 @@ def modify_position(request: dict[str, Any]) -> dict[str, Any]:
         result = mt5.order_send(modify_request)
         raw = _raw(result) if result is not None else {}
         success = result is not None and getattr(result, "retcode", None) in {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
-        return {
-            "success": success,
-            "status": "modified" if success else "error",
-            "symbol": position.symbol,
-            "ticket": int(position.ticket),
-            "sl": modify_request["sl"],
-            "tp": modify_request["tp"],
-            "message": "Position stop updated." if success else raw.get("comment", "MT5 rejected the stop update."),
-            "error": None if success else raw.get("comment", "MT5 rejected the stop update."),
-        }
+        if not success:
+            return {"success": False, "status": "error", "symbol": position.symbol, "ticket": int(position.ticket), "sl": modify_request["sl"], "tp": modify_request["tp"], "message": raw.get("comment", "MT5 rejected the stop update."), "error": raw.get("comment", "MT5 rejected the stop update.")}
+        current = mt5.positions_get(ticket=int(position.ticket)) or []
+        if current:
+            updated = current[0]
+            sl_ok = abs(float(getattr(updated, "sl", 0) or 0) - modify_request["sl"]) <= max(float(getattr(mt5.symbol_info(position.symbol), "point", 0) or 0) * 2, 1e-9)
+            tp_ok = take_profit is None or abs(float(getattr(updated, "tp", 0) or 0) - modify_request["tp"]) <= max(float(getattr(mt5.symbol_info(position.symbol), "point", 0) or 0) * 2, 1e-9)
+            if sl_ok and tp_ok:
+                return {"success": True, "status": "modified", "symbol": position.symbol, "ticket": int(position.ticket), "sl": modify_request["sl"], "tp": modify_request["tp"], "message": "Position stop update confirmed by MT5."}
+        return {"success": True, "status": "verification_pending", "symbol": position.symbol, "ticket": int(position.ticket), "sl": modify_request["sl"], "tp": modify_request["tp"], "message": "Stop update accepted; readback verification is pending."}
     except Exception as exc:
         return {"success": False, "status": "error", "error": str(exc), "message": str(exc)}
 
@@ -702,12 +743,14 @@ def _close_single_position(mt5: Any, position: Any) -> dict[str, Any]:
     result = mt5.order_send(close_request)
     raw = _raw(result) if result is not None else {}
     success = result is not None and getattr(result, "retcode", None) in {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED}
-    return {
-        "success": success,
-        "symbol": position.symbol,
-        "ticket": int(position.ticket),
-        "error": None if success else raw.get("comment", "MT5 rejected the exit."),
-    }
+    if not success:
+        return {"success": False, "status": "error", "symbol": position.symbol, "ticket": int(position.ticket), "error": raw.get("comment", "MT5 rejected the exit.")}
+    deadline = time.monotonic() + config.TRADING_POSITION_CLOSE_VERIFY_SECONDS
+    while time.monotonic() < deadline:
+        if not (mt5.positions_get(ticket=int(position.ticket)) or []):
+            return {"success": True, "status": "closed", "symbol": position.symbol, "ticket": int(position.ticket), "error": None}
+        time.sleep(config.TRADING_POSITION_CLOSE_VERIFY_INTERVAL)
+    return {"success": True, "status": "verification_pending", "symbol": position.symbol, "ticket": int(position.ticket), "error": None}
 
 
 @_mt5_session_locked
@@ -728,16 +771,22 @@ def close_all_positions(request: dict[str, Any]) -> dict[str, Any]:
         open_positions = mt5.positions_get() or []
         if not open_positions:
             return {"success": True, "status": "no_positions", "closed": [], "failed": []}
-        closed, failed = [], []
+        closed, pending, failed = [], [], []
         for position in open_positions:
             outcome = _close_single_position(mt5, position)
-            (closed if outcome["success"] else failed).append(outcome)
-        return {
-            "success": not failed,
-            "status": "flattened" if not failed else "partial",
-            "closed": closed,
-            "failed": failed,
-        }
+            if not outcome["success"]:
+                failed.append(outcome)
+            elif outcome.get("status") == "verification_pending":
+                pending.append(outcome)
+            else:
+                closed.append(outcome)
+        if pending and not failed:
+            status = "pending_verification"
+        elif failed:
+            status = "partial"
+        else:
+            status = "flattened"
+        return {"success": not failed and not pending, "status": status, "closed": closed, "verification_pending": pending, "failed": failed}
     except Exception as exc:
         return {"success": False, "status": "error", "error": str(exc), "closed": [], "failed": []}
 
@@ -780,6 +829,8 @@ async def handle(websocket, path=None):
             result = close_all_positions(payload)
         elif operation == "recent_deals":
             result = recent_deals(payload)
+        elif operation == "calculate_profit":
+            result = calculate_profit(payload)
         else:
             result = {"status": "error", "error": f"Unknown operation: {operation}"}
         await websocket.send(json.dumps(result))

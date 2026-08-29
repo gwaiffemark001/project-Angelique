@@ -12,6 +12,7 @@ class MT5Adapter(Protocol):
     def execute(self, order: dict[str, Any], mode: str) -> dict[str, Any]: ...
     def positions(self, mode: str) -> dict[str, Any]: ...
     def recent_deals(self, mode: str, minutes: int = 60) -> dict[str, Any]: ...
+    def calculate_profit(self, mode: str, symbol: str, direction: str, volume: float, price_open: float, price_close: float) -> dict[str, Any]: ...
 
 
 class WineMT5Adapter:
@@ -44,3 +45,6 @@ class WineMT5Adapter:
 
     def recent_deals(self, mode: str, minutes: int = 60) -> dict[str, Any]:
         return self.bridge.request("recent_deals", {"account_mode": mode, "minutes": int(minutes)})
+
+    def calculate_profit(self, mode: str, symbol: str, direction: str, volume: float, price_open: float, price_close: float) -> dict[str, Any]:
+        return self.bridge.request("calculate_profit", {"account_mode": mode, "symbol": symbol, "direction": direction, "volume": float(volume), "price_open": float(price_open), "price_close": float(price_close)})

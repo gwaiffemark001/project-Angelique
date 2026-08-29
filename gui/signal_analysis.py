@@ -98,6 +98,7 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
         "confluence": confluence,
         "indicator_reasons": analysis.get("indicator_reasons", []),
         "smc_reasons": analysis.get("smc_reasons", []),
+        "session_context": analysis.get("session_context", {}),
     }
 
     return {
@@ -149,4 +150,5 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
             "requires_manual_approval": bool(plan and plan.get("requires_manual_approval")),
         },
         "timeframes": timeframes,
+        "session_context": analysis.get("session_context", {}),
     }

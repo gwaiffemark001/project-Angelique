@@ -108,6 +108,17 @@ class TradePlan:
     spread_pips: float | None = None
     calculated_volume: float | None = None
     actual_risk_amount: float | None = None
+    actual_risk_percent: float | None = None
+    strategy: str = "SMC"
+    stop_basis: str = ""
+    target_basis: str = ""
+    stop_swing_id: str | None = None
+    target_swing_id: str | None = None
+    stop_swing_time: str | None = None
+    target_swing_time: str | None = None
+    stop_timeframe: str | None = None
+    target_timeframe: str | None = None
+    expected_profit_at_tp: float | None = None
     estimated_swap_cost: float | None = None
     estimated_spread_cost: float | None = None
     estimated_commission: float | None = None
@@ -159,6 +170,17 @@ class TradePlan:
             "spread_pips": self.spread_pips,
             "calculated_volume": self.calculated_volume,
             "actual_risk_amount": self.actual_risk_amount,
+            "actual_risk_percent": self.actual_risk_percent,
+            "strategy": self.strategy,
+            "stop_basis": self.stop_basis,
+            "target_basis": self.target_basis,
+            "stop_swing_id": self.stop_swing_id,
+            "target_swing_id": self.target_swing_id,
+            "stop_swing_time": self.stop_swing_time,
+            "target_swing_time": self.target_swing_time,
+            "stop_timeframe": self.stop_timeframe,
+            "target_timeframe": self.target_timeframe,
+            "expected_profit_at_tp": self.expected_profit_at_tp,
             "estimated_swap_cost": self.estimated_swap_cost,
             "estimated_spread_cost": self.estimated_spread_cost,
             "estimated_commission": self.estimated_commission,

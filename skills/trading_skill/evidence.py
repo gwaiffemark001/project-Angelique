@@ -48,24 +48,82 @@ def detect_candle_pattern(candles: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def detect_amd_phase(candles: list[dict[str, Any]]) -> dict[str, Any]:
-    """Detect a conservative accumulation/manipulation/distribution phase."""
-    values = _closed(candles)
-    if len(values) < 12:
-        return {"status": "insufficient", "phase": "unclear", "complete": False, "trade_filter": True}
-    ranges = [_value(candle, "high") - _value(candle, "low") for candle in values]
-    midpoint = len(values) // 2
-    early, recent = ranges[-12:-4], ranges[-4:]
-    average_early = sum(early) / max(len(early), 1)
-    recent_range = sum(recent) / max(len(recent), 1)
-    expansion = recent_range >= average_early * 1.5
-    early_closes = [_value(candle, "close") for candle in values[-12:-4]]
-    early_span = max(early_closes) - min(early_closes)
-    accumulation = early_span <= max(average_early * 2, 1e-12)
-    manipulation = expansion and any(_value(candle, "high") > max(_value(item, "high") for item in values[-12:-4]) or _value(candle, "low") < min(_value(item, "low") for item in values[-12:-4]) for candle in values[-4:])
-    last_direction = "bullish" if _value(values[-1], "close") > _value(values[-1], "open") else "bearish" if _value(values[-1], "close") < _value(values[-1], "open") else "neutral"
-    phase = "distribution" if accumulation and manipulation and last_direction == "bearish" else "accumulation" if accumulation else "manipulation" if manipulation else "unclear"
-    return {"status": "ready", "phase": phase, "complete": False, "accumulation": accumulation, "manipulation": manipulation, "distribution": phase == "distribution", "direction": last_direction, "trade_filter": True}
+    """Detect AMD phases from a meaningful closed-candle range and liquidity raid.
 
+    This function produces structural evidence for the AMD strategy; it does
+    not by itself authorize a trade. A complete AMD setup still requires the
+    structure/displacement/entry checks performed by the strategy engine.
+    """
+    values = _closed(candles)
+    lookback = 30
+    if len(values) < lookback:
+        return {
+            "status": "insufficient", "phase": "unclear", "complete": False,
+            "trade_filter": True, "required_candles": lookback,
+            "available_candles": len(values), "missing_candles": lookback - len(values),
+        }
+    sample = values[-lookback:]
+    accumulation_len = 20
+    accumulation = sample[:accumulation_len]
+    post = sample[accumulation_len:]
+    range_high = max(_value(c, "high") for c in accumulation)
+    range_low = min(_value(c, "low") for c in accumulation)
+    widths = [_value(c, "high") - _value(c, "low") for c in accumulation if _value(c, "high") >= _value(c, "low")]
+    average_range = sum(widths) / max(1, len(widths))
+    close_span = max(_value(c, "close") for c in accumulation) - min(_value(c, "close") for c in accumulation)
+    accumulation_valid = average_range > 0 and close_span <= average_range * 3.0
+    raid = None
+    raid_index = None
+    for idx, candle in enumerate(post, start=accumulation_len):
+        high, low, close = _value(candle, "high"), _value(candle, "low"), _value(candle, "close")
+        if low < range_low and close > range_low:
+            raid = "sell_side"
+            raid_index = idx
+        elif high > range_high and close < range_high:
+            raid = "buy_side"
+            raid_index = idx
+        if raid:
+            break
+    # Distribution requires directional expansion after the raid.
+    distribution_direction = None
+    displacement = False
+    if raid_index is not None:
+        follow = values[raid_index + 1:]
+        if follow:
+            last = follow[-1]
+            body = abs(_value(last, "close") - _value(last, "open"))
+            recent_ranges = [_value(c, "high") - _value(c, "low") for c in values[max(0, raid_index - 4):raid_index] if _value(c, "high") >= _value(c, "low")]
+            baseline = sum(recent_ranges) / max(1, len(recent_ranges))
+            displacement = baseline > 0 and body >= baseline * 1.2
+            if _value(last, "close") > _value(last, "open") and _value(last, "close") > range_high:
+                distribution_direction = "BUY"
+            elif _value(last, "close") < _value(last, "open") and _value(last, "close") < range_low:
+                distribution_direction = "SELL"
+            elif raid == "sell_side" and _value(last, "close") > range_low:
+                distribution_direction = "BUY"
+            elif raid == "buy_side" and _value(last, "close") < range_high:
+                distribution_direction = "SELL"
+    complete = bool(accumulation_valid and raid and distribution_direction and displacement)
+    phase = "distribution" if complete else "manipulation" if accumulation_valid and raid else "accumulation" if accumulation_valid else "unclear"
+    return {
+        "status": "ready",
+        "phase": phase,
+        "complete": complete,
+        "accumulation": accumulation_valid,
+        "manipulation": bool(raid),
+        "distribution": bool(distribution_direction),
+        "direction": "bullish" if distribution_direction == "BUY" else "bearish" if distribution_direction == "SELL" else None,
+        "trade_direction": distribution_direction,
+        "raid_side": raid,
+        "raid_index": raid_index,
+        "range_high": range_high,
+        "range_low": range_low,
+        "range_width": range_high - range_low,
+        "displacement": displacement,
+        "lookback": lookback,
+        "accumulation_candles": accumulation_len,
+        "trade_filter": not complete,
+    }
 
 def _swings(candles: list[dict[str, Any]], strength: int = 2) -> tuple[list[float], list[float]]:
     highs, lows = [], []
