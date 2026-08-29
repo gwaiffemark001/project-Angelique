@@ -22,6 +22,7 @@ def analyze_structure(timeframes: dict[str, list[dict[str, Any]]], profile=None)
     trends = context.trends
     indicator_data = context.indicators
     smc_data = context.smc
+    ict_data = context.ict
     context_timeframe = getattr(profile, "context_timeframe", "H4")
     trend_timeframe = getattr(profile, "trend_timeframe", "H1")
     setup_timeframe = getattr(profile, "setup_timeframe", "M15")
@@ -31,17 +32,17 @@ def analyze_structure(timeframes: dict[str, list[dict[str, Any]]], profile=None)
     setup = trends.get(setup_timeframe, "unknown")
     confirmation = trends.get(entry_timeframe, "unknown")
     if "unknown" in trends.values():
-        return {"valid": False, "reason": "Insufficient candles for the required multi-timeframe analysis.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
+        return {"valid": False, "reason": "Insufficient candles for the required multi-timeframe analysis.", "trends": trends, "indicators": indicator_data, "smc": smc_data, "ict": ict_data}
     if higher not in {"bullish", "bearish"}:
-        return {"valid": False, "reason": "Higher-timeframe market structure is not directional.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
+        return {"valid": False, "reason": "Higher-timeframe market structure is not directional.", "trends": trends, "indicators": indicator_data, "smc": smc_data, "ict": ict_data}
     if intermediate != higher or setup != higher or confirmation != higher:
-        return {"valid": False, "reason": "The required timeframes conflict; no aligned setup exists.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
+        return {"valid": False, "reason": "The required timeframes conflict; no aligned setup exists.", "trends": trends, "indicators": indicator_data, "smc": smc_data, "ict": ict_data}
 
     direction = "BUY" if higher == "bullish" else "SELL"
     indicator_reasons = []
     for timeframe, values in indicator_data.items():
         if values.get("status") != "ready":
-            return {"valid": False, "reason": f"Indicators are unavailable on {timeframe}.", "trends": trends, "indicators": indicator_data, "smc": smc_data}
+            return {"valid": False, "reason": f"Indicators are unavailable on {timeframe}.", "trends": trends, "indicators": indicator_data, "smc": smc_data, "ict": ict_data}
         last_close = float(values["last_close"])
         ema_ok = last_close >= float(values["ema_20"]) >= float(values["ema_50"]) if direction == "BUY" else last_close <= float(values["ema_20"]) <= float(values["ema_50"])
         macd_ok = float(values["macd"]) >= 0 if direction == "BUY" else float(values["macd"]) <= 0
@@ -61,8 +62,24 @@ def analyze_structure(timeframes: dict[str, list[dict[str, Any]]], profile=None)
         block = values.get("order_block")
         smc_reasons.append(f"{timeframe}: liquidity={sweep}, shift={shift}, FVGs={gaps}, order_block={block.get('type') if isinstance(block, dict) else 'none'}, location={values.get('location', 'unknown')}")
 
-    confluence = evaluate_confluence(direction, trends, indicator_data, smc_data, profile=profile)
-    if not confluence["ready"]:
-        return {"valid": False, "reason": "The setup lacks enough confluence; indicators and SMC are not aligned strongly enough to plan a trade.", "trends": trends, "indicators": indicator_data, "smc": smc_data, "confluence": confluence}
+    # Add ICT reasoning if available
+    ict_reasons = []
+    if ict_data and not ict_data.get("error"):
+        amd_phase = ict_data.get("amd_phase", "unknown")
+        current_session = ict_data.get("current_session", "unknown")
+        is_prime = ict_data.get("is_prime_time", False)
+        pd_analysis = ict_data.get("premium_discount", {})
+        ote_zone = ict_data.get("ote_zone", {})
+        
+        ict_reasons.append(f"AMD Phase: {amd_phase}")
+        ict_reasons.append(f"Session: {current_session} (Prime: {is_prime})")
+        if pd_analysis and isinstance(pd_analysis, dict):
+            ict_reasons.append(f"Premium/Discount: {pd_analysis.get('zone', 'unknown')} ({pd_analysis.get('percentage_from_low', 0):.1f}% from low)")
+        if ote_zone and isinstance(ote_zone, dict):
+            ict_reasons.append(f"OTE Zone: 0.618-{ote_zone.get('ote_lower', 0):.5f} to 0.786-{ote_zone.get('ote_upper', 0):.5f}")
 
-    return {"valid": True, "direction": direction, "trends": trends, "indicators": indicator_data, "smc": smc_data, "reason": f"{context_timeframe}, {trend_timeframe}, {setup_timeframe}, and {entry_timeframe} structure align {higher}.", "indicator_reasons": indicator_reasons, "smc_reasons": smc_reasons, "confluence": confluence}
+    confluence = evaluate_confluence(direction, trends, indicator_data, smc_data, profile=profile, ict_data=ict_data)
+    if not confluence["ready"]:
+        return {"valid": False, "reason": "The setup lacks enough confluence; indicators and SMC are not aligned strongly enough to plan a trade.", "trends": trends, "indicators": indicator_data, "smc": smc_data, "ict": ict_data, "confluence": confluence}
+
+    return {"valid": True, "direction": direction, "trends": trends, "indicators": indicator_data, "smc": smc_data, "ict": ict_data, "reason": f"{context_timeframe}, {trend_timeframe}, {setup_timeframe}, and {entry_timeframe} structure align {higher}.", "indicator_reasons": indicator_reasons, "smc_reasons": smc_reasons, "ict_reasons": ict_reasons, "confluence": confluence}

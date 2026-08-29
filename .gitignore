@@ -1,48 +1,65 @@
-# Python
+# Compiled and build artifacts
+*.pyc
 __pycache__/
-*.py[cod]
-*.so
 
-# Virtual environments
-venv/
+# Dependencies
 .venv/
-env/
+venv/
+node_modules/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
 
 # Environment
 .env
+.env.local
+*.env.*
 
-# IDE
+# Editors
 .vscode/
 .idea/
 
-# Logs
-*.log
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
 
-# Temporary files
-temp_*
-*.tmp
+# Python cache
+.mypy_cache/
+.pytest_cache/
 
-# Audio
-*.mp3
-*.wav
+# Build directories
+dist/
+build/
+target/
+.gradle/
 
-# Images
-*.png
-*.jpg
-
-# Databases
-*.db
-*.sqlite3
-
-# Runtime memory
-memory.json
-
-# Wine
-.wine/
-
-# OS
+# System files
 .DS_Store
 Thumbs.db
 
-# Pytest
-.pytest_cache/
+# Compressed files
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst

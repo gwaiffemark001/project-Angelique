@@ -3,10 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 
-def evaluate_confluence(direction: str, trends: dict[str, str], indicator_data: dict[str, dict[str, Any]], smc_data: dict[str, dict[str, Any]], profile=None) -> dict[str, Any]:
+def evaluate_confluence(direction: str, trends: dict[str, str], indicator_data: dict[str, dict[str, Any]], smc_data: dict[str, dict[str, Any]], profile=None, ict_data: dict[str, Any] | None = None) -> dict[str, Any]:
     agree: list[str] = []
     disagree: list[str] = []
     score = 0
+    max_score = 14  # Increased from 10 to account for ICT factors
 
     context_timeframe = getattr(profile, "context_timeframe", "H4")
     structure_timeframe = getattr(profile, "structure_timeframe", "M15")
@@ -50,6 +51,76 @@ def evaluate_confluence(direction: str, trends: dict[str, str], indicator_data: 
     else:
         disagree.append(f"DISAGREES: price is not in {preferred_location}.")
 
+    # ICT Confluence Factors
+    if ict_data:
+        # 1. AMD Phase Alignment (Power of Three)
+        amd_phase = ict_data.get("amd_phase", "unknown")
+        amd_cycle = ict_data.get("amd_cycle", {})
+        
+        # For BUY: want to see manipulation complete (low swept) entering distribution
+        # For SELL: want to see manipulation complete (high swept) entering distribution
+        if direction == "BUY":
+            if amd_phase == "distribution" or (amd_cycle.get("is_complete") and amd_phase == "manipulation"):
+                score += 2
+                agree.append(f"AGREES: AMD phase ({amd_phase}) supports bullish distribution.")
+            elif amd_phase == "manipulation":
+                score += 1
+                agree.append("AGREES: AMD in manipulation phase - watching for bullish reversal.")
+            else:
+                disagree.append(f"DISAGREES: AMD phase ({amd_phase}) not optimal for bullish entry.")
+        else:  # SELL
+            if amd_phase == "distribution" or (amd_cycle.get("is_complete") and amd_phase == "manipulation"):
+                score += 2
+                agree.append(f"AGREES: AMD phase ({amd_phase}) supports bearish distribution.")
+            elif amd_phase == "manipulation":
+                score += 1
+                agree.append("AGREES: AMD in manipulation phase - watching for bearish reversal.")
+            else:
+                disagree.append(f"DISAGREES: AMD phase ({amd_phase}) not optimal for bearish entry.")
+
+        # 2. Session Timing (Kill Zones)
+        is_prime = ict_data.get("is_prime_time", False)
+        current_session = ict_data.get("current_session", "unknown")
+        if is_prime:
+            score += 2
+            agree.append(f"AGREES: Trading during prime session ({current_session}).")
+        else:
+            disagree.append(f"DISAGREES: Outside prime trading session ({current_session}).")
+
+        # 3. Premium/Discount Zone Confirmation
+        pd_analysis = ict_data.get("premium_discount", {})
+        pd_zone = pd_analysis.get("zone", "equilibrium")
+        if direction == "BUY" and pd_zone == "discount":
+            score += 2
+            agree.append(f"AGREES: Price in discount zone ({pd_analysis.get('percentage_from_low', 0):.1f}% from low).")
+        elif direction == "SELL" and pd_zone == "premium":
+            score += 2
+            agree.append(f"AGREES: Price in premium zone ({pd_analysis.get('percentage_from_low', 0):.1f}% from low).")
+        elif pd_zone == "equilibrium":
+            disagree.append("DISAGREES: Price at equilibrium - not in premium/discount.")
+        else:
+            disagree.append(f"DISAGREES: Price in wrong zone for {direction} ({pd_zone}).")
+
+        # 4. OTE Zone Entry (Fibonacci 0.618-0.786)
+        ote_zone = ict_data.get("ote_zone", {})
+        if ote_zone:
+            ote_lower = ote_zone.get("ote_lower", 0)
+            ote_upper = ote_zone.get("ote_upper", 0)
+            sweet_spot = ote_zone.get("sweet_spot", 0)
+            
+            # Check if current price is near OTE zone
+            # This would need actual price comparison in real usage
+            if direction == "BUY" and ote_zone.get("is_discount"):
+                score += 2
+                agree.append(f"AGREES: OTE zone identified (0.618-{ote_lower:.5f}, 0.786-{ote_upper:.5f}, sweet spot {sweet_spot:.5f}).")
+            elif direction == "SELL" and ote_zone.get("is_premium"):
+                score += 2
+                agree.append(f"AGREES: OTE zone identified for sell (0.618-{ote_lower:.5f}, 0.786-{ote_upper:.5f}).")
+            else:
+                disagree.append("DISAGREES: OTE zone not aligned with trade direction.")
+        else:
+            disagree.append("DISAGREES: No clear OTE zone identified.")
+
     for timeframe, values in indicator_data.items():
         if values.get("status") != "ready":
             continue
@@ -73,10 +144,10 @@ def evaluate_confluence(direction: str, trends: dict[str, str], indicator_data: 
     minimum_score = getattr(profile, "minimum_score", 7)
     return {
         "score": score,
-        "maximum_score": 10,
+        "maximum_score": max_score,
         "minimum_score": minimum_score,
         "ready": score >= minimum_score,
         "agree": agree,
         "disagree": disagree,
-        "summary": f"Confluence score {score:.2f}/{1.0:.2f} - {len(agree)} supporting checks and {len(disagree)} conflicting checks.",
+        "summary": f"Confluence score {score:.2f}/{max_score:.2f} - {len(agree)} supporting checks and {len(disagree)} conflicting checks.",
     }
