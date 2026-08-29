@@ -779,27 +779,26 @@ class AngeliqueDesktopApp(tk.Tk):
         )
         self._signal_button.pack(side="left", padx=(10, 0))
 
-        dashboard_container = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), height=360)
+        dashboard_container = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
         # Expand the main dashboard into the available vertical space instead of
         # leaving the unused lower portion of the Trading Hub empty.
         dashboard_container.pack(fill="both", expand=True, padx=20, pady=(0, 10))
-        dashboard_container.pack_propagate(False)
 
-        account_frame = tk.Frame(dashboard_container, bg=self._theme("panel"), bd=1, relief="solid", width=385)
-        account_frame.pack(side="left", fill="y", padx=(0, 12), pady=0)
+        account_frame = tk.Frame(dashboard_container, bg=self._theme("panel"), bd=1, relief="solid", width=420)
+        account_frame.pack(side="left", fill="y", padx=(0, 15), pady=0)
         account_frame.pack_propagate(False)
         tk.Label(
             account_frame,
             text="ACCOUNT SUMMARY",
             fg=self._theme("accent"),
             bg=self._theme("panel"),
-            font=("Consolas", 12, "bold"),
-        ).pack(anchor="nw", padx=14, pady=(14, 6))
+            font=("Consolas", 13, "bold"),
+        ).pack(anchor="nw", padx=18, pady=(18, 10))
 
         # Keep every original account field, but use three compact columns so the
         # complete risk/health block remains visible at normal 1080p heights.
         account_grid = tk.Frame(account_frame, bg=self._theme("panel"))
-        account_grid.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        account_grid.pack(fill="both", expand=True, padx=14, pady=(0, 14))
         account_fields = [
             "Balance", "Equity", "Used Margin", "Free Margin", "Margin Level",
             "Leverage", "Currency", "Risk %", "Risk Amount", "Daily Loss",
@@ -808,16 +807,16 @@ class AngeliqueDesktopApp(tk.Tk):
         for index, label in enumerate(account_fields):
             row, col = divmod(index, 3)
             container = tk.Frame(account_grid, bg=self._theme("panel_alt"), bd=0)
-            container.grid(row=row, column=col, sticky="ew", padx=3, pady=2)
+            container.grid(row=row, column=col, sticky="ew", padx=5, pady=4)
             tk.Label(
                 container, text=label, fg=self._theme("text"), bg=self._theme("panel_alt"),
-                font=("Consolas", 8), justify="center", anchor="center", wraplength=108
-            ).pack(fill="x", padx=3, pady=(3, 0))
+                font=("Consolas", 9), justify="center", anchor="center", wraplength=120
+            ).pack(fill="x", padx=5, pady=(5, 2))
             value_label = tk.Label(
                 container, text="—", fg=self._theme("accent"), bg=self._theme("panel_alt"),
-                font=("Consolas", 10, "bold"), justify="center", anchor="center"
+                font=("Consolas", 11, "bold"), justify="center", anchor="center"
             )
-            value_label.pack(fill="x", padx=3, pady=(0, 3))
+            value_label.pack(fill="x", padx=5, pady=(0, 5))
             # Normalize display labels into stable backend keys. In particular,
             # "Risk %" must map to risk_percent rather than the literal key
             # "risk_%", otherwise a valid 1% risk value renders as "—".
@@ -833,35 +832,35 @@ class AngeliqueDesktopApp(tk.Tk):
             text="MARKET CHART",
             fg=self._theme("accent"),
             bg=self._theme("panel"),
-            font=("Consolas", 12, "bold"),
-        ).pack(anchor="nw", padx=14, pady=(14, 6))
+            font=("Consolas", 13, "bold"),
+        ).pack(anchor="nw", padx=18, pady=(18, 10))
 
         self.trading_chart_canvas = tk.Canvas(
             chart_frame,
             bg=self._theme("panel_alt"),
-            height=285,
+            height=340,
             highlightthickness=0,
         )
-        self.trading_chart_canvas.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self.trading_chart_canvas.pack(fill="both", expand=True, padx=18, pady=(0, 18))
         self.trading_chart_canvas.bind("<Configure>", self._on_trading_chart_resize)
         self._draw_trading_placeholder_chart()
 
-        positions_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), bd=1, relief="solid", height=220)
+        positions_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), bd=1, relief="solid", height=240)
         tk.Label(
             positions_frame,
             text="POSITION MONITORING",
             fg=self._theme("accent"),
             bg=self._theme("panel"),
-            font=("Consolas", 12, "bold"),
-        ).pack(anchor="nw", padx=14, pady=(10, 2))
+            font=("Consolas", 13, "bold"),
+        ).pack(anchor="nw", padx=18, pady=(14, 4))
         tk.Label(
             positions_frame,
             text="Green/positive P&L means profit. Automatic position management may adjust stops or close a trade when a configured invalidation/time-stop is triggered.",
             fg=self._theme("text"),
             bg=self._theme("panel"),
-            font=("Consolas", 8),
+            font=("Consolas", 9),
             justify="left", anchor="w", wraplength=1400,
-        ).pack(anchor="nw", padx=14, pady=(0, 4))
+        ).pack(anchor="nw", padx=18, pady=(0, 6))
         position_columns = ("position", "prices", "stop", "target", "profit", "expected_profit", "r", "status")
         self._positions_tree = ttk.Treeview(
             positions_frame,
@@ -871,10 +870,10 @@ class AngeliqueDesktopApp(tk.Tk):
             style="Hotspot.Treeview",
         )
         headings = (
-            ("position", "POSITION", 175), ("prices", "CURRENT | ENTRY", 175),
-            ("stop", "SL REMAIN | TOTAL", 175), ("target", "TP REMAIN | TOTAL", 175),
-            ("profit", "P/L", 90), ("expected_profit", "TP PROFIT", 105),
-            ("r", "R", 65), ("status", "STATUS", 115),
+            ("position", "POSITION", 185), ("prices", "CURRENT | ENTRY", 185),
+            ("stop", "SL REMAIN | TOTAL", 185), ("target", "TP REMAIN | TOTAL", 185),
+            ("profit", "P/L", 100), ("expected_profit", "TP PROFIT", 115),
+            ("r", "R", 75), ("status", "STATUS", 125),
         )
         for column, heading, width in headings:
             self._positions_tree.heading(column, text=heading)
@@ -883,12 +882,12 @@ class AngeliqueDesktopApp(tk.Tk):
         self._positions_tree.tag_configure("loss", foreground="#ef4444")
         self._positions_tree.tag_configure("neutral", foreground=self._theme("text"))
         self._positions_tree.bind("<<TreeviewSelect>>", self._on_position_selected)
-        self._positions_tree.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        self._positions_tree.pack(fill="both", expand=True, padx=18, pady=(0, 14))
         # This frame was previously constructed but never packed, which made the
         # entire position-monitor section invisible in the main Trading Hub.
-        positions_frame.configure(height=220)
+        positions_frame.configure(height=240)
         positions_frame.pack_propagate(False)
-        positions_frame.pack(fill="both", expand=False, padx=20, pady=(0, 8))
+        positions_frame.pack(fill="both", expand=False, padx=20, pady=(0, 12))
 
         # Tooltip widget for OHLC on hover (created as child of canvas so we can use create_window)
         try:
@@ -1029,27 +1028,27 @@ class AngeliqueDesktopApp(tk.Tk):
             tk.Label(frame, textvariable=var, fg=self._theme("accent"), bg=self._theme("panel_alt"), font=("Consolas", 10, "bold")).pack(anchor="w", padx=9, pady=(0, 7))
 
         body = tk.Frame(self.signal_view_frame, bg=self._theme("panel"))
-        body.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        body.pack(fill="both", expand=True, padx=20, pady=(0, 12))
 
         left = tk.Frame(body, bg=self._theme("panel"), bd=1, relief="solid")
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        tk.Label(left, text="SETUP EVIDENCE", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 6))
-        self._signal_evidence_tree = ttk.Treeview(left, columns=("stage", "status", "detail"), show="headings", height=10, style="Hotspot.Treeview")
-        for col, heading, width in (("stage", "STAGE", 150), ("status", "STATUS", 85), ("detail", "DETAIL", 360)):
+        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        tk.Label(left, text="SETUP EVIDENCE", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 11, "bold")).pack(anchor="w", padx=15, pady=(14, 8))
+        self._signal_evidence_tree = ttk.Treeview(left, columns=("stage", "status", "detail"), show="headings", height=12, style="Hotspot.Treeview")
+        for col, heading, width in (("stage", "STAGE", 160), ("status", "STATUS", 95), ("detail", "DETAIL", 400)):
             self._signal_evidence_tree.heading(col, text=heading)
-            self._signal_evidence_tree.column(col, width=width, minwidth=70, anchor="center" if col != "detail" else "w", stretch=True)
-        self._signal_evidence_tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+            self._signal_evidence_tree.column(col, width=width, minwidth=80, anchor="center" if col != "detail" else "w", stretch=True)
+        self._signal_evidence_tree.pack(fill="both", expand=True, padx=15, pady=(0, 15))
         self._signal_evidence_tree.tag_configure("ok", foreground="#22c55e")
         self._signal_evidence_tree.tag_configure("wait", foreground="#f59e0b")
         self._signal_evidence_tree.tag_configure("bad", foreground="#ef4444")
 
         right = tk.Frame(body, bg=self._theme("panel"), bd=1, relief="solid")
         right.pack(side="left", fill="both", expand=True)
-        tk.Label(right, text="TRADE PLAN", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 6))
-        self._signal_plan_text = tk.Text(right, height=11, bg=self._theme("panel_alt"), fg=self._theme("text"),
+        tk.Label(right, text="TRADE PLAN", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 11, "bold")).pack(anchor="w", padx=15, pady=(14, 8))
+        self._signal_plan_text = tk.Text(right, height=12, bg=self._theme("panel_alt"), fg=self._theme("text"),
                                          insertbackground=self._theme("accent"), font=("Consolas", 10), wrap="word",
-                                         relief="flat", bd=0, padx=12, pady=10, state="disabled")
-        self._signal_plan_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+                                         relief="flat", bd=0, padx=15, pady=15, state="disabled")
+        self._signal_plan_text.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
         bottom = tk.Frame(self.signal_view_frame, bg=self._theme("panel"))
         bottom.pack(fill="x", padx=20, pady=(0, 8))
