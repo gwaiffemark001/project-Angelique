@@ -59,3 +59,7 @@ mypy>=1.0.0
 
 # Logging & Debugging
 colorama>=0.4.6
+
+# News Integration Dependencies
+cachetools>=5.3.0
+beautifulsoup4>=4.12.0
