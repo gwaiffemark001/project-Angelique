@@ -207,3 +207,67 @@ def analyze_premium_discount(df: pd.DataFrame, lookback: int = 50) -> Dict[str, 
         "zone": zone,
         "percentage_from_low": position * 100
     }
+
+def get_kill_zone_status(current_time: datetime) -> Tuple[str, str]:
+    """
+    Determine if current time is within institutional Kill Zones
+    Returns: (status, zone_name)
+    Status: 'ACTIVE' or 'INACTIVE'
+    """
+    session = get_current_session(current_time)
+    
+    if session and session.is_prime:
+        return "ACTIVE", session.name
+        
+    return "INACTIVE", "Off-Hours"
+
+def validate_strict_choch(
+    current_price: float,
+    last_swing_high: float,
+    last_swing_low: float,
+    liquidity_swept: bool,
+    htf_trend: str
+) -> bool:
+    """
+    Validate Change of Character with strict rules:
+    1. Must have liquidity sweep first
+    2. Must break structure in opposite direction
+    3. Must align with HTF trend
+    """
+    if not liquidity_swept:
+        return False  # No sweep, no valid CHOCH
+    
+    # Bullish CHOCH: Swept lows, then broke high
+    if htf_trend == "BULLISH":
+        if current_price > last_swing_high:
+            return True
+            
+    # Bearish CHOCH: Swept highs, then broke low
+    elif htf_trend == "BEARISH":
+        if current_price < last_swing_low:
+            return True
+            
+    # Reversal scenario (counter-trend) requires stronger confirmation
+    # For safety, we only allow CHOCH that aligns with HTF
+    return False
+
+def check_ote_entry(current_price: float, swing_high: float, swing_low: float, is_bullish: bool) -> Tuple[float, bool]:
+    """
+    Quick check if price is in OTE Golden Zone (0.618 - 0.786)
+    Returns: (fib_level, is_in_golden_zone)
+    """
+    if swing_high == swing_low:
+        return 0.0, False
+    
+    range_size = swing_high - swing_low
+    
+    if is_bullish:
+        # Bullish OTE: Retracement from Low to High
+        fib_level = (swing_high - current_price) / range_size
+    else:
+        # Bearish OTE: Retracement from High to Low
+        fib_level = (current_price - swing_low) / range_size
+    
+    # Golden Zone: 0.618 to 0.786
+    in_golden_zone = 0.618 <= fib_level <= 0.786
+    return fib_level, in_golden_zone
