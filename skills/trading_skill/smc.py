@@ -1,6 +1,33 @@
+"""SMC evidence assembly.
+
+This module no longer implements its own structure/liquidity/FVG heuristics. It
+composes the corrected engines:
+
+  * :mod:`market_structure` -- protected swings, BOS/CHoCH, liquidity pools,
+    dealing range, displacement
+  * :mod:`fvg_engine`       -- FVG/IFVG lifecycle, order blocks, sweep continuation
+  * :mod:`amd`              -- ordered AMD phase machine
+  * :mod:`session_levels`   -- previous-day and session liquidity
+
+Nothing here declares a trade. It produces evidence; ``strategies.evaluate_smc``
+decides whether that evidence satisfies the SMC setup definition.
+"""
+
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
+
+from .amd import AMDConfig, detect_amd
+from .fvg_engine import detect_fvg_playbook
+from .indicators import atr
+from .market_structure import (
+    BULLISH, BEARISH, SIDEWAYS, StructureState, build_dealing_range,
+    build_liquidity_pools, build_structure, closed_candles, detect_liquidity_sweep,
+    displacement_at, find_swings, _close, _high, _low, _open, _time,
+)
+from .session_levels import liquidity_levels_from_sessions
+
+MINIMUM_SMC_CANDLES = 40
 
 
 class ZoneRegistry:
@@ -10,19 +37,15 @@ class ZoneRegistry:
         self._zones: dict[str, dict[str, Any]] = {}
 
     def observe(self, zone: dict[str, Any], timeframe: str | None, kind: str) -> dict[str, Any]:
-        identity = f"{timeframe or '-'}:{kind}:{zone.get('formation_index')}:{zone.get('low')}:{zone.get('high')}"
+        identity = zone.get("zone_id") or (
+            f"{timeframe or '-'}:{kind}:{zone.get('formation_index')}:{zone.get('low')}:{zone.get('high')}"
+        )
         previous = self._zones.get(identity, {})
-        zone = {**previous, **zone, "zone_id": identity, "timeframe": timeframe, "kind": kind}
-        self._zones[identity] = zone
-        return zone
+        merged = {**previous, **zone, "zone_id": identity, "timeframe": timeframe, "kind": kind}
+        self._zones[identity] = merged
+        return merged
 
     def prune(self, timeframe: str | None, current_index: int, max_age: int = 100) -> None:
-        """Remove zones that are too old to be actionable for the current scan.
-
-        Registry continuity is useful, but retaining every historical zone forever
-        makes old zones look current to downstream consumers.  Age is measured in
-        candles on the same timeframe.
-        """
         cutoff = current_index - max(1, int(max_age))
         doomed = []
         for key, zone in self._zones.items():
@@ -41,235 +64,161 @@ class ZoneRegistry:
         return list(self._zones.values())
 
 
-def _high(candle: dict[str, Any]) -> float:
-    return float(candle.get("high", 0) or 0)
-
-
-def _low(candle: dict[str, Any]) -> float:
-    return float(candle.get("low", 0) or 0)
-
-
-def _close(candle: dict[str, Any]) -> float:
-    return float(candle.get("close", 0) or 0)
-
-
-def _open(candle: dict[str, Any]) -> float:
-    return float(candle.get("open", 0) or 0)
-
-
-def _swing_points(candles: list[dict[str, Any]], strength: int = 2) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
-    highs = []
-    lows = []
-    for index in range(strength, len(candles) - strength):
-        high = _high(candles[index])
-        low = _low(candles[index])
-        window = candles[index - strength:index + strength + 1]
-        if high >= max(_high(item) for item in window):
-            highs.append((index, high))
-        if low <= min(_low(item) for item in window):
-            lows.append((index, low))
+# Backwards-compatible helper used by analysis._support_resistance.
+def _swing_points(candles: Sequence[dict[str, Any]], strength: int = 2):
+    points = find_swings(list(candles), strength)
+    highs = [(p.index, p.price) for p in points if p.kind == "swing_high"]
+    lows = [(p.index, p.price) for p in points if p.kind == "swing_low"]
     return highs, lows
 
 
-def _timestamp(candle: dict[str, Any]) -> str | None:
-    return candle.get("time") or candle.get("timestamp")
-
-
-def _closed_candles(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Exclude an explicitly live candle; feeds without that flag remain usable."""
-    if candles and candles[-1].get("closed") is False:
-        return candles[:-1]
-    return candles
-
-
-def _structure(candles: list[dict[str, Any]]) -> dict[str, Any]:
-    highs, lows = _swing_points(candles)
-    labels = []
-    for points, name in ((highs, "high"), (lows, "low")):
-        for previous, current in zip(points, points[1:]):
-            labels.append({"type": "HH" if current[1] > previous[1] else "LH" if current[1] < previous[1] else "EQ_" + name.upper(), "index": current[0], "price": current[1]})
-    bullish = len(highs) >= 2 and len(lows) >= 2 and highs[-1][1] > highs[-2][1] and lows[-1][1] > lows[-2][1]
-    bearish = len(highs) >= 2 and len(lows) >= 2 and highs[-1][1] < highs[-2][1] and lows[-1][1] < lows[-2][1]
-    points = [
-        {"index": index, "timestamp": _timestamp(candles[index]), "price": price, "timeframe": candles[index].get("timeframe"), "type": "swing_high", "strength": 2, "broken": False, "valid": True}
-        for index, price in highs
-    ] + [
-        {"index": index, "timestamp": _timestamp(candles[index]), "price": price, "timeframe": candles[index].get("timeframe"), "type": "swing_low", "strength": 2, "broken": False, "valid": True}
-        for index, price in lows
+def _structure(candles: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Legacy structure view backed by the new state machine."""
+    state = build_structure(candles)
+    data = state.as_dict()
+    data["labels"] = [
+        {"type": "HH" if b.price > a.price else "LH" if b.price < a.price else "EQ",
+         "index": b.index, "price": b.price}
+        for kind in ("swing_high", "swing_low")
+        for a, b in zip(
+            [p for p in state.swings if p.kind == kind],
+            [p for p in state.swings if p.kind == kind][1:],
+        )
     ]
-    return {"swing_highs": highs, "swing_lows": lows, "structural_points": points, "labels": labels, "bias": "bullish" if bullish else "bearish" if bearish else "sideways"}
+    return data
 
 
-def detect_smc(candles: list[dict[str, Any]], direction: str | None = None, timeframe: str | None = None, registry: ZoneRegistry | None = None) -> dict[str, Any]:
-    """Return observable SMC evidence without treating any item as an entry signal."""
-    candles = _closed_candles(candles)
-    if len(candles) < 30:
-        return {"status": "insufficient", "valid": False, "reason": "At least 30 completed candles are required for SMC context.", "required_candles": 30, "available_candles": len(candles)}
+_ZONE_AGE = {"M1": 80, "M5": 80, "M15": 120, "M30": 140, "H1": 160,
+             "H4": 180, "D1": 220, "W1": 260, "MN": 300}
 
-    recent = candles[-200:]
-    highs = [_high(candle) for candle in recent]
-    lows = [_low(candle) for candle in recent]
-    last = candles[-1]
+
+def detect_smc(
+    candles: Sequence[dict[str, Any]],
+    direction: str | None = None,
+    timeframe: str | None = None,
+    registry: ZoneRegistry | None = None,
+    *,
+    trades_24_7: bool = False,
+    amd_config: AMDConfig | None = None,
+) -> dict[str, Any]:
+    """Return observable SMC evidence with explicit lifecycle and provenance."""
+    rows = closed_candles(candles)
+    if len(rows) < MINIMUM_SMC_CANDLES:
+        return {
+            "status": "insufficient", "valid": False,
+            "reason": f"At least {MINIMUM_SMC_CANDLES} completed candles are required for SMC context.",
+            "required_candles": MINIMUM_SMC_CANDLES, "available_candles": len(rows),
+        }
+
+    key = str(timeframe or "").upper()
     if registry is not None:
-        zone_age = {"M1": 80, "M5": 80, "M15": 120, "M30": 140, "H1": 160, "H4": 180, "D1": 220, "W1": 260, "MN": 300}.get(str(timeframe or "").upper(), 140)
-        registry.prune(timeframe, len(candles) - 1, zone_age)
-    structure = _structure(recent)
-    prior = candles[-6:-1]
-    prior_high = max(_high(candle) for candle in prior)
-    prior_low = min(_low(candle) for candle in prior)
+        registry.prune(timeframe, len(rows) - 1, _ZONE_AGE.get(key, 140))
 
-    sweep = None
-    if _high(last) > prior_high and _close(last) < prior_high:
-        sweep = "buy_side_liquidity_sweep"
-    elif _low(last) < prior_low and _close(last) > prior_low:
-        sweep = "sell_side_liquidity_sweep"
+    structure = build_structure(rows, timeframe=timeframe)
+    external = liquidity_levels_from_sessions(rows, trades_24_7=trades_24_7)
+    pools = build_liquidity_pools(rows, structure, external_levels=external)
+    sweep = detect_liquidity_sweep(rows, pools)
+    dealing_range = build_dealing_range(rows, structure)
+    atr_value = atr(rows, 14)
 
-    tolerance = max((max(highs) - min(lows)) * 0.001, 1e-8)
-    equal_highs = abs(highs[-1] - highs[-2]) <= tolerance
-    equal_lows = abs(lows[-1] - lows[-2]) <= tolerance
-
-    range_high = max(highs)
-    range_low = min(lows)
-    equilibrium = (range_high + range_low) / 2
-    location = "premium" if _close(last) > equilibrium else "discount"
-
-    bodies = [abs(_close(candle) - _open(candle)) for candle in recent]
-    average_body = sum(bodies[:-1]) / max(len(bodies) - 1, 1)
-    displacement = abs(_close(last) - _open(last)) >= max(average_body * 1.5, (range_high - range_low) * 0.05)
-    structure_shift = None
-    if _close(last) > prior_high:
-        structure_shift = "bullish_BOS"
-    elif _close(last) < prior_low:
-        structure_shift = "bearish_BOS"
-    elif sweep and structure["bias"] in {"bullish", "bearish"}:
-        structure_shift = f"{structure['bias']}_CHoCH_after_liquidity_sweep"
-    for point in structure["structural_points"]:
-        point["timeframe"] = timeframe
-    structure_event = None
-    if structure_shift:
-        bullish_event = structure_shift.startswith("bullish")
-        structure_event = {
-            "type": "BOS" if "BOS" in structure_shift else "CHoCH",
-            "direction": "bullish" if bullish_event else "bearish",
-            "broken_level": prior_high if bullish_event else prior_low,
-            "break_price": _close(last),
-            "break_timestamp": _timestamp(last),
-            "timeframe": timeframe,
-            "confirmation": "close" if (bullish_event and _close(last) > prior_high) or (not bullish_event and _close(last) < prior_low) else "sweep_reaction",
-        }
-
-    fair_value_gaps: list[dict[str, Any]] = []
-    fvg_candles = candles[-150:]
-    for gap_index, (first, middle, third) in enumerate(zip(fvg_candles[:-2], fvg_candles[1:-1], fvg_candles[2:]), start=max(0, len(candles) - len(fvg_candles)) + 1):
-        gap_low = gap_high = None
-        gap_type = None
-        if _high(first) < _low(third):
-            gap_type, gap_low, gap_high = "bullish", _high(first), _low(third)
-        elif _low(first) > _high(third):
-            gap_type, gap_low, gap_high = "bearish", _high(third), _low(first)
-        if gap_type:
-            future_candles = candles[gap_index + 2:]
-            touched = any(_low(candle) <= gap_high and _high(candle) >= gap_low for candle in future_candles)
-            fully_mitigated = any((_low(candle) <= gap_low if gap_type == "bullish" else _high(candle) >= gap_high) for candle in future_candles)
-            invalidated = any((_close(candle) < gap_low if gap_type == "bullish" else _close(candle) > gap_high) for candle in future_candles)
-            current_price = _close(last)
-            in_zone = gap_low <= current_price <= gap_high
-            near_zone = gap_low - (gap_high - gap_low) <= current_price <= gap_high + (gap_high - gap_low)
-            status = "INVALIDATED" if invalidated else "FULLY_MITIGATED" if fully_mitigated else "PARTIALLY_MITIGATED" if touched else "UNTOUCHED"
-            associated = gap_index >= len(candles) - 20 and displacement
-            qualified = associated and bool(structure_shift) and structure["bias"] == gap_type
-            gap = {
-                "type": gap_type, "low": gap_low, "high": gap_high,
-                "formation_index": gap_index + 1, "formation_timestamp": _timestamp(middle),
-                "size": gap_high - gap_low, "status": status,
-                "classification": "TRADEABLE_FVG" if qualified and status not in {"FULLY_MITIGATED", "INVALIDATED"} else "QUALIFIED_FVG" if qualified else "TECHNICAL_FVG",
-                "associated_displacement": associated, "associated_structure_shift": bool(structure_shift),
-                "formed_after_liquidity_event": sweep is not None,
-                "in_dealing_range": range_low <= gap_low <= range_high and range_low <= gap_high <= range_high,
-                "aligned_with_structure": structure["bias"] == gap_type,
-                "distance_from_price": abs(_close(last) - (gap_low + gap_high) / 2),
-                "price_in_zone": in_zone,
-                "price_near_zone": near_zone,
-                "retracement_status": "CURRENT_RETRACEMENT" if in_zone else "AWAITING_RETRACEMENT",
-                "invalidation_status": "INVALIDATED" if invalidated else "VALID",
-                "score": 2 + (2 if associated else 0) + (1 if structure_shift else 0),
-            }
-            fair_value_gaps.append(registry.observe(gap, timeframe, "FVG") if registry else gap)
-
-    order_blocks: list[dict[str, Any]] = []
-    for event_index in range(2, len(candles)):
-        event = candles[event_index]
-        prior_bodies = [abs(_close(item) - _open(item)) for item in candles[max(0, event_index - 20):event_index]]
-        event_displacement = abs(_close(event) - _open(event)) >= max((sum(prior_bodies) / max(len(prior_bodies), 1)) * 1.5, (range_high - range_low) * 0.05)
-        origin = candles[event_index - 1]
-        event_type = "bullish" if _close(event) > _open(event) and _close(origin) < _open(origin) else "bearish" if _close(event) < _open(event) and _close(origin) > _open(origin) else None
-        if not event_displacement or not event_type:
-            continue
-        invalidated = any((_close(item) < _low(origin) if event_type == "bullish" else _close(item) > _high(origin)) for item in candles[event_index + 1:])
-        touched = any(_low(item) <= _high(origin) and _high(item) >= _low(origin) for item in candles[event_index + 1:])
-        block = {
-            "type": event_type, "high": _high(origin), "low": _low(origin),
-            "score": 2 + (2 if event_displacement else 0) + (1 if structure_shift else 0),
-            "classification": "TRADEABLE_OB" if structure_shift and not invalidated else "CANDIDATE_OB",
-            "status": "INVALIDATED" if invalidated else "PARTIALLY_MITIGATED" if touched else "UNMITIGATED",
-            "formation_index": event_index - 1, "formation_timestamp": _timestamp(origin),
-            "displacement_index": event_index, "displacement_timestamp": _timestamp(event),
-            "price_in_zone": _low(origin) <= _close(last) <= _high(origin),
-            "invalidation_status": "INVALIDATED" if invalidated else "VALID",
-            "associated_displacement": True,
-        }
-        order_blocks.append(registry.observe(block, timeframe, "OB") if registry else block)
-    order_block = order_blocks[-1] if order_blocks else None
-
-    sweep_supports = (
-        sweep == "sell_side_liquidity_sweep" and structure_shift and structure_shift.startswith("bullish")
-    ) or (
-        sweep == "buy_side_liquidity_sweep" and structure_shift and structure_shift.startswith("bearish")
+    playbook = detect_fvg_playbook(
+        rows, structure=structure, dealing_range=dealing_range,
+        liquidity_sweep=sweep, atr_value=atr_value, timeframe=timeframe,
     )
-    expected_location = "discount" if structure["bias"] == "bullish" else "premium" if structure["bias"] == "bearish" else None
-    directional_gap = any(gap["type"] == structure["bias"] and gap["classification"] in {"QUALIFIED_FVG", "TRADEABLE_FVG"} for gap in fair_value_gaps)
-    directional_ob = isinstance(order_block, dict) and order_block["type"] == structure["bias"] and order_block["classification"] == "TRADEABLE_OB"
-    setup_model = "SWEEP_REVERSAL" if sweep else "BOS_CONTINUATION"
-    sequence = {"liquidity": bool(sweep), "structural_event": bool(structure_shift), "displacement": displacement, "smc_zone": directional_gap or directional_ob, "retracement": any(zone.get("status") == "PARTIALLY_MITIGATED" for zone in fair_value_gaps), "entry_confirmation": False, "complete": False}
-    evidence = {
+    amd = detect_amd(rows, structure=structure, timeframe=timeframe, config=amd_config)
+
+    gaps = playbook["fair_value_gaps"]
+    blocks = playbook["order_blocks"]
+    if registry is not None:
+        gaps = [registry.observe(gap, timeframe, "FVG") for gap in gaps]
+        blocks = [registry.observe(block, timeframe, "OB") for block in blocks]
+
+    last = rows[-1]
+    current_price = _close(last)
+    last_displacement = displacement_at(rows, len(rows) - 1)
+    event = structure.last_event
+
+    structure_view = structure.as_dict()
+    structure_view["displacement"] = last_displacement
+    range_view = dealing_range.as_dict() if dealing_range else {}
+    if range_view:
+        range_view["current_price"] = current_price
+
+    bias = structure.bias
+    target_price = None
+    target_basis = None
+    if bias == BULLISH:
+        upside = [p for p in pools if p.side == "buy_side" and p.price > current_price and not p.swept]
+        if upside:
+            best = min(upside, key=lambda p: (p.price - current_price))
+            target_price, target_basis = best.price, f"nearest unswept buy-side liquidity ({best.kind})"
+    elif bias == BEARISH:
+        downside = [p for p in pools if p.side == "sell_side" and p.price < current_price and not p.swept]
+        if downside:
+            best = min(downside, key=lambda p: (current_price - p.price))
+            target_price, target_basis = best.price, f"nearest unswept sell-side liquidity ({best.kind})"
+
+    evidence: dict[str, Any] = {
         "status": "ready",
         "valid": True,
-        "equal_highs": equal_highs,
-        "equal_lows": equal_lows,
-        "liquidity_sweep": sweep,
-        "structure_shift": structure_shift,
-        "structure_event": structure_event,
-        "displacement": displacement,
-        "fair_value_gaps": fair_value_gaps,
-        "order_block": order_block,
-        "order_blocks": order_blocks,
-        "dealing_range": {"high": range_high, "low": range_low, "equilibrium": equilibrium},
-        "location": location,
-        "preferred_location": expected_location,
+        "timeframe": timeframe,
+        "current_price": current_price,
+        "market_structure": structure_view,
+        "structure": structure_view,                     # legacy alias
+        "structure_event": event.as_dict() if event else None,
+        "structure_shift": (f"{event.direction}_{event.type}" if event else None),
+        "liquidity_pools": [pool.as_dict() for pool in pools],
+        "liquidity_sweep": sweep.as_dict() if sweep else None,
+        "external_levels": external,
+        "dealing_range": range_view,
+        "location": range_view.get("location"),
+        "preferred_location": ("discount" if bias == BULLISH else "premium" if bias == BEARISH else None),
+        "displacement": bool(last_displacement.get("displacement")),
+        "displacement_detail": last_displacement,
+        "fair_value_gaps": gaps,
+        "tradeable_gaps": [gap for gap in gaps if gap.get("tradeable")],
+        "inversion_fvgs": playbook["inversion_fvgs"],
+        "ifvg": {
+            "status": "ready",
+            "candidates": playbook["inversion_fvgs"],
+            "confirmed": playbook["confirmed_inversions"],
+            "tradeable": bool(playbook["confirmed_inversions"]),
+        },
+        "order_blocks": blocks,
+        "order_block": blocks[-1] if blocks else None,
+        "continuation": playbook["continuation"],
+        "amd": amd.as_dict(),
         "target_liquidity": {
-            "type": "buy_side_liquidity" if structure["bias"] == "bullish" else "sell_side_liquidity",
-            "price": max(highs) if structure["bias"] == "bullish" else min(lows),
+            "type": "buy_side_liquidity" if bias == BULLISH else "sell_side_liquidity",
+            "price": target_price,
             "timeframe": timeframe,
-            "basis": "opposing structural swing",
+            "basis": target_basis or "no unswept opposing liquidity identified",
         },
-        "structure": structure,
-        "sequence": sequence,
-        "setup_model": setup_model,
-        "decision": "WAIT" if any(sequence.values()) and not sequence["complete"] else "NO_SETUP",
-        "decision_reasons": ["SMC zones are monitoring locations, not entries.", "Wait for retracement and lower-timeframe confirmation."],
-        "liquidity_sequence": {
-            "event": sweep or "none",
-            "reaction": "confirmed" if displacement else "not_confirmed",
-            "displacement": displacement,
-            "structural_confirmation": structure_shift or "none",
-            "directional_support": bool(sweep_supports),
-        },
+        "setup_model": ("SWEEP_REVERSAL" if sweep and sweep.valid else
+                        "BOS_CONTINUATION" if event and event.type == "BOS" else "NO_MODEL"),
+        "decision_reasons": [
+            "SMC zones are monitoring locations, not entries.",
+            "A setup requires a protected-swing break plus an unexpired directional zone.",
+        ],
     }
+
+    sequence = {
+        "liquidity": bool(sweep and sweep.valid),
+        "structural_event": bool(event),
+        "displacement": bool(last_displacement.get("displacement")),
+        "smc_zone": bool(evidence["tradeable_gaps"] or (evidence["order_block"] or {}).get("classification") == "TRADEABLE_OB"),
+        "retracement": any(gap.get("status") == "PARTIALLY_MITIGATED" for gap in gaps),
+        "entry_confirmation": False,
+    }
+    sequence["complete"] = all(sequence[key] for key in ("liquidity", "structural_event", "displacement", "smc_zone"))
+    evidence["sequence"] = sequence
+    evidence["decision"] = "WAIT" if any(sequence.values()) and not sequence["complete"] else "NO_SETUP"
+
     if direction:
-        expected = "bullish" if direction == "BUY" else "bearish"
-        evidence["directional_confluence"] = (
-            structure_shift in {f"{expected}_BOS", "CHoCH_after_liquidity_sweep"}
-            or any(gap["type"] == expected for gap in fair_value_gaps)
-            or (order_block and order_block["type"] == expected)
+        expected = BULLISH if direction == "BUY" else BEARISH
+        evidence["directional_confluence"] = bool(
+            (event and event.direction == expected)
+            or any(gap.get("type") == expected and gap.get("tradeable") for gap in gaps)
+            or ((evidence["order_block"] or {}).get("type") == expected)
         )
     return evidence

@@ -1,4 +1,11 @@
-```
 # Data files (if they are generated/temporary)
 data/conversations/*.json
-```
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Generated trading audit artifacts (regenerate with tools/)
+docs/trade_calculation_validation.json
+docs/broker_symbol_audit.json
+docs/broker_symbol_audit.csv

@@ -28,8 +28,16 @@ def validate_trade_setup(
     minimum_rr: float = 2.0,
     maximum_spread_pips: float | None = None,
     maximum_spread_points: float | None = None,
+    specs: dict[str, Any] | None = None,
+    net_rr: float | None = None,
 ) -> dict[str, Any]:
-    """Hard safety checks that gate trading decisions before execution."""
+    """Hard safety checks that gate trading decisions before execution.
+
+    Spread is gated in the instrument's own unit, decided by the broker's
+    metadata rather than by matching substrings in the symbol name. When
+    ``net_rr`` is supplied it is enforced in addition to the gross RR, because
+    only the net figure reflects the trade's real economics.
+    """
     checks: list[str] = []
     reasons: list[str] = []
 
@@ -51,9 +59,19 @@ def validate_trade_setup(
     rr = abs(take_profit - entry) / max(distance_to_sl, 1e-9)
     tolerance = 1e-9
     if rr < minimum_rr - tolerance:
-        reasons.append(f"Reward-to-risk is below the minimum required ({minimum_rr:.2f}:1).")
+        reasons.append(f"Gross reward-to-risk {rr:.2f}:1 is below the minimum required ({minimum_rr:.2f}:1).")
     else:
-        checks.append(f"Risk-reward OK: {rr:.2f}:1")
+        checks.append(f"Gross risk-reward OK: {rr:.2f}:1")
+    if net_rr is not None:
+        if float(net_rr) < minimum_rr - tolerance:
+            reasons.append(
+                f"NET reward-to-risk after spread, commission and swap is {float(net_rr):.2f}:1, "
+                f"below the minimum {minimum_rr:.2f}:1 (gross was {rr:.2f}:1)."
+            )
+        else:
+            checks.append(f"Net risk-reward OK after costs: {float(net_rr):.2f}:1 (gross {rr:.2f}:1).")
+    else:
+        checks.append("NOTE: only the gross RR was verified; net RR after costs was not supplied.")
 
     if risk_percent <= 0:
         reasons.append("Risk percentage must be positive.")
@@ -77,15 +95,28 @@ def validate_trade_setup(
     else:
         checks.append("Projected margin level remains acceptable.")
 
-    # FX: enforce pips. Metals/other instruments: enforce MT5 points when
-    # an explicit point threshold is provided. Never mix the units.
-    is_metal = bool(symbol and any(token in str(symbol).upper() for token in ("XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER")))
-    if is_metal and spread_points is not None:
+    # The instrument's spread unit comes from broker metadata (trade_calc_mode
+    # and the currency fields), not from the symbol string. An FX pip ceiling is
+    # never applied to gold, crypto or an index.
+    uses_pips = True
+    instrument_class = "UNKNOWN"
+    try:
+        from .instruments import FX_CLASSES, build_profile
+        instrument_profile = build_profile(symbol or "", specs or {})
+        instrument_class = instrument_profile.instrument_class
+        uses_pips = instrument_class in FX_CLASSES and instrument_profile.pip_size is not None
+    except Exception:
+        instrument_profile = None
+    if not uses_pips and spread_points is not None:
         max_points = float(maximum_spread_points or 0.0)
         if max_points > 0 and spread_points > max_points + 1e-9:
-            reasons.append(f"Spread is too wide: {spread_points:.0f} MT5 points > maximum allowed {max_points:.0f} points.")
+            reasons.append(f"Spread is too wide for {instrument_class}: {spread_points:.0f} MT5 points "
+                           f"> maximum allowed {max_points:.0f} points.")
         else:
-            checks.append(f"Spread OK: {spread_points:.0f} MT5 points (max {max_points:.0f}).")
+            checks.append(f"Spread OK: {spread_points:.0f} MT5 points (max {max_points:.0f}, {instrument_class}).")
+    elif not uses_pips:
+        reasons.append(f"{symbol} is classified as {instrument_class}, which has no pip definition, "
+                       "but no MT5-point spread was supplied. Spread cannot be validated.")
     elif spread_pips is not None:
         try:
             max_allowed = float(
@@ -101,10 +132,16 @@ def validate_trade_setup(
             checks.append(f"Spread OK: {spread_pips:.2f} pips (max {max_allowed:.2f}).")
     elif spread is not None and spread > 0:
         reasons.append("Spread could not be normalized into the unit required for this symbol.")
+    else:
+        reasons.append("No spread was supplied; execution cost cannot be verified.")
 
     valid = not reasons
     return {
         "valid": valid,
+        "instrument_class": instrument_class,
+        "spread_unit": "pips" if uses_pips else "points",
+        "gross_rr": rr,
+        "net_rr": net_rr,
         "check_count": len(checks),
         "checks": checks,
         "reasons": reasons,

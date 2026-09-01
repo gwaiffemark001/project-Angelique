@@ -114,7 +114,18 @@ def build_risk(
     *,
     loss_per_lot: float | None = None,
     profit_per_lot_at_tp: float | None = None,
+    require_authoritative: bool = False,
+    symbol: str = "",
 ) -> dict:
+    """Size a position against the risk budget.
+
+    ``loss_per_lot`` should come from the broker (``order_calc_profit``). When
+    it is absent this function can fall back to a tick-value approximation for
+    **planning and display**, but the result is tagged
+    ``authoritative=False``. Execution paths pass ``require_authoritative=True``
+    and the fallback is refused -- see ``broker_calc.solve_volume_for_risk``,
+    which is the sizing routine the execution preflight actually uses.
+    """
     distance = abs(entry - stop_loss)
     if distance <= 0:
         raise ValueError("Stop loss must be based on a distinct invalidation price.")
@@ -129,10 +140,22 @@ def build_risk(
     maximum = float(symbol_specs.get("volume_max", 0) or 0)
     if min(step, minimum, maximum) <= 0:
         raise ValueError("MT5 volume specifications are incomplete; volume cannot be calculated.")
+    authoritative = loss_per_lot is not None
+    calculation_source = "order_calc_profit"
     if loss_per_lot is None:
+        if require_authoritative:
+            raise ValueError(
+                "BROKER_CALCULATION_UNAVAILABLE: order_calc_profit did not return a value for "
+                f"{symbol or 'this symbol'}. Automatic execution is blocked; a generic "
+                "tick-value fallback is not safe for cross-currency or non-FX instruments."
+            )
         if min(tick_size, tick_value) <= 0:
             raise ValueError("Broker-calculated P/L is unavailable and tick specifications are incomplete.")
-        loss_per_lot = (distance / tick_size) * tick_value
+        # Prefer the loss-side tick value: profit and loss tick values differ
+        # for instruments whose profit currency is not the account currency.
+        loss_tick_value = float(symbol_specs.get("tick_value_loss", 0) or 0) or tick_value
+        loss_per_lot = (distance / tick_size) * loss_tick_value
+        calculation_source = "tick_value_estimate"
     loss_per_lot = abs(float(loss_per_lot))
     if loss_per_lot <= 0:
         raise ValueError("Unable to calculate monetary loss at stop loss.")
@@ -156,7 +179,10 @@ def build_risk(
 
     margin_per_volume = float(symbol_specs.get("margin_per_volume", 0) or 0)
     if config.TRADING_MARGIN_PROTECTION and margin_per_volume <= 0:
-        raise ValueError("MT5 margin requirement is unavailable; position safety cannot be verified.")
+        raise ValueError(
+            "BROKER_CALCULATION_UNAVAILABLE: order_calc_margin did not return a margin requirement; "
+            "position safety cannot be verified and execution is blocked."
+        )
     margin_required = margin_per_volume * volume
     free_margin_after = free_margin - margin_required
     configured_minimum = max(float(minimum_free_margin or 0), equity * config.TRADING_MIN_FREE_MARGIN_PERCENT / 100)
@@ -175,6 +201,14 @@ def build_risk(
         "actual_risk_amount": actual_risk,
         "actual_risk_percent": actual_risk_percent,
         "loss_per_lot": loss_per_lot,
+        "calculation_source": calculation_source,
+        "authoritative": authoritative,
+        "calculation_note": (
+            "Loss per lot supplied by the broker (order_calc_profit)."
+            if authoritative else
+            "APPROXIMATION from tick value. Not broker-authoritative; must not be used "
+            "for automatic execution."
+        ),
         "expected_profit_at_tp": (abs(float(profit_per_lot_at_tp)) * volume if profit_per_lot_at_tp is not None else None),
         "minimum_free_margin": configured_minimum,
         "margin_required": margin_required,
