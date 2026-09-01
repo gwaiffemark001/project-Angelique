@@ -9,11 +9,17 @@ import struct
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 import tkinter as tk
 from collections import deque
 from tkinter import simpledialog, messagebox, scrolledtext, ttk
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from core import config
 from gui.trading_hub_controller import TradingHubController
@@ -21,11 +27,6 @@ from gui.trading_hub_controller import TradingHubController
 #[main 53c3b9b] new restore
 #[main ba52bb9] reversal
 #[main 1081cdc] report
-ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = ROOT.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 try:
     import psutil
 except ImportError:
@@ -77,9 +78,9 @@ def _get_resampling_filter():
     return getattr(Image, "LANCZOS", None) or getattr(Image, "Resampling", None)
 
 
-def _fmt_signal_value(value: Any) -> str:
+def _fmt_signal_value(value: Any, digits: int = 5) -> str:
     try:
-        return f"{float(value):.5f}"
+        return f"{float(value):.{max(0, int(digits))}f}"
     except (TypeError, ValueError):
         return "--"
 
@@ -138,6 +139,11 @@ class AngeliqueDesktopApp(tk.Tk):
         self._ring_particles = []
         self._ring_arc_ids = []
         self._ring_arc_config = []
+        self._ring_particle_ids = []
+        self._ring_node_ids = []
+        self._ring_node_meta = {}
+        self._ring_state = {}
+        self._ring_focus = None
         self._trading_scan_stop_event = threading.Event()
         self._avatar_status_text_id = None
         self._avatar_status_blink_job = None
@@ -185,6 +191,28 @@ class AngeliqueDesktopApp(tk.Tk):
             "_signal_generation": 0,
             "_signal_notifications": [],
             "_signal_plan_history": {},
+            "_signal_symbol_var": None,
+            "_signal_status_var": None,
+            "_signal_route_var": None,
+            "_signal_notification_var": None,
+            "_signal_card_vars": {},
+            "_signal_plan_text": None,
+            "_signal_report": None,
+            "_signal_evidence_tree": None,
+            "_signal_smc_text": None,
+            "_signal_ict_text": None,
+            "_signal_structure_text": None,
+            "_signal_news_tree": None,
+            "_signal_calendar_tree": None,
+            "_chart_tool_var": "CROSSHAIR",
+            "_chart_crosshair_ids": [],
+            "_chart_tool_points": [],
+            "_chart_drawing_ids": [],
+            "_chart_drawings": [],
+            "_chart_drag_active": False,
+            "_volume_profile_enabled": True,
+            "_volume_profile_rows": 30,
+            "_volume_profile_value_area": 0.70,
             "_calculator_specs": {},
             "_command_in_progress": False,
             "_pending_command_queue": deque(),
@@ -380,24 +408,31 @@ class AngeliqueDesktopApp(tk.Tk):
 
 
     def _create_frames(self):
+        """Build the system-wide home shell.
+
+        The home page is intentionally not trading-centric.  The centre is a
+        large interactive Angelique core, while the side rails expose system
+        telemetry and command/navigation controls without the old four-card
+        matrix.  Trading/Signals/Wi-Fi views continue to reuse these panels.
+        """
         self.left_panel = self._create_panel(self._theme("panel"))
         self.center_panel = self._create_panel(self._theme("panel"))
         self.right_panel = self._create_panel(self._theme("panel"))
         self.bottom_panel = self._create_panel(self._theme("panel"))
-        self.footer_bar = tk.Frame(self, bg=self._theme("panel"), height=36)
+        self.footer_bar = tk.Frame(self, bg=self._theme("panel"), height=34)
 
-        self.left_panel.place(relx=0.02, rely=0.055, relwidth=0.235, relheight=0.62)
-        self.center_panel.place(relx=0.265, rely=0.055, relwidth=0.47, relheight=0.62)
-        self.right_panel.place(relx=0.76, rely=0.055, relwidth=0.225, relheight=0.62)
-        self.bottom_panel.place(relx=0.02, rely=0.69, relwidth=0.96, relheight=0.25)
-        self.footer_bar.place(relx=0, rely=0.95, relwidth=1, height=36)
+        # Home: dominant centre core with slimmer utility rails.
+        self.left_panel.place(relx=0.018, rely=0.055, relwidth=0.205, relheight=0.68)
+        self.center_panel.place(relx=0.235, rely=0.055, relwidth=0.53, relheight=0.68)
+        self.right_panel.place(relx=0.782, rely=0.055, relwidth=0.20, relheight=0.68)
+        self.bottom_panel.place(relx=0.018, rely=0.755, relwidth=0.964, relheight=0.19)
+        self.footer_bar.place(relx=0, rely=0.95, relwidth=1, height=34)
 
         self._build_left_panel()
         self._build_center_panel()
         self._build_right_panel()
         self._build_bottom_panel()
         self._build_footer_bar()
-
     def _create_panel(self, bg_color: str):
         panel = tk.Frame(self, bg=bg_color, bd=1, relief="flat")
         return panel
@@ -421,35 +456,45 @@ class AngeliqueDesktopApp(tk.Tk):
 
     def _build_left_panel(self):
         header = tk.Label(
-            self.left_panel,
-            text="SYSTEM INTEL",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 14, "bold"),
+            self.left_panel, text="SYSTEM INTEL", fg=self._theme("accent"),
+            bg=self._theme("panel"), font=("Consolas", 14, "bold")
         )
-        header.pack(anchor="nw", padx=20, pady=(18, 12))
+        header.pack(anchor="nw", padx=16, pady=(16, 10))
 
+        # Compact live telemetry, intentionally free of large card blocks.
         self._temperature_label = self._create_status_row(self.left_panel, "CORE TEMPERATURE", "N/A")
         self._cpu_label = self._create_status_row(self.left_panel, "NEURAL LOAD", "0%")
         self._memory_label = self._create_status_row(self.left_panel, "MEMORY STABILITY", "0%")
         self._network_label = self._create_status_row(self.left_panel, "NETWORK BANDWIDTH", "0 Mbps")
 
         divider = tk.Frame(self.left_panel, bg=self._theme("border"), height=1)
-        divider.pack(fill="x", padx=20, pady=18)
+        divider.pack(fill="x", padx=16, pady=12)
 
         tk.Label(
+            self.left_panel, text="ACTIVE SUBSYSTEMS", fg=self._theme("accent"),
+            bg=self._theme("panel"), font=("Consolas", 10, "bold")
+        ).pack(anchor="nw", padx=16, pady=(0, 4))
+        for label, active, store in [
+            ("Vision Matrix", True, None),
+            ("Voice Layer", True, None),
+            ("Trading Bridge", False, "trading_bridge"),
+            ("Memory Vault", True, None),
+        ]:
+            self._create_subsystem_label(self.left_panel, label, active, store_as=store)
+
+        divider2 = tk.Frame(self.left_panel, bg=self._theme("border"), height=1)
+        divider2.pack(fill="x", padx=16, pady=12)
+        tk.Label(
+            self.left_panel, text="SYSTEM SIGNAL", fg=self._theme("accent"),
+            bg=self._theme("panel"), font=("Consolas", 10, "bold")
+        ).pack(anchor="nw", padx=16, pady=(0, 6))
+        self._home_signal_label = tk.Label(
             self.left_panel,
-            text="ACTIVE SUBSYSTEMS",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "bold"),
-        ).pack(anchor="nw", padx=20)
-
-        self._create_subsystem_label(self.left_panel, "Vision Matrix", True)
-        self._create_subsystem_label(self.left_panel, "Voice Layer", True)
-        self._create_subsystem_label(self.left_panel, "Trading Bridge", False, store_as="trading_bridge")
-        self._create_subsystem_label(self.left_panel, "Memory Vault", True)
-
+            text="CORE NOMINAL\nWaiting for subsystem input...",
+            fg=self._theme("text"), bg=self._theme("panel"),
+            font=("Consolas", 9), justify="left", anchor="nw"
+        )
+        self._home_signal_label.pack(fill="x", padx=16)
     def _create_status_row(self, parent, label, value):
         frame = tk.Frame(parent, bg=self._theme("panel"))
         frame.pack(fill="x", padx=20, pady=8)
@@ -490,598 +535,349 @@ class AngeliqueDesktopApp(tk.Tk):
 
     def _build_center_panel(self):
         self.center_title_label = tk.Label(
-            self.center_panel,
-            text="CORE MATRIX",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 16, "bold"),
+            self.center_panel, text="ANGELIQUE CORE", fg=self._theme("accent"),
+            bg=self._theme("panel"), font=("Consolas", 17, "bold")
         )
-        self.center_title_label.pack(anchor="n", pady=(18, 8))
+        self.center_title_label.pack(anchor="n", pady=(14, 4))
 
         self.ring_canvas = tk.Canvas(
-            self.center_panel,
-            bg=self._theme("panel"),
-            highlightthickness=0,
+            self.center_panel, bg=self._theme("panel"), highlightthickness=0
         )
-        self.ring_canvas.pack(fill="both", expand=True, padx=18, pady=18)
+        self.ring_canvas.pack(fill="both", expand=True, padx=6, pady=(4, 4))
         self.center_panel.bind("<Configure>", self._on_center_panel_resize)
         self._draw_ring_hud()
         self._animate_ring()
 
-        # Avatar will be drawn on the ring canvas for pixel stability
         self.avatar_label = None
         self._update_avatar()
 
         self.center_status_label = tk.Label(
             self.center_panel,
-            text="PRIORITY: HARMONIC SYNTHESIS",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 11),
+            text="SYSTEM-WIDE SYNTHESIS CONTROL",
+            fg=self._theme("accent"), bg=self._theme("panel"),
+            font=("Consolas", 10, "bold")
         )
-        self.center_status_label.pack(anchor="s", pady=(16, 20))
+        self.center_status_label.pack(anchor="s", pady=(4, 12))
 
         self._build_trading_view()
+        self._build_signal_view()
         self._build_wifi_view()
         self._show_home_view()
-
     def _build_trading_view(self):
+        """Build a space-efficient Trading Hub dashboard.
+
+        The old layout stacked many long status labels above the chart, which
+        consumed most of the vertical viewport and left the actionable controls
+        visually disconnected from the chart.  This version uses a compact
+        header, a single control/status rail, a three-column market workspace,
+        and a fixed-height position monitor so the important controls remain
+        visible at 900p/1080p without overlap.
+        """
         self.trading_view_frame = tk.Frame(self, bg=self._theme("panel"))
         self.trading_view_frame.place_forget()
 
-        title = tk.Label(
-            self.trading_view_frame,
-            text="TRADING HUB",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 16, "bold"),
-        )
-        title.pack(anchor="nw", padx=20, pady=(10, 4))
+        frame = self.trading_view_frame
+        for col, weight in ((0, 0), (1, 1), (2, 0)):
+            frame.grid_columnconfigure(col, weight=weight)
+        for row, weight in ((0, 0), (1, 0), (2, 0), (3, 1), (4, 0), (5, 0)):
+            frame.grid_rowconfigure(row, weight=weight)
 
+        # ---------- Header ----------
+        header = tk.Frame(frame, bg=self._theme("title_bg"), bd=1, relief="solid")
+        header.grid(row=0, column=0, columnspan=3, sticky="ew", padx=14, pady=(8, 5))
+        header.grid_columnconfigure(1, weight=1)
+
+        tk.Label(header, text="TRADING HUB", fg=self._theme("accent"),
+                 bg=self._theme("title_bg"), font=("Consolas", 16, "bold")).grid(
+                     row=0, column=0, sticky="w", padx=12, pady=7)
         self.trading_status_var = tk.StringVar(value="Trading status initializing...")
-        status = tk.Label(
-            self.trading_view_frame,
-            textvariable=self.trading_status_var,
-            fg=self._theme("text"),
-            bg=self._theme("panel"),
-            font=("Consolas", 11),
-            justify="left",
-            wraplength=1100,
-        )
-        status.pack(anchor="nw", padx=20, pady=(0, 4))
-
+        tk.Label(header, textvariable=self.trading_status_var, fg=self._theme("text"),
+                 bg=self._theme("title_bg"), font=("Consolas", 9), anchor="w").grid(
+                     row=0, column=1, sticky="ew", padx=10)
         self._trading_bridge_error_var = tk.StringVar(value="Bridge status unknown.")
+        tk.Label(header, textvariable=self._trading_bridge_error_var, fg=self._theme("text"),
+                 bg=self._theme("title_bg"), font=("Consolas", 8, "italic"), anchor="e").grid(
+                     row=0, column=2, sticky="e", padx=12)
+
         self._trading_mode_banner_var = tk.StringVar(value="Preparing trading status...")
         self._strategy_mode_var = tk.StringVar(value=f"ACTIVE MODE: {self._trading_hub_controller.trading_mode}")
         self._strategy_profile_var = tk.StringVar(value="")
-        self._risk_policy_var = tk.StringVar(value="RISK POLICY: TARGET 1.00% | MAXIMUM 1.00% | NEVER EXCEED THE RISK CEILING")
-        bridge_error_label = tk.Label(
-            self.trading_view_frame,
-            textvariable=self._trading_bridge_error_var,
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "italic"),
-            justify="left",
-            wraplength=1100,
-        )
-        bridge_error_label.pack(anchor="nw", padx=20, pady=(0, 4))
+        self._risk_policy_var = tk.StringVar(value="RISK 1.00% | MAX 1.00% | HIGH IMPACT → MANUAL")
 
-        banner_label = tk.Label(
-            self.trading_view_frame,
-            textvariable=self._trading_mode_banner_var,
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 11, "bold"),
-            justify="left",
-            wraplength=1100,
-        )
-        banner_label.pack(anchor="nw", padx=20, pady=(0, 6))
-        self._trading_mode_label_widget = banner_label
+        # ---------- Compact control rail ----------
+        controls = tk.Frame(frame, bg=self._theme("panel_alt"), bd=1, relief="solid")
+        controls.grid(row=1, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 5))
+        controls.grid_columnconfigure(5, weight=1)
 
-        # Compact, responsive strategy/risk controls.  Keep controls on two rows so
-        # they never crush each other on narrower screens.
-        strategy_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
-        strategy_frame.pack(fill="x", padx=20, pady=(0, 10))
+        def label(parent, text, col, **kw):
+            opts = dict(fg=self._theme("text"), bg=self._theme("panel_alt"), font=("Consolas", 9, "bold"))
+            opts.update(kw)
+            tk.Label(parent, text=text, **opts).grid(row=0, column=col, padx=6, pady=6, sticky="w")
 
-        strategy_controls = tk.Frame(strategy_frame, bg=self._theme("panel"))
-        strategy_controls.pack(fill="x", pady=(0, 5))
-        tk.Label(
-            strategy_controls, text="TRADING MODE:", fg=self._theme("text"),
-            bg=self._theme("panel"), font=("Consolas", 10, "bold")
-        ).pack(side="left", padx=(0, 8))
-        for mode, label in (("DAY_TRADING", "DAY TRADING"), ("SWING_TRADING", "SWING TRADING")):
-            tk.Button(
-                strategy_controls, text=label,
-                command=lambda selected=mode: self._on_strategy_mode_change(selected),
-                fg=self._theme("text"), bg=self._theme("button_bg"),
-                activebackground=self._theme("button_active"),
-                activeforeground=self._theme("accent"), bd=0, padx=12, pady=5,
-                font=("Consolas", 9, "bold")
-            ).pack(side="left", padx=(0, 8))
-        tk.Label(
-            strategy_controls, textvariable=self._strategy_mode_var,
-            fg=self._theme("accent"), bg=self._theme("panel"),
-            font=("Consolas", 10, "bold")
-        ).pack(side="left", padx=(4, 14))
+        label(controls, "MODE", 0)
+        for idx, (mode, txt) in enumerate((("DAY_TRADING", "DAY"), ("SWING_TRADING", "SWING")), start=1):
+            tk.Button(controls, text=txt,
+                      command=lambda selected=mode: self._on_strategy_mode_change(selected),
+                      fg=self._theme("text"), bg=self._theme("button_bg"),
+                      activebackground=self._theme("button_active"), activeforeground=self._theme("accent"),
+                      bd=0, padx=10, pady=4, font=("Consolas", 8, "bold")).grid(
+                          row=0, column=idx, padx=2, pady=4)
+        tk.Label(controls, textvariable=self._strategy_mode_var, fg=self._theme("accent"),
+                 bg=self._theme("panel_alt"), font=("Consolas", 8, "bold")).grid(
+                     row=0, column=3, padx=(7, 12), sticky="w")
 
-        policy_row = tk.Frame(strategy_frame, bg=self._theme("panel"))
-        policy_row.pack(fill="x")
-        tk.Label(
-            policy_row, textvariable=self._risk_policy_var,
-            fg=self._theme("accent"), bg=self._theme("panel"),
-            font=("Consolas", 9, "bold"), justify="left", anchor="w",
-            wraplength=820
-        ).pack(side="left", fill="x", expand=False, padx=(0, 18))
-        tk.Label(
-            policy_row, textvariable=self._strategy_profile_var,
-            fg=self._theme("text"), bg=self._theme("panel"),
-            font=("Consolas", 9), justify="left", anchor="w",
-            wraplength=500
-        ).pack(side="left", fill="x", expand=True)
-        self._update_strategy_profile_display()
+        label(controls, "SYMBOL", 4)
+        symbols = self._get_market_symbols()
+        self._symbol_var = tk.StringVar(value=symbols[0] if symbols else config.DEFAULT_TRADING_SYMBOL)
+        self._symbol_var.trace_add("write", lambda *args: self._refresh_trading_view())
+        self._symbol_menu = tk.OptionMenu(controls, self._symbol_var, *(symbols or [config.DEFAULT_TRADING_SYMBOL]))
+        self._symbol_menu.configure(bg=self._theme("button_bg"), fg=self._theme("text"),
+                                    activebackground=self._theme("button_active"), activeforeground=self._theme("accent"),
+                                    bd=0, highlightthickness=0, font=("Consolas", 9))
+        self._symbol_menu.grid(row=0, column=5, padx=2, pady=4, sticky="w")
 
-        # MT5 data availability badge (shows whether real MT5 data is being used)
+        label(controls, "TF", 6)
+        self._timeframe_var = tk.StringVar(value=config.DEFAULT_TRADING_TIMEFRAME)
+        self._timeframe_var.trace_add("write", lambda *args: self._refresh_trading_view())
+        timeframe_menu = tk.OptionMenu(controls, self._timeframe_var, *config.TRADING_TIMEFRAMES)
+        timeframe_menu.configure(bg=self._theme("button_bg"), fg=self._theme("text"),
+                                 activebackground=self._theme("button_active"), activeforeground=self._theme("accent"),
+                                 bd=0, highlightthickness=0, font=("Consolas", 9))
+        timeframe_menu.grid(row=0, column=7, padx=2, pady=4)
+
+        label(controls, "ACCOUNT", 8)
+        account_mode = self._gui_settings.get("account_mode", "demo")
+        self._account_mode_var = tk.StringVar(value=account_mode)
+        account_mode_menu = tk.OptionMenu(controls, self._account_mode_var, "demo", "real", command=self._on_account_mode_change)
+        account_mode_menu.configure(bg=self._theme("button_bg"), fg=self._theme("text"),
+                                     activebackground=self._theme("button_active"), activeforeground=self._theme("accent"),
+                                     bd=0, highlightthickness=0, font=("Consolas", 9))
+        account_mode_menu.grid(row=0, column=9, padx=2, pady=4)
+
+        # Live MT5 badge sits in the same rail instead of floating over the header.
         self._mt5_data_badge_var = tk.StringVar(value="")
-        self._mt5_data_badge_label = tk.Label(
-            self.trading_view_frame,
-            textvariable=self._mt5_data_badge_var,
-            fg="#ffffff",
-            bg="#16a34a",
-            font=("Consolas", 10, "bold"),
-            padx=8,
-            pady=3,
-            bd=0,
-            relief="flat",
-        )
-        self._mt5_data_badge_label.place(relx=0.985, rely=0.012, anchor="ne")
-        # Tooltip: show raw bridge error on hover
+        self._mt5_data_badge_label = tk.Label(controls, textvariable=self._mt5_data_badge_var,
+                                              fg="#ffffff", bg="#16a34a",
+                                              font=("Consolas", 8, "bold"), padx=7, pady=3)
+        self._mt5_data_badge_label.grid(row=0, column=10, padx=(10, 7), pady=3, sticky="e")
         self._mt5_tooltip = None
         self._mt5_data_badge_label.bind("<Enter>", lambda e: self._show_mt5_tooltip(e))
         self._mt5_data_badge_label.bind("<Leave>", lambda e: self._hide_mt5_tooltip(e))
 
-        self.trading_detail_var = tk.StringVar(value="Awaiting trading actions...")
-        detail_label = tk.Label(
-            self.trading_view_frame,
-            textvariable=self.trading_detail_var,
-            fg=self._theme("text"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "italic"),
-            justify="left",
-            wraplength=1100,
-        )
-        detail_label.pack(anchor="nw", padx=20, pady=(0, 5))
+        # ---------- Context/status strip ----------
+        status_strip = tk.Frame(frame, bg=self._theme("panel"))
+        status_strip.grid(row=2, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 5))
+        status_strip.grid_columnconfigure(0, weight=4, uniform="status")
+        status_strip.grid_columnconfigure(1, weight=5, uniform="status")
+        status_strip.grid_columnconfigure(2, weight=3, uniform="status")
 
-        self._trading_monitor_status_var = tk.StringVar(value="ANGELIQUE MONITOR: STARTING...")
-        monitor_label = tk.Label(
-            self.trading_view_frame,
-            textvariable=self._trading_monitor_status_var,
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "bold"),
-            justify="left",
-            wraplength=1100,
-        )
-        monitor_label.pack(anchor="nw", padx=20, pady=(0, 5))
+        def status_box(column, title, var, accent=False):
+            box = tk.Frame(status_strip, bg=self._theme("panel_alt"), bd=1, relief="solid")
+            box.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 4, 4 if column < 2 else 0))
+            tk.Label(box, text=title, fg=self._theme("text"), bg=self._theme("panel_alt"),
+                     font=("Consolas", 7, "bold"), anchor="w").pack(anchor="w", padx=8, pady=(4, 0))
+            tk.Label(box, textvariable=var, fg=self._theme("accent" if accent else "text"),
+                     bg=self._theme("panel_alt"), font=("Consolas", 8, "bold" if accent else "normal"),
+                     anchor="w", justify="left").pack(fill="x", padx=8, pady=(1, 5))
+
         self._trading_health_var = tk.StringVar(value="TRADING HEALTH: CHECKING...")
-        tk.Label(
-            self.trading_view_frame,
-            textvariable=self._trading_health_var,
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 9),
-            justify="left",
-            wraplength=1100,
-        ).pack(anchor="nw", padx=20, pady=(0, 5))
+        self._trading_monitor_status_var = tk.StringVar(value="ANGELIQUE MONITOR: STARTING...")
+        self.trading_detail_var = tk.StringVar(value="Awaiting trading actions...")
+        status_box(0, "SYSTEM HEALTH", self._trading_health_var)
+        status_box(1, "MONITOR", self._trading_monitor_status_var)
+        status_box(2, "EXECUTION / PLAN", self._trading_mode_banner_var, True)
 
-        timeframe_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
-        timeframe_frame.pack(anchor="nw", padx=20, pady=(0, 8))
+        # ---------- Main market workspace ----------
+        workspace = tk.Frame(frame, bg=self._theme("panel"))
+        workspace.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=14, pady=(0, 6))
+        workspace.grid_columnconfigure(0, weight=0, minsize=270)
+        workspace.grid_columnconfigure(1, weight=1, minsize=520)
+        workspace.grid_columnconfigure(2, weight=0, minsize=270)
+        workspace.grid_rowconfigure(0, weight=1)
+        workspace.grid_propagate(False)
 
-        tk.Label(
-            timeframe_frame,
-            text="Symbol:",
-            fg=self._theme("text"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "bold"),
-        ).pack(side="left", padx=(0, 8))
-        symbols = self._get_market_symbols()
-        self._symbol_var = tk.StringVar(value=symbols[0] if symbols else config.DEFAULT_TRADING_SYMBOL)
-        self._symbol_var.trace_add("write", lambda *args: self._refresh_trading_view())
-        self._symbol_menu = tk.OptionMenu(timeframe_frame, self._symbol_var, *(symbols or [config.DEFAULT_TRADING_SYMBOL]))
-        symbol_menu = self._symbol_menu
-        symbol_menu.configure(
-            bg=self._theme("button_bg"),
-            fg=self._theme("text"),
-            activebackground=self._theme("button_active"),
-            activeforeground=self._theme("accent"),
-            bd=0,
-            highlightthickness=0,
-            font=("Consolas", 10),
-        )
-        symbol_menu.pack(side="left", padx=(0, 16))
-
-        tk.Label(
-            timeframe_frame,
-            text="Timeframe:",
-            fg=self._theme("text"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "bold"),
-        ).pack(side="left", padx=(0, 8))
-        self._timeframe_var = tk.StringVar(value=config.DEFAULT_TRADING_TIMEFRAME)
-        self._timeframe_var.trace_add("write", lambda *args: self._refresh_trading_view())
-        timeframe_options = config.TRADING_TIMEFRAMES
-        timeframe_menu = tk.OptionMenu(timeframe_frame, self._timeframe_var, *timeframe_options)
-        timeframe_menu.configure(
-            bg=self._theme("button_bg"),
-            fg=self._theme("text"),
-            activebackground=self._theme("button_active"),
-            activeforeground=self._theme("accent"),
-            bd=0,
-            highlightthickness=0,
-            font=("Consolas", 10),
-        )
-        timeframe_menu.pack(side="left", padx=(0, 16))
-
-        tk.Label(
-            timeframe_frame,
-            text="Account:",
-            fg=self._theme("text"),
-            bg=self._theme("panel"),
-            font=("Consolas", 10, "bold"),
-        ).pack(side="left", padx=(0, 8))
-        account_mode = self._gui_settings.get("account_mode", "demo")
-        self._account_mode_var = tk.StringVar(value=account_mode)
-        account_mode_menu = tk.OptionMenu(
-            timeframe_frame,
-            self._account_mode_var,
-            "demo",
-            "real",
-            command=self._on_account_mode_change,
-        )
-        account_mode_menu.configure(
-            bg=self._theme("button_bg"),
-            fg=self._theme("text"),
-            activebackground=self._theme("button_active"),
-            activeforeground=self._theme("accent"),
-            bd=0,
-            highlightthickness=0,
-            font=("Consolas", 10),
-        )
-        account_mode_menu.pack(side="left", padx=(0, 16))
-
-        trading_navigation = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
-        trading_navigation.pack(anchor="nw", padx=20, pady=(0, 8))
-        self._position_monitor_button = tk.Button(
-            trading_navigation,
-            text="OPEN POSITION MONITOR",
-            command=self._show_position_monitor_view,
-            fg=self._theme("text"),
-            bg=self._theme("button_bg"),
-            activebackground=self._theme("button_active"),
-            activeforeground=self._theme("accent"),
-            bd=0,
-            padx=14,
-            pady=9,
-            font=("Consolas", 10, "bold"),
-        )
-        self._position_monitor_button.pack(side="left")
-        self._signal_button = tk.Button(
-            trading_navigation,
-            text="SIGNALS / NOTIFICATIONS",
-            command=self._show_signal_view,
-            fg=self._theme("text"),
-            bg=self._theme("button_bg"),
-            activebackground=self._theme("button_active"),
-            activeforeground=self._theme("accent"),
-            bd=0,
-            padx=14,
-            pady=9,
-            font=("Consolas", 10, "bold"),
-        )
-        self._signal_button.pack(side="left", padx=(10, 0))
-
-        dashboard_container = tk.Frame(self.trading_view_frame, bg=self._theme("panel"))
-        # Expand the main dashboard into the available vertical space instead of
-        # leaving the unused lower portion of the Trading Hub empty.
-        dashboard_container.pack(fill="both", expand=True, padx=20, pady=(0, 10))
-
-        account_frame = tk.Frame(dashboard_container, bg=self._theme("panel"), bd=1, relief="solid", width=420)
-        account_frame.pack(side="left", fill="y", padx=(0, 15), pady=0)
+        # Account rail
+        account_frame = tk.Frame(workspace, bg=self._theme("panel"), bd=1, relief="solid", width=270)
+        account_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
         account_frame.pack_propagate(False)
-        tk.Label(
-            account_frame,
-            text="ACCOUNT SUMMARY",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 13, "bold"),
-        ).pack(anchor="nw", padx=18, pady=(18, 10))
-
-        # Keep every original account field, but use three compact columns so the
-        # complete risk/health block remains visible at normal 1080p heights.
-        account_grid = tk.Frame(account_frame, bg=self._theme("panel"))
-        account_grid.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        account_frame.grid_propagate(False)
+        tk.Label(account_frame, text="ACCOUNT\nSUMMARY", fg=self._theme("accent"), bg=self._theme("panel"),
+                 font=("Consolas", 9, "bold"), justify="left", anchor="w").pack(anchor="w", padx=8, pady=(7, 4))
+        self._account_labels = {}
+        account_summary_body = tk.Frame(account_frame, bg=self._theme("panel"))
+        account_summary_body.pack(fill="both", expand=True, padx=5, pady=(0, 5), anchor="n")
+        account_grid = tk.Frame(account_summary_body, bg=self._theme("panel"))
+        account_grid.pack(fill="x", anchor="n")
+        account_grid.grid_columnconfigure(0, weight=1)
         account_fields = [
-            "Balance", "Equity", "Used Margin", "Free Margin", "Margin Level",
-            "Leverage", "Currency", "Risk %", "Risk Amount", "Daily Loss",
-            "Weekly Loss", "Drawdown", "Consecutive Losses", "Max Risk", "Current Open Risk",
+            "Balance", "Equity", "Used Margin", "Free Margin", "Margin Level", "Leverage",
+            "Currency", "Risk %", "Risk Amount", "Daily Loss", "Weekly Loss", "Drawdown",
+            "Consecutive Losses", "Max Risk", "Current Open Risk",
         ]
-        for index, label in enumerate(account_fields):
-            row, col = divmod(index, 3)
-            container = tk.Frame(account_grid, bg=self._theme("panel_alt"), bd=0)
-            container.grid(row=row, column=col, sticky="ew", padx=5, pady=4)
-            tk.Label(
-                container, text=label, fg=self._theme("text"), bg=self._theme("panel_alt"),
-                font=("Consolas", 9), justify="center", anchor="center", wraplength=120
-            ).pack(fill="x", padx=5, pady=(5, 2))
-            value_label = tk.Label(
-                container, text="—", fg=self._theme("accent"), bg=self._theme("panel_alt"),
-                font=("Consolas", 11, "bold"), justify="center", anchor="center"
-            )
-            value_label.pack(fill="x", padx=5, pady=(0, 5))
-            # Normalize display labels into stable backend keys. In particular,
-            # "Risk %" must map to risk_percent rather than the literal key
-            # "risk_%", otherwise a valid 1% risk value renders as "—".
-            field_key = label.lower().replace(" ", "_").replace("%", "percent")
-            self._account_labels[field_key] = value_label
-        for column in range(3):
-            account_grid.grid_columnconfigure(column, weight=1, uniform="account")
+        for index, field_name in enumerate(account_fields):
+            cell = tk.Frame(account_grid, bg=self._theme("panel_alt"), bd=0)
+            cell.grid(row=index, column=0, sticky="ew", padx=2, pady=2)
+            cell.grid_columnconfigure(0, weight=1)
+            cell.grid_columnconfigure(1, weight=1)
+            tk.Label(cell, text=field_name, fg=self._theme("text"), bg=self._theme("panel_alt"),
+                     font=("Consolas", 6, "bold"), anchor="w", justify="left").grid(row=0, column=0, sticky="w", padx=6, pady=3)
+            value_label = tk.Label(cell, text="—", fg=self._theme("accent"), bg=self._theme("panel_alt"),
+                                   font=("Consolas", 8, "bold"), anchor="e")
+            value_label.grid(row=0, column=1, sticky="e", padx=6, pady=3)
+            key = field_name.lower().replace(" ", "_").replace("%", "percent")
+            self._account_labels[key] = value_label
 
-        chart_frame = tk.Frame(dashboard_container, bg=self._theme("panel"), bd=1, relief="solid")
-        chart_frame.pack(side="left", fill="both", expand=True, pady=0)
-        tk.Label(
-            chart_frame,
-            text="MARKET CHART",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 13, "bold"),
-        ).pack(anchor="nw", padx=18, pady=(18, 10))
-
-        self.trading_chart_canvas = tk.Canvas(
-            chart_frame,
-            bg=self._theme("panel_alt"),
-            height=340,
-            highlightthickness=0,
-        )
-        self.trading_chart_canvas.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        # Chart rail
+        chart_frame = tk.Frame(workspace, bg=self._theme("panel"), bd=1, relief="solid")
+        chart_frame.grid(row=0, column=1, sticky="nsew")
+        chart_frame.grid_rowconfigure(2, weight=1)
+        chart_frame.grid_columnconfigure(0, weight=1)
+        chart_head = tk.Frame(chart_frame, bg=self._theme("panel"))
+        chart_head.grid(row=0, column=0, sticky="ew", padx=10, pady=(6, 4))
+        chart_head.grid_columnconfigure(0, weight=1)
+        tk.Label(chart_head, text="MARKET CHART", fg=self._theme("accent"), bg=self._theme("panel"),
+                 font=("Consolas", 11, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Button(chart_head, text="−", command=self._zoom_out_chart, fg=self._theme("text"), bg=self._theme("button_bg"),
+                  activebackground=self._theme("button_active"), bd=0, padx=8, pady=1, font=("Consolas", 10, "bold")).grid(row=0, column=1, padx=2)
+        tk.Button(chart_head, text="+", command=self._zoom_in_chart, fg=self._theme("text"), bg=self._theme("button_bg"),
+                  activebackground=self._theme("button_active"), bd=0, padx=8, pady=1, font=("Consolas", 10, "bold")).grid(row=0, column=2, padx=2)
+        tools = tk.Frame(chart_frame, bg=self._theme("panel"))
+        tools.grid(row=1, column=0, sticky="ew", padx=9, pady=(0, 3))
+        tk.Label(tools, text="TOOLS", fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 7, "bold")).pack(side="left", padx=(0, 4))
+        self._chart_tool_var = tk.StringVar(value="CROSSHAIR")
+        for tool in ("CROSSHAIR", "VLINE", "HLINE"):
+            tk.Radiobutton(tools, text=tool, variable=self._chart_tool_var, value=tool,
+                           indicatoron=False, fg=self._theme("text"), bg=self._theme("button_bg"),
+                           selectcolor=self._theme("button_active"), activebackground=self._theme("button_active"),
+                           activeforeground=self._theme("accent"), bd=0, padx=5, pady=2,
+                           font=("Consolas", 7, "bold")).pack(side="left", padx=1)
+        self._volume_profile_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(tools, text="VOL PROFILE", variable=self._volume_profile_var,
+                       command=lambda: self._redraw_chart_view(), indicatoron=False,
+                       fg=self._theme("text"), bg=self._theme("button_bg"), selectcolor=self._theme("button_active"),
+                       activebackground=self._theme("button_active"), activeforeground=self._theme("accent"),
+                       bd=0, padx=5, pady=2, font=("Consolas", 7, "bold")).pack(side="left", padx=2)
+        self.trading_chart_canvas = tk.Canvas(chart_frame, bg=self._theme("panel_alt"), highlightthickness=0)
+        self.trading_chart_canvas.grid(row=2, column=0, sticky="nsew", padx=9, pady=(0, 9))
         self.trading_chart_canvas.bind("<Configure>", self._on_trading_chart_resize)
         self._draw_trading_placeholder_chart()
 
-        positions_frame = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), bd=1, relief="solid", height=240)
-        tk.Label(
-            positions_frame,
-            text="POSITION MONITORING",
-            fg=self._theme("accent"),
-            bg=self._theme("panel"),
-            font=("Consolas", 13, "bold"),
-        ).pack(anchor="nw", padx=18, pady=(14, 4))
-        tk.Label(
-            positions_frame,
-            text="Green/positive P&L means profit. Automatic position management may adjust stops or close a trade when a configured invalidation/time-stop is triggered.",
-            fg=self._theme("text"),
-            bg=self._theme("panel"),
-            font=("Consolas", 9),
-            justify="left", anchor="w", wraplength=1400,
-        ).pack(anchor="nw", padx=18, pady=(0, 6))
+        # Right rail: MT5 Data Window ABOVE Market Context.
+        right_rail = tk.Frame(workspace, bg=self._theme("panel"), width=270)
+        right_rail.grid(row=0, column=2, sticky="nsew", padx=(7, 0))
+        right_rail.pack_propagate(False)
+        right_rail.grid_propagate(False)
+        right_rail.grid_rowconfigure(0, weight=0, minsize=132)
+        right_rail.grid_rowconfigure(1, weight=1)
+        right_rail.grid_columnconfigure(0, weight=1)
+
+        data_window = tk.Frame(right_rail, bg=self._theme("panel"), bd=1, relief="solid")
+        data_window.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+        tk.Label(data_window, text="DATA WINDOW", fg=self._theme("accent"), bg=self._theme("panel"),
+                 font=("Consolas", 9, "bold")).pack(anchor="w", padx=8, pady=(6, 3))
+        self._data_window_text = tk.Text(data_window, bg="#07131f", fg=self._theme("text"),
+                                         insertbackground=self._theme("text"), bd=0, relief="flat",
+                                         font=("Consolas", 8), padx=6, pady=5, wrap="none")
+        self._data_window_text.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self._data_window_text.insert("1.0", "Move the cursor over a candle to inspect it.\n\nLive quote: --\nSpread: --")
+        self._data_window_text.configure(state="disabled")
+
+        context_frame = tk.Frame(right_rail, bg=self._theme("panel"), bd=1, relief="solid")
+        context_frame.grid(row=1, column=0, sticky="nsew")
+        tk.Label(context_frame, text="MARKET\nCONTEXT", fg=self._theme("accent"), bg=self._theme("panel"),
+                 font=("Consolas", 9, "bold"), justify="left", anchor="w").pack(anchor="w", padx=9, pady=(7, 4))
+        tk.Label(context_frame, text="STRATEGY PROFILE", fg=self._theme("text"), bg=self._theme("panel"),
+                 font=("Consolas", 7, "bold")).pack(anchor="w", padx=9)
+        tk.Label(context_frame, textvariable=self._strategy_profile_var, fg=self._theme("text"), bg=self._theme("panel"),
+                 font=("Consolas", 7), justify="left", anchor="w", wraplength=255).pack(fill="x", padx=9, pady=(1, 5))
+        tk.Label(context_frame, text="RISK POLICY", fg=self._theme("text"), bg=self._theme("panel"),
+                 font=("Consolas", 7, "bold")).pack(anchor="w", padx=9)
+        tk.Label(context_frame, textvariable=self._risk_policy_var, fg=self._theme("accent"), bg=self._theme("panel"),
+                 font=("Consolas", 7, "bold"), justify="left", anchor="w", wraplength=255).pack(fill="x", padx=9, pady=(1, 5))
+        tk.Label(context_frame, text="CURRENT PLAN STATUS", fg=self._theme("text"), bg=self._theme("panel"),
+                 font=("Consolas", 7, "bold")).pack(anchor="w", padx=9)
+        tk.Label(context_frame, textvariable=self._trading_mode_banner_var, fg=self._theme("accent"), bg=self._theme("panel"),
+                 font=("Consolas", 7, "bold"), justify="left", anchor="w", wraplength=255).pack(fill="x", padx=9, pady=(1, 5))
+        tk.Label(context_frame, text="BRIDGE", fg=self._theme("text"), bg=self._theme("panel"),
+                 font=("Consolas", 7, "bold")).pack(anchor="w", padx=9)
+        tk.Label(context_frame, textvariable=self._trading_bridge_error_var, fg=self._theme("text"), bg=self._theme("panel"),
+                 font=("Consolas", 7), justify="left", anchor="w", wraplength=255).pack(fill="x", padx=9, pady=(1, 4))
+        nav = tk.Frame(context_frame, bg=self._theme("panel"))
+        nav.pack(fill="x", side="bottom", padx=7, pady=7)
+        self._signal_button = tk.Button(nav, text="SIGNALS", command=self._show_signal_view,
+            fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"),
+            activeforeground=self._theme("accent"), bd=0, padx=8, pady=6, font=("Consolas", 8, "bold"))
+        self._signal_button.pack(fill="x")
+
+        self._update_strategy_profile_display()
+
+        # Chart bindings. VLINE/HLINE are one-click tools; clicking an
+        # existing VLINE/HLINE removes it so drawings remain directly editable.
+        self._chart_tooltip = tk.Label(self.trading_chart_canvas, bg=self._theme("panel"), fg=self._theme("text"),
+                                       bd=1, relief="solid", font=("Consolas", 8), padx=5, pady=3)
+        self.trading_chart_canvas.bind("<Motion>", self._on_chart_motion, add="+")
+        self.trading_chart_canvas.bind("<Leave>", lambda e: self._hide_chart_tooltip(), add="+")
+        self.trading_chart_canvas.bind("<ButtonPress-1>", self._on_chart_button_press, add="+")
+        self.trading_chart_canvas.bind("<B1-Motion>", self._on_chart_button_motion, add="+")
+        self.trading_chart_canvas.bind("<ButtonRelease-1>", self._on_chart_button_release, add="+")
+        self.trading_chart_canvas.bind("<Escape>", lambda e: self._reset_chart_tool_state(), add="+")
+        self.trading_chart_canvas.focus_set()
+        # ---------- Position monitor ----------
+        positions_frame = tk.Frame(frame, bg=self._theme("panel"), bd=1, relief="solid")
+        positions_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 5))
+        positions_frame.grid_columnconfigure(0, weight=1)
+        head = tk.Frame(positions_frame, bg=self._theme("panel"))
+        head.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 3))
+        head.grid_columnconfigure(1, weight=1)
+        tk.Label(head, text="POSITION MONITORING", fg=self._theme("accent"), bg=self._theme("panel"),
+                 font=("Consolas", 10, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(head, text="P&L | SL/TP | R | STATUS", fg=self._theme("text"), bg=self._theme("panel"),
+                 font=("Consolas", 7), anchor="e").grid(row=0, column=1, sticky="e")
         position_columns = ("position", "prices", "stop", "target", "profit", "expected_profit", "r", "status")
-        self._positions_tree = ttk.Treeview(
-            positions_frame,
-            columns=position_columns,
-            show="headings",
-            height=4,
-            style="Hotspot.Treeview",
-        )
+        self._positions_tree = ttk.Treeview(positions_frame, columns=position_columns, show="headings", height=2, style="Hotspot.Treeview")
         headings = (
-            ("position", "POSITION", 185), ("prices", "CURRENT | ENTRY", 185),
-            ("stop", "SL REMAIN | TOTAL", 185), ("target", "TP REMAIN | TOTAL", 185),
-            ("profit", "P/L", 100), ("expected_profit", "TP PROFIT", 115),
-            ("r", "R", 75), ("status", "STATUS", 125),
+            ("position", "POSITION", 150), ("prices", "CURRENT | ENTRY", 150),
+            ("stop", "SL REMAIN | TOTAL", 155), ("target", "TP REMAIN | TOTAL", 155),
+            ("profit", "P/L", 85), ("expected_profit", "TP PROFIT", 100),
+            ("r", "R", 55), ("status", "STATUS", 100),
         )
         for column, heading, width in headings:
             self._positions_tree.heading(column, text=heading)
-            self._positions_tree.column(column, width=width, minwidth=width, anchor="center", stretch=True)
+            self._positions_tree.column(column, width=width, minwidth=55, anchor="center", stretch=True)
         self._positions_tree.tag_configure("profit", foreground="#22c55e")
         self._positions_tree.tag_configure("loss", foreground="#ef4444")
         self._positions_tree.tag_configure("neutral", foreground=self._theme("text"))
         self._positions_tree.bind("<<TreeviewSelect>>", self._on_position_selected)
-        self._positions_tree.pack(fill="both", expand=True, padx=18, pady=(0, 14))
-        # This frame was previously constructed but never packed, which made the
-        # entire position-monitor section invisible in the main Trading Hub.
-        positions_frame.configure(height=240)
-        positions_frame.pack_propagate(False)
-        positions_frame.pack(fill="both", expand=False, padx=20, pady=(0, 12))
+        self._positions_tree.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 7))
 
-        # Tooltip widget for OHLC on hover (created as child of canvas so we can use create_window)
-        try:
-            self._chart_tooltip = tk.Label(self.trading_chart_canvas, bg=self._theme("panel"), fg=self._theme("text"), bd=1, relief="solid", font=("Consolas", 9), padx=6, pady=4)
-        except Exception:
-            self._chart_tooltip = None
-
-        # Bind mouse events for tooltip and interactions
-        try:
-            self.trading_chart_canvas.bind("<Motion>", lambda e: self._on_chart_motion(e))
-            self.trading_chart_canvas.bind("<Leave>", lambda e: self._hide_chart_tooltip())
-            # mouse selection for drag-to-zoom
-            self.trading_chart_canvas.bind("<ButtonPress-1>", lambda e: self._on_chart_button_press(e))
-            self.trading_chart_canvas.bind("<B1-Motion>", lambda e: self._on_chart_button_motion(e))
-            self.trading_chart_canvas.bind("<ButtonRelease-1>", lambda e: self._on_chart_button_release(e))
-        except Exception:
-            pass
-
-        button_row = tk.Frame(self.trading_view_frame, bg=self._theme("panel"), height=48)
-        button_row.pack(fill="x", expand=False, padx=20, pady=(0, 4))
-        button_row.pack_propagate(False)
-
+        # ---------- Action bar ----------
+        button_row = tk.Frame(frame, bg=self._theme("panel"))
+        button_row.grid(row=5, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 5))
         self._trade_action_button = None
-
-        self._manual_exit_trade_button = tk.Button(
-            button_row,
-            text="EXIT ACTIVE TRADE",
-            command=self._manual_exit_trade,
-            fg=self._theme("text"),
-            bg="#7f1d1d",
-            activebackground="#991b1b",
-            activeforeground="#ffffff",
-            bd=0,
-            padx=16,
-            pady=10,
-            font=("Consolas", 10, "bold"),
-        )
-        self._manual_exit_trade_button.pack(side="left", padx=(0, 12))
-
-        self._close_all_positions_button = tk.Button(
-            button_row,
-            text="CLOSE ALL POSITIONS",
-            command=self._close_all_positions,
-            fg=self._theme("text"),
-            bg="#7f1d1d",
-            activebackground="#991b1b",
-            activeforeground="#ffffff",
-            bd=0,
-            padx=16,
-            pady=10,
-            font=("Consolas", 10, "bold"),
-        )
-        self._close_all_positions_button.pack(side="left", padx=(0, 12))
-
-        self._back_to_home_button = tk.Button(
-            button_row,
-            text="BACK TO HOME",
-            command=self._show_home_view,
-            fg=self._theme("text"),
-            bg=self._theme("button_bg"),
-            activebackground=self._theme("button_active"),
-            activeforeground=self._theme("accent"),
-            bd=0,
-            padx=16,
-            pady=10,
-            font=("Consolas", 10, "bold"),
-        )
+        self._manual_exit_trade_button = tk.Button(button_row, text="EXIT ACTIVE TRADE", command=self._manual_exit_trade,
+            fg=self._theme("text"), bg="#7f1d1d", activebackground="#991b1b", activeforeground="#ffffff",
+            bd=0, padx=13, pady=6, font=("Consolas", 8, "bold"))
+        self._manual_exit_trade_button.pack(side="left", padx=(0, 6))
+        self._close_all_positions_button = tk.Button(button_row, text="CLOSE ALL POSITIONS", command=self._close_all_positions,
+            fg=self._theme("text"), bg="#7f1d1d", activebackground="#991b1b", activeforeground="#ffffff",
+            bd=0, padx=13, pady=6, font=("Consolas", 8, "bold"))
+        self._close_all_positions_button.pack(side="left", padx=(0, 6))
+        self._back_to_home_button = tk.Button(button_row, text="BACK TO HOME", command=self._show_home_view,
+            fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"),
+            activeforeground=self._theme("accent"), bd=0, padx=13, pady=6, font=("Consolas", 8, "bold"))
         self._back_to_home_button.pack(side="left")
 
-        self.position_monitor_view_frame = tk.Frame(self, bg=self._theme("panel"))
-        self.position_monitor_view_frame.place_forget()
-        tk.Label(self.position_monitor_view_frame, text="POSITION MONITOR", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 16, "bold")).pack(anchor="nw", padx=20, pady=(16, 8))
-        self._position_monitor_status_var = tk.StringVar(value="Waiting for live position data...")
-        tk.Label(self.position_monitor_view_frame, textvariable=self._position_monitor_status_var, fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 10)).pack(anchor="nw", padx=20, pady=(0, 16))
-        monitor_frame = tk.Frame(self.position_monitor_view_frame, bg=self._theme("panel"), bd=1, relief="solid")
-        monitor_frame.pack(fill="both", expand=True, padx=20, pady=(0, 14))
-        tk.Label(monitor_frame, text="LIVE POSITIONS AND MANAGEMENT STATE", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 12, "bold")).pack(anchor="nw", padx=14, pady=(14, 6))
-        self._monitor_positions_tree = ttk.Treeview(monitor_frame, columns=position_columns, show="headings", height=12, style="Hotspot.Treeview")
-        for column, heading, width in headings:
-            self._monitor_positions_tree.heading(column, text=heading)
-            self._monitor_positions_tree.column(column, width=width, minwidth=width, anchor="center", stretch=True)
-        self._monitor_positions_tree.tag_configure("profit", foreground="#22c55e")
-        self._monitor_positions_tree.tag_configure("loss", foreground="#ef4444")
-        self._monitor_positions_tree.tag_configure("neutral", foreground=self._theme("text"))
-        self._monitor_positions_tree.bind("<<TreeviewSelect>>", self._on_position_selected)
-        self._monitor_positions_tree.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-        monitor_buttons = tk.Frame(self.position_monitor_view_frame, bg=self._theme("panel"))
-        monitor_buttons.pack(anchor="nw", padx=20, pady=(0, 8))
-        tk.Button(monitor_buttons, text="REFRESH POSITIONS", command=self._refresh_trading_view, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=14, pady=9, font=("Consolas", 10, "bold")).pack(side="left", padx=(0, 10))
-        tk.Button(monitor_buttons, text="EXIT ACTIVE TRADE", command=self._manual_exit_trade, fg=self._theme("text"), bg="#7f1d1d", activebackground="#991b1b", bd=0, padx=14, pady=9, font=("Consolas", 10, "bold")).pack(side="left", padx=(0, 10))
-        tk.Button(monitor_buttons, text="CLOSE ALL POSITIONS", command=self._close_all_positions, fg=self._theme("text"), bg="#7f1d1d", activebackground="#991b1b", bd=0, padx=14, pady=9, font=("Consolas", 10, "bold")).pack(side="left", padx=(0, 10))
-        tk.Button(monitor_buttons, text="BACK TO TRADING HUB", command=self._show_trading_view, fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=14, pady=9, font=("Consolas", 10, "bold")).pack(side="left")
-
-        # Compact signal / notification workspace.  The previous version
-        # rendered a long diagnostic transcript as the primary view, which
-        # made the actionable information difficult to read.  Keep the full
-        # diagnostics in the console/logs, but make this page a trading
-        # control room: state, score, plan, evidence and concise notices.
-        self.signal_view_frame = tk.Frame(self, bg=self._theme("panel"))
-        self.signal_view_frame.place_forget()
-
-        header = tk.Frame(self.signal_view_frame, bg=self._theme("panel"))
-        header.pack(fill="x", padx=20, pady=(14, 10))
-        tk.Label(header, text="SIGNALS", fg=self._theme("accent"), bg=self._theme("panel"),
-                 font=("Consolas", 16, "bold")).pack(side="left")
-        self._signal_status_var = tk.StringVar(value="Waiting for live analysis…")
-        tk.Label(header, textvariable=self._signal_status_var, fg=self._theme("text"), bg=self._theme("panel"),
-                 font=("Consolas", 10), anchor="e").pack(side="right", fill="x", expand=True, padx=(20, 0))
-
-        controls = tk.Frame(self.signal_view_frame, bg=self._theme("panel"))
-        controls.pack(fill="x", padx=20, pady=(0, 10))
-        tk.Label(controls, text="PAIR", fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas", 9, "bold")).pack(side="left")
-        signal_symbols = self._get_trading_dropdown_symbols() or [config.DEFAULT_TRADING_SYMBOL]
-        self._signal_symbol_var = tk.StringVar(value=signal_symbols[0])
-        self._signal_symbol_var.trace_add("write", lambda *args: self._on_signal_symbol_changed())
-        self._signal_symbol_menu = tk.OptionMenu(controls, self._signal_symbol_var, *signal_symbols)
-        self._signal_symbol_menu.configure(bg=self._theme("button_bg"), fg=self._theme("text"),
-                                            activebackground=self._theme("button_active"), activeforeground=self._theme("accent"),
-                                            bd=0, highlightthickness=0, font=("Consolas", 10))
-        self._signal_symbol_menu.pack(side="left", padx=(8, 10))
-        tk.Button(controls, text="REFRESH", command=self._refresh_signal_view, fg=self._theme("text"),
-                  bg=self._theme("button_bg"), activebackground=self._theme("button_active"), activeforeground=self._theme("accent"),
-                  bd=0, padx=12, pady=7, font=("Consolas", 9, "bold")).pack(side="left")
-        self._signal_route_var = tk.StringVar(value="ROUTE: --")
-        tk.Label(controls, textvariable=self._signal_route_var, fg=self._theme("accent"), bg=self._theme("panel"),
-                 font=("Consolas", 9, "bold")).pack(side="left", padx=(18, 0))
-
-        # At-a-glance cards
-        cards = tk.Frame(self.signal_view_frame, bg=self._theme("panel"))
-        cards.pack(fill="x", padx=20, pady=(0, 10))
-        self._signal_card_vars = {}
-        for key, title in (("state", "STATE"), ("score", "SCORE"), ("risk", "RISK"), ("rr", "R:R"), ("news", "NEWS"), ("broker", "BROKER")):
-            frame = tk.Frame(cards, bg=self._theme("panel_alt"), bd=1, relief="solid")
-            frame.pack(side="left", fill="x", expand=True, padx=(0, 7 if key != "broker" else 0))
-            tk.Label(frame, text=title, fg=self._theme("text"), bg=self._theme("panel_alt"), font=("Consolas", 8, "bold")).pack(anchor="w", padx=9, pady=(7, 1))
-            var = tk.StringVar(value="--")
-            self._signal_card_vars[key] = var
-            tk.Label(frame, textvariable=var, fg=self._theme("accent"), bg=self._theme("panel_alt"), font=("Consolas", 10, "bold")).pack(anchor="w", padx=9, pady=(0, 7))
-
-        body = tk.Frame(self.signal_view_frame, bg=self._theme("panel"))
-        body.pack(fill="both", expand=True, padx=20, pady=(0, 12))
-
-        left = tk.Frame(body, bg=self._theme("panel"), bd=1, relief="solid")
-        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
-        tk.Label(left, text="SETUP EVIDENCE", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 11, "bold")).pack(anchor="w", padx=15, pady=(14, 8))
-        self._signal_evidence_tree = ttk.Treeview(left, columns=("stage", "status", "detail"), show="headings", height=12, style="Hotspot.Treeview")
-        for col, heading, width in (("stage", "STAGE", 160), ("status", "STATUS", 95), ("detail", "DETAIL", 400)):
-            self._signal_evidence_tree.heading(col, text=heading)
-            self._signal_evidence_tree.column(col, width=width, minwidth=80, anchor="center" if col != "detail" else "w", stretch=True)
-        self._signal_evidence_tree.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        self._signal_evidence_tree.tag_configure("ok", foreground="#22c55e")
-        self._signal_evidence_tree.tag_configure("wait", foreground="#f59e0b")
-        self._signal_evidence_tree.tag_configure("bad", foreground="#ef4444")
-
-        right = tk.Frame(body, bg=self._theme("panel"), bd=1, relief="solid")
-        right.pack(side="left", fill="both", expand=True)
-        tk.Label(right, text="TRADE PLAN", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 11, "bold")).pack(anchor="w", padx=15, pady=(14, 8))
-        self._signal_plan_text = tk.Text(right, height=12, bg=self._theme("panel_alt"), fg=self._theme("text"),
-                                         insertbackground=self._theme("accent"), font=("Consolas", 10), wrap="word",
-                                         relief="flat", bd=0, padx=15, pady=15, state="disabled")
-        self._signal_plan_text.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-
-        bottom = tk.Frame(self.signal_view_frame, bg=self._theme("panel"))
-        bottom.pack(fill="x", padx=20, pady=(0, 8))
-        notice_frame = tk.Frame(bottom, bg=self._theme("panel"), bd=1, relief="solid")
-        notice_frame.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        tk.Label(notice_frame, text="RECENT NOTIFICATIONS", fg=self._theme("accent"), bg=self._theme("panel"), font=("Consolas", 9, "bold")).pack(anchor="w", padx=10, pady=(7, 4))
-        self._signal_notification_var = tk.StringVar(value="No notifications yet.")
-        tk.Label(notice_frame, textvariable=self._signal_notification_var, fg=self._theme("text"), bg=self._theme("panel"),
-                 font=("Consolas", 9), justify="left", anchor="w").pack(fill="x", padx=10, pady=(0, 7))
-
-        action_frame = tk.Frame(bottom, bg=self._theme("panel"))
-        action_frame.pack(side="right")
-        tk.Button(action_frame, text="POSITION MONITOR", command=self._show_position_monitor_view, fg=self._theme("text"),
-                  bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=12, pady=8,
-                  font=("Consolas", 9, "bold")).pack(side="left", padx=(0, 8))
-        tk.Button(action_frame, text="BACK TO TRADING HUB", command=self._show_trading_view, fg=self._theme("text"),
-                  bg=self._theme("button_bg"), activebackground=self._theme("button_active"), bd=0, padx=12, pady=8,
-                  font=("Consolas", 9, "bold")).pack(side="left")
-
-        # Compatibility target retained for older callers; detailed diagnostics
-        # are no longer the primary visual on this page.
-        self._signal_report = tk.Text(self.signal_view_frame, height=1, width=1, state="disabled")
-        self._signal_report.place_forget()
-
     def _update_strategy_profile_display(self):
-        from skills.trading_skill.profiles import max_spread_for_symbol
+        from core.price_units import spread_policy
 
         profile = self._trading_hub_controller.get_trading_profile()
         symbol = self._symbol_var.get() if hasattr(self, "_symbol_var") else config.DEFAULT_TRADING_SYMBOL
-        max_spread = max_spread_for_symbol(symbol, self._trading_hub_controller.trading_mode)
+        policy = spread_policy(symbol, {}, self._trading_hub_controller.trading_mode)
+        max_value = float(policy.get("max_value", 0.0) or 0.0)
+        max_unit = str(policy.get("max_unit", "ticks"))
         self._strategy_mode_var.set(f"ACTIVE MODE: {profile['mode']}")
         self._strategy_profile_var.set(
-            f"MAX SPREAD {max_spread:.1f} PIPS | "
+            f"MAX SPREAD {max_value:.2f} {max_unit.upper()} | "
             f"{profile['trend_timeframe']} > {profile['setup_timeframe']} > {profile['entry_timeframe']} | "
             "PLAN GENERATION AUTO | NEWS-CONFLICT PLANS REQUIRE APPROVAL"
         )
@@ -1308,11 +1104,10 @@ class AngeliqueDesktopApp(tk.Tk):
                     pass
 
     def _show_main_panels(self):
-        self.left_panel.place(relx=0.02, rely=0.055, relwidth=0.235, relheight=0.62)
-        self.center_panel.place(relx=0.265, rely=0.055, relwidth=0.47, relheight=0.62)
-        self.right_panel.place(relx=0.76, rely=0.055, relwidth=0.225, relheight=0.62)
-        self.bottom_panel.place(relx=0.02, rely=0.69, relwidth=0.96, relheight=0.25)
-
+        self.left_panel.place(relx=0.018, rely=0.055, relwidth=0.205, relheight=0.68)
+        self.center_panel.place(relx=0.235, rely=0.055, relwidth=0.53, relheight=0.68)
+        self.right_panel.place(relx=0.782, rely=0.055, relwidth=0.20, relheight=0.68)
+        self.bottom_panel.place(relx=0.018, rely=0.755, relwidth=0.964, relheight=0.19)
     def _show_home_view(self):
         self._active_center_view = "home"
         position_job = getattr(self, "_position_refresh_job", None)
@@ -1329,12 +1124,10 @@ class AngeliqueDesktopApp(tk.Tk):
             except Exception:
                 pass
             self._signal_refresh_job = None
-        self.center_title_label.configure(text="CORE MATRIX")
-        self.center_status_label.configure(text="PRIORITY: HARMONIC SYNTHESIS")
+        self.center_title_label.configure(text="ANGELIQUE CORE")
+        self.center_status_label.configure(text="SYSTEM-WIDE SYNTHESIS CONTROL")
         if self.trading_view_frame is not None:
             self.trading_view_frame.place_forget()
-        if getattr(self, "position_monitor_view_frame", None) is not None:
-            self.position_monitor_view_frame.place_forget()
         if self.signal_view_frame is not None:
             self.signal_view_frame.place_forget()
         if self.wifi_view_frame is not None:
@@ -1357,27 +1150,177 @@ class AngeliqueDesktopApp(tk.Tk):
         self._hide_main_panels()
         if self.trading_view_frame is not None:
             self.trading_view_frame.place(relx=0.01, rely=0.035, relwidth=0.98, relheight=0.94)
-        if getattr(self, "position_monitor_view_frame", None) is not None:
-            self.position_monitor_view_frame.place_forget()
         if self.signal_view_frame is not None:
             self.signal_view_frame.place_forget()
         self._refresh_trading_view()
 
-    def _show_position_monitor_view(self):
-        self._active_center_view = "position_monitor"
-        self.center_title_label.configure(text="POSITION MONITOR")
-        self.center_status_label.configure(text="LIVE POSITION MANAGEMENT")
-        if self.ring_canvas is not None:
-            self.ring_canvas.pack_forget()
-        if self.center_status_label is not None:
-            self.center_status_label.pack_forget()
-        self._hide_main_panels()
-        if self.trading_view_frame is not None:
-            self.trading_view_frame.place_forget()
-        if self.signal_view_frame is not None:
-            self.signal_view_frame.place_forget()
-        self.position_monitor_view_frame.place(relx=0.02, rely=0.055, relwidth=0.96, relheight=0.88)
-        self._refresh_trading_view()
+    def _build_signal_view(self):
+        """Build the populated Signals / Notifications workspace.
+
+        The page is presentation-only: every value is derived from the same
+        canonical workflow report used by execution. It separates technical
+        signal evidence (SMC / ICT / structure) from notices and the economic
+        calendar so the operator can read the complete decision chain without
+        hunting through the main dashboard.
+        """
+        frame = tk.Frame(self, bg=self._theme("panel"), bd=1, relief="solid")
+        frame.place_forget()
+        self.signal_view_frame = frame
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(1, weight=5)
+        frame.grid_rowconfigure(2, weight=4)
+        frame.grid_rowconfigure(3, weight=0)
+
+        header = tk.Frame(frame, bg=self._theme("title_bg"))
+        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 6))
+        header.grid_columnconfigure(2, weight=1)
+        tk.Label(header, text="SIGNALS / NOTIFICATIONS", fg=self._theme("accent"), bg=self._theme("title_bg"),
+                 font=("Consolas", 12, "bold")).grid(row=0, column=0, padx=(8, 12), pady=6, sticky="w")
+        self._signal_symbol_var = self._symbol_var if hasattr(self, "_symbol_var") else tk.StringVar(value=config.DEFAULT_TRADING_SYMBOL)
+        signal_symbols = self._get_market_symbols()
+        self._signal_symbol_var.set(self._signal_symbol_var.get() or (signal_symbols[0] if signal_symbols else config.DEFAULT_TRADING_SYMBOL))
+        menu = tk.OptionMenu(header, self._signal_symbol_var, *(signal_symbols or [config.DEFAULT_TRADING_SYMBOL]), command=lambda _=None: self._on_signal_symbol_changed())
+        menu.configure(bg=self._theme("button_bg"), fg=self._theme("text"), activebackground=self._theme("button_active"),
+                       activeforeground=self._theme("accent"), bd=0, highlightthickness=0, font=("Consolas", 8))
+        menu.grid(row=0, column=1, padx=2)
+        self._signal_symbol_menu = menu
+        self._signal_route_var = tk.StringVar(value="ROUTE: BROKER PENDING")
+        tk.Label(header, textvariable=self._signal_route_var, fg=self._theme("text"), bg=self._theme("title_bg"),
+                 font=("Consolas", 8, "bold"), anchor="e").grid(row=0, column=2, sticky="e", padx=8)
+        self._signal_status_var = tk.StringVar(value="Waiting for signal analysis...")
+        tk.Label(header, textvariable=self._signal_status_var, fg=self._theme("accent"), bg=self._theme("title_bg"),
+                 font=("Consolas", 8), anchor="e").grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 5))
+
+        signal_section = tk.LabelFrame(frame, text="SIGNAL", fg=self._theme("accent"), bg=self._theme("panel"),
+                                       bd=1, relief="solid", font=("Consolas", 9, "bold"))
+        signal_section.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 5))
+        for c in range(3):
+            signal_section.grid_columnconfigure(c, weight=1, uniform="signal_cols")
+        signal_section.grid_rowconfigure(1, weight=1)
+
+        self._signal_card_vars = {key: tk.StringVar(value="--") for key in ("state", "score", "risk", "rr", "news", "broker")}
+        cards = tk.Frame(signal_section, bg=self._theme("panel"))
+        cards.grid(row=0, column=0, columnspan=3, sticky="ew", padx=7, pady=6)
+        for c in range(6):
+            cards.grid_columnconfigure(c, weight=1, uniform="sigcard")
+        for col, title, key in ((0,"STATE","state"),(1,"CONFLUENCE","score"),(2,"RISK","risk"),(3,"RR","rr"),(4,"NEWS","news"),(5,"ROUTE","broker")):
+            cell=tk.Frame(cards,bg=self._theme("panel_alt"),bd=1,relief="solid")
+            cell.grid(row=0,column=col,sticky="ew",padx=2)
+            tk.Label(cell,text=title,fg=self._theme("text"),bg=self._theme("panel_alt"),font=("Consolas",7,"bold")).pack(pady=(4,0))
+            tk.Label(cell,textvariable=self._signal_card_vars[key],fg=self._theme("accent"),bg=self._theme("panel_alt"),font=("Consolas",8,"bold"),wraplength=150).pack(fill="x",padx=3,pady=(1,4))
+
+        section_names = ((0, "SMC", "_signal_smc_text"), (1, "ICT", "_signal_ict_text"), (2, "MARKET STRUCTURE", "_signal_structure_text"))
+        for col, title, attr in section_names:
+            box=tk.Frame(signal_section,bg=self._theme("panel_alt"),bd=1,relief="solid")
+            box.grid(row=1,column=col,sticky="nsew",padx=3,pady=(0,7))
+            tk.Label(box,text=title,fg=self._theme("accent"),bg=self._theme("panel_alt"),font=("Consolas",8,"bold")).pack(anchor="w",padx=6,pady=(6,3))
+            widget=scrolledtext.ScrolledText(box, bg="#07131f", fg=self._theme("text"), insertbackground=self._theme("text"),
+                                                bd=0, relief="flat", font=("Consolas",8), wrap="word", height=12)
+            widget.pack(fill="both",expand=True,padx=4,pady=(0,4)); widget.configure(state="disabled")
+            setattr(self, attr, widget)
+
+        # Execution-gate detail is kept visible below the three strategy panels.
+        gate_frame = tk.Frame(signal_section, bg=self._theme("panel"))
+        gate_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=3, pady=(0, 6))
+        gate_frame.grid_columnconfigure(0, weight=48); gate_frame.grid_columnconfigure(1, weight=52); gate_frame.grid_rowconfigure(1, weight=1)
+        tk.Label(gate_frame, text="EXECUTION GATES", fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas",7,"bold")).grid(row=0,column=0,sticky="w",padx=4,pady=3)
+        tk.Label(gate_frame, text="PLAN", fg=self._theme("text"), bg=self._theme("panel"), font=("Consolas",7,"bold")).grid(row=0,column=1,sticky="w",padx=4,pady=3)
+        self._signal_evidence_tree = ttk.Treeview(gate_frame, columns=("stage","status","detail"), show="headings", height=6, style="Hotspot.Treeview")
+        self._signal_evidence_tree.heading("stage", text="STAGE"); self._signal_evidence_tree.heading("status", text="STATUS"); self._signal_evidence_tree.heading("detail", text="DETAIL")
+        self._signal_evidence_tree.column("stage", width=105); self._signal_evidence_tree.column("status", width=70); self._signal_evidence_tree.column("detail", width=400)
+        self._signal_evidence_tree.grid(row=1,column=0,sticky="nsew",padx=(4,2),pady=(0,4))
+        for tag, fg in (("ok", "#22c55e"), ("bad", "#ef4444"), ("wait", self._theme("text"))):
+            self._signal_evidence_tree.tag_configure(tag, foreground=fg)
+        self._signal_plan_text = scrolledtext.ScrolledText(gate_frame, bg="#07131f", fg=self._theme("text"), insertbackground=self._theme("text"), bd=0, font=("Consolas",8), wrap="word")
+        self._signal_plan_text.grid(row=1,column=1,sticky="nsew",padx=(8,4),pady=(0,4))
+        self._signal_plan_text.configure(state="disabled")
+        self._signal_report = self._signal_plan_text
+
+        notifications = tk.LabelFrame(frame, text="NOTIFICATIONS", fg=self._theme("accent"), bg=self._theme("panel"), bd=1, relief="solid", font=("Consolas",9,"bold"))
+        notifications.grid(row=2,column=0,sticky="nsew", padx=10,pady=(0,8))
+        notifications.grid_columnconfigure(0,weight=1); notifications.grid_columnconfigure(1,weight=1); notifications.grid_rowconfigure(1,weight=1)
+        tk.Label(notifications,text="SYSTEM / EXECUTION EVENTS",fg=self._theme("text"),bg=self._theme("panel"),font=("Consolas",8,"bold")).grid(row=0,column=0,sticky="w",padx=8,pady=6)
+        tk.Label(notifications,text="NEWS & CALENDAR",fg=self._theme("text"),bg=self._theme("panel"),font=("Consolas",8,"bold")).grid(row=0,column=1,sticky="w",padx=8,pady=6)
+        self._signal_notification_var = tk.StringVar(value="No notifications yet.")
+        notif_box = scrolledtext.ScrolledText(notifications, bg="#07131f", fg=self._theme("text"), insertbackground=self._theme("text"), bd=0, font=("Consolas",8), wrap="word")
+        notif_box.grid(row=1,column=0,sticky="nsew",padx=(5,3),pady=(0,5)); notif_box.configure(state="disabled")
+        self._signal_notification_text = notif_box
+        news_frame = tk.Frame(notifications,bg=self._theme("panel_alt"),bd=1,relief="solid")
+        news_frame.grid(row=1,column=1,sticky="nsew",padx=(3,5),pady=(0,5)); news_frame.grid_rowconfigure(1,weight=1); news_frame.grid_columnconfigure(0,weight=1)
+        self._signal_news_tree = ttk.Treeview(news_frame, columns=("time","impact","event"), show="headings", style="Hotspot.Treeview", height=6)
+        for c,h,w in (("time","TIME",110),("impact","IMPACT",70),("event","EVENT",360)):
+            self._signal_news_tree.heading(c,text=h); self._signal_news_tree.column(c,width=w,stretch=True)
+        self._signal_news_tree.tag_configure("high", foreground="#ef4444"); self._signal_news_tree.tag_configure("medium", foreground="#f59e0b"); self._signal_news_tree.tag_configure("normal", foreground=self._theme("text"))
+        self._signal_news_tree.grid(row=0,column=0,sticky="nsew",padx=3,pady=3)
+        tk.Label(news_frame,text="Calendar events are informational; a detected high-impact event switches execution to manual approval.",fg=self._theme("text"),bg=self._theme("panel_alt"),font=("Consolas",7),wraplength=500,justify="left").grid(row=1,column=0,sticky="w",padx=6,pady=4)
+
+        signal_nav = tk.Frame(frame, bg=self._theme("panel"))
+        signal_nav.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
+        tk.Button(signal_nav, text="BACK TO TRADING HUB", command=self._show_trading_view,
+                  fg=self._theme("text"), bg=self._theme("button_bg"), activebackground=self._theme("button_active"),
+                  activeforeground=self._theme("accent"), bd=0, padx=13, pady=6,
+                  font=("Consolas", 8, "bold")).pack(side="left")
+
+    def _set_readonly_text(self, widget, text):
+        if widget is None:
+            return
+        try:
+            widget.configure(state="normal"); widget.delete("1.0","end"); widget.insert("1.0", str(text)); widget.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _format_signal_panels(self, report):
+        analysis = report.get("structure", {}) or {}
+        smc = report.get("smc", {}) or {}
+        profile = self._trading_hub_controller.get_trading_profile()
+        setup_tf = profile.get("setup_timeframe", "M15")
+        entry_tf = profile.get("entry_timeframe", "M5")
+        setup = smc.get(setup_tf, {}) if isinstance(smc.get(setup_tf), dict) else {}
+        entry = smc.get(entry_tf, {}) if isinstance(smc.get(entry_tf), dict) else {}
+        assessment = analysis.get("setup_assessment", {}) or {}
+        news = analysis.get("news_context", {}) or {}
+        htf = analysis.get("htf_alignment", {}) or {}
+        session = analysis.get("session_context", {}) or {}
+        ict_setup = setup.get("ict", {}) or {}
+        ote = ict_setup.get("ote", {}) or {}
+        amd = setup.get("amd", {}) or {}
+        kz = ict_setup.get("kill_zone", {}) or {}
+
+        smc_lines = [
+            f"Direction: {report.get('direction') or 'WAIT'}",
+            f"Setup model: {assessment.get('model') or analysis.get('strategy_name') or 'NONE'}",
+            f"Setup TF: {setup_tf} | Entry TF: {entry_tf}",
+            f"Liquidity sweep: {setup.get('liquidity_sweep') or 'none'}",
+            f"Structure shift: {setup.get('structure_shift') or 'none'}",
+            f"Displacement: {'YES' if setup.get('displacement') else 'NO'}",
+            f"Tradeable FVGs: {sum(1 for x in setup.get('fair_value_gaps',[]) if isinstance(x,dict) and x.get('classification') in {'QUALIFIED_FVG','TRADEABLE_FVG'})}",
+            f"Order block: {'TRADEABLE' if isinstance(setup.get('order_block'),dict) and setup.get('order_block',{}).get('classification')=='TRADEABLE_OB' else 'none/candidate'}",
+            f"Location: {setup.get('location') or 'unknown'}",
+            f"Missing stages: {', '.join(assessment.get('missing', [])) or 'none'}",
+            f"Signal rationale: {assessment.get('reason') or report.get('reason') or 'Waiting for a complete model.'}",
+        ]
+        ict_lines = [
+            f"HTF daily bias: {str(htf.get('daily_bias') or analysis.get('trends',{}).get('D1') or 'unknown').upper()}",
+            f"HTF alignment: {'ALIGNED' if not htf.get('countertrend') else 'COUNTERTREND'}",
+            f"OTE: {'IN' if ote.get('in_bullish_ote') or ote.get('in_bearish_ote') else 'OUT'}",
+            f"OTE range: {ote.get('low','--')} → {ote.get('high','--')}",
+            f"AMD phase: {str(amd.get('phase') or amd.get('status') or '--').upper()}",
+            f"Kill zone: {str(kz.get('status') or session.get('session') or '--').upper()}",
+            f"Session: {str(session.get('session') or '--').upper()}",
+            f"Target liquidity: {(setup.get('target_liquidity') or {}).get('price','--') if isinstance(setup.get('target_liquidity'),dict) else '--'}",
+            f"News bias: {news.get('bias','neutral').upper()}",
+            f"High-impact imminent: {'YES' if news.get('high_impact_imminent') else 'NO'}",
+        ]
+        structure_lines = ["TIMEFRAME  TREND  STRUCTURE  SHIFT  LAST CLOSE"]
+        trends = report.get("trends", {}) or {}
+        for tf in profile.get("analysis_required_timeframes", []):
+            row = smc.get(tf, {}) if isinstance(smc.get(tf), dict) else {}
+            structure = row.get("structure", {}) or {}
+            candles = self._last_full_candles if tf == self._get_selected_symbol_and_timeframe()[1].upper() else []
+            last_close = "--"
+            if isinstance(row.get("last"),dict): last_close = row.get("last",{}).get("close","--")
+            structure_lines.append(f"{tf:<5}     {str(trends.get(tf,'mixed')).upper():<7} {str(structure.get('bias','unknown')).upper():<9} {str(row.get('structure_shift') or '--'):<24} {last_close}")
+        return "\n".join(smc_lines), "\n".join(ict_lines), "\n".join(structure_lines)
 
     def _show_signal_view(self):
         self._active_center_view = "signals"
@@ -1390,8 +1333,6 @@ class AngeliqueDesktopApp(tk.Tk):
         self._hide_main_panels()
         if self.trading_view_frame is not None:
             self.trading_view_frame.place_forget()
-        if self.position_monitor_view_frame is not None:
-            self.position_monitor_view_frame.place_forget()
         self.signal_view_frame.place(relx=0.02, rely=0.055, relwidth=0.96, relheight=0.88)
         self._refresh_signal_view()
 
@@ -1411,6 +1352,12 @@ class AngeliqueDesktopApp(tk.Tk):
         self._signal_generation += 1
         generation = self._signal_generation
         self._signal_request = {"symbol": symbol, "account_mode": account_mode, "generation": generation}
+        # News/calendar is an independent operator feed. Fetch it in parallel
+        # with strategy analysis so a blocked/slow trade workflow cannot leave
+        # the calendar pane blank.
+        self._signal_news_generation = generation
+        self._set_signal_news_loading()
+        threading.Thread(target=self._signal_news_calendar_worker, args=(symbol, generation), daemon=True).start()
         from skills.trading_skill.profiles import get_trading_profile
         profile = get_trading_profile(self._trading_hub_controller.trading_mode)
         self._signal_status_var.set(f"{symbol} | [{account_mode.upper()}] | fetching fresh market data... Refresh {profile.monitor_interval_seconds}s.")
@@ -1422,6 +1369,55 @@ class AngeliqueDesktopApp(tk.Tk):
         # Never leave the UI in a permanent loading state if a bridge/MT5 call hangs.
         self._signal_timeout_generation = generation
         self.after(15000, lambda g=generation: self._signal_analysis_timeout(g))
+
+    def _set_signal_news_loading(self):
+        tree = getattr(self, "_signal_news_tree", None)
+        if tree is None:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        tree.insert("", "end", values=("--", "INFO", "LOADING NEWS & CALENDAR..."), tags=("normal",))
+
+    def _signal_news_calendar_worker(self, symbol, generation):
+        try:
+            from skills.trading_skill.news import get_forex_news, get_market_calendar
+            headlines = get_forex_news(symbol) or []
+            calendar = get_market_calendar(symbol=symbol) or []
+            payload = {
+                "headlines": [x for x in headlines if x.get("freshness") != "unavailable"],
+                "calendar": [x for x in calendar if x.get("freshness") != "unavailable"],
+                "headline_feed_available": bool(headlines and not all(x.get("freshness") == "unavailable" for x in headlines)),
+                "calendar_feed_available": bool(calendar and not all(x.get("freshness") == "unavailable" for x in calendar)),
+            }
+        except Exception as exc:
+            payload = {"headlines": [], "calendar": [], "headline_feed_available": False, "calendar_feed_available": False, "error": str(exc)}
+        if not getattr(self, "_shutting_down", False):
+            self.after(0, lambda p=payload, g=generation: self._apply_signal_news_calendar(p, g))
+
+    def _apply_signal_news_calendar(self, payload, generation):
+        if generation != getattr(self, "_signal_generation", -1):
+            return
+        tree = getattr(self, "_signal_news_tree", None)
+        if tree is None:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        headlines = list(payload.get("headlines", []) or [])
+        calendar = list(payload.get("calendar", []) or [])
+        for item in headlines[:8]:
+            title = item.get("title") or item.get("event") or "News update"
+            tree.insert("", "end", values=(item.get("retrieved_at") or item.get("time") or "--", "NEWS", title), tags=("normal",))
+        for item in calendar[:12]:
+            title = item.get("event") or item.get("title") or "Calendar event"
+            impact = str(item.get("impact") or "unknown").upper()
+            tag = "high" if impact.lower() in {"high", "red", "3"} else "medium" if impact.lower() in {"medium", "yellow", "2"} else "normal"
+            tree.insert("", "end", values=(item.get("scheduled_at") or item.get("time") or "--", impact, title), tags=(tag,))
+        if not headlines:
+            tree.insert("", "end", values=("--", "INFO", "NEWS FEED UNAVAILABLE" if not payload.get("headline_feed_available") else "NO RELEVANT HEADLINES"), tags=("normal",))
+        if not calendar:
+            tree.insert("", "end", values=("--", "INFO", "CALENDAR FEED UNAVAILABLE" if not payload.get("calendar_feed_available") else "NO RELEVANT CALENDAR EVENTS"), tags=("normal",))
+        if payload.get("error"):
+            tree.insert("", "end", values=("--", "INFO", payload["error"]), tags=("normal",))
 
     def _signal_analysis_timeout(self, generation):
         if generation != self._signal_generation or not self._signal_refresh_running:
@@ -1496,6 +1492,42 @@ class AngeliqueDesktopApp(tk.Tk):
             pass
         self._schedule_signal_refresh()
 
+    def _signal_spread_gate_status(self, report, spread, unit):
+        if spread in (None, "--", "-"):
+            return "CHECK"
+        try:
+            symbol = report.get("symbol") or self._signal_symbol_var.get()
+            max_value = report.get("maximum_spread_value")
+            max_unit = report.get("maximum_spread_unit")
+            if max_value is None or not max_unit:
+                from core.price_units import spread_policy
+                profile = self._trading_hub_controller.get_trading_profile()
+                max_policy = spread_policy(symbol, report.get("symbol_specs") or {}, profile.get("mode", self._trading_hub_controller.trading_mode))
+                max_value, max_unit = max_policy.get("max_value"), max_policy.get("max_unit")
+            if unit != max_unit or max_value is None:
+                return "CHECK"
+            return "PASS" if float(spread) <= float(max_value) else "BLOCK"
+        except Exception:
+            return "CHECK"
+
+    def _signal_spread_gate_detail(self, report, spread, unit):
+        if spread in (None, "--", "-"):
+            return "Awaiting live spread"
+        try:
+            max_value = report.get("maximum_spread_value")
+            max_unit = report.get("maximum_spread_unit")
+            if max_value is None or not max_unit:
+                from core.price_units import spread_policy
+                profile = self._trading_hub_controller.get_trading_profile()
+                symbol = report.get("symbol") or self._signal_symbol_var.get()
+                max_policy = spread_policy(symbol, report.get("symbol_specs") or {}, profile.get("mode", self._trading_hub_controller.trading_mode))
+                max_value, max_unit = max_policy.get("max_value"), max_policy.get("max_unit")
+            if max_unit:
+                return f"{_fmt_signal_spread(spread)} {unit} / max {float(max_value):.2f} {max_unit}"
+            return f"{_fmt_signal_spread(spread)} {unit}"
+        except Exception:
+            return f"{_fmt_signal_spread(spread)} {unit}"
+
     def _apply_signal_report(self, report, generation):
         if generation != self._signal_generation:
             self._signal_refresh_running = False
@@ -1534,18 +1566,37 @@ class AngeliqueDesktopApp(tk.Tk):
         score = display.get("score")
         latest = report.get("latest", {}) or {}
         spread = display.get("spread_pips")
-        spread_unit = "pips"
+        spread_unit = display.get("spread_unit") or "pips"
         if spread is None:
-            spread = latest.get("spread_points", latest.get("spread", "--"))
-            spread_unit = "points" if latest.get("spread_unit") == "points" else "raw"
+            if latest.get("spread_ticks") is not None and spread_unit == "ticks":
+                spread = latest.get("spread_ticks")
+            elif latest.get("spread_unit") == "price":
+                spread = latest.get("spread_price", latest.get("spread", "--"))
+                spread_unit = "price"
+            else:
+                spread = latest.get("spread_points", latest.get("spread", "--"))
+                spread_unit = latest.get("spread_unit") or "points"
         symbol = display.get("symbol") or self._signal_symbol_var.get()
-        route = "VALETAX (All Pairs)"
+        account_backend = report.get("account", {}) or {}
+        broker = str(account_backend.get("broker") or "VALETAX").strip()
+        route = f"{broker.upper()} (All Pairs)"
         self._signal_route_var.set(f"ROUTE: {route}")
+        specs = report.get("symbol_specs", {}) or {}
+        try:
+            signal_digits = int(specs.get("digits", 5) or 5)
+        except (TypeError, ValueError):
+            signal_digits = 5
 
         state = display.get("state", signal)
-        news_label = "REVIEW" if plan.get("requires_manual_approval") else "CLEAR / NO BLOCK"
+        news_context = report.get("news_context") or (report.get("structure", {}) or {}).get("news_context", {}) or {}
+        if plan.get("requires_manual_approval") or news_context.get("high_impact"):
+            news_label = "MANUAL • HIGH IMPACT"
+        elif news_context.get("status") == "unavailable":
+            news_label = "INFO • UNAVAILABLE"
+        else:
+            news_label = "AUTO • NO HIGH IMPACT"
         try:
-            score_text = f"{float(score):.0f}/10" if score is not None else "--"
+            score_text = f"{float(score):.0f}/100" if score is not None else "--"
         except (TypeError, ValueError):
             score_text = "--"
         risk_amount = plan.get("risk_amount")
@@ -1560,6 +1611,40 @@ class AngeliqueDesktopApp(tk.Tk):
         self._signal_card_vars["rr"].set(rr_text)
         self._signal_card_vars["news"].set(news_label)
         self._signal_card_vars["broker"].set(broker_text)
+
+        # Strategy-specific live intelligence panels.
+        try:
+            smc_text, ict_text, structure_text = self._format_signal_panels(report)
+            self._set_readonly_text(self._signal_smc_text, smc_text)
+            self._set_readonly_text(self._signal_ict_text, ict_text)
+            self._set_readonly_text(self._signal_structure_text, structure_text)
+        except Exception as exc:
+            self._set_readonly_text(self._signal_smc_text, f"Signal panel unavailable: {exc}")
+
+        analysis_news = report.get("news_context") or (report.get("structure", {}) or {}).get("news_context", {}) or {}
+        news_events = list(analysis_news.get("headlines", []) or [])
+        # Display the complete relevant calendar independently of execution
+        # gating. High-impact events are marked by the backend, but lower-
+        # impact events must remain visible to the operator too.
+        calendar_events = list(analysis_news.get("calendar_events", []) or analysis_news.get("calendar", []) or [])
+        news_tree = self._signal_news_tree
+        for item in news_tree.get_children(): news_tree.delete(item)
+        for event in news_events[:8]:
+            title = event.get("title") or event.get("event") or "News update"
+            impact = event.get("impact") or ("high" if event in calendar_events else "info")
+            news_tree.insert("", "end", values=(event.get("retrieved_at") or event.get("time") or "--", str(impact).upper(), title), tags=("high" if str(impact).lower() in {"high","red","3"} else "normal",))
+        for event in calendar_events[:12]:
+            title = event.get("event") or event.get("title") or "Calendar event"
+            impact = event.get("impact") or "HIGH"
+            news_tree.insert("", "end", values=(event.get("scheduled_at") or event.get("time") or "--", str(impact).upper(), title), tags=("high" if str(impact).lower() in {"high","red","3"} else "medium" if str(impact).lower() in {"medium","yellow","2"} else "normal",))
+        if not news_events and not calendar_events:
+            status = "NEWS UNAVAILABLE" if news_context.get("data_quality", {}).get("headlines") == "unavailable" else "NO NEWS ITEMS"
+            news_tree.insert("", "end", values=("--", "INFO", status), tags=("normal",))
+            news_tree.insert("", "end", values=("--", "INFO", "CALENDAR DATA UNAVAILABLE" if news_context.get("data_quality", {}).get("calendar") == "unavailable" else "NO CALENDAR EVENTS"), tags=("normal",))
+        elif not calendar_events:
+            news_tree.insert("", "end", values=("--", "INFO", "NO CALENDAR EVENTS"), tags=("normal",))
+        elif not news_events:
+            news_tree.insert("", "end", values=("--", "INFO", "NO NEWS HEADLINES"), tags=("normal",))
 
         # Evidence table: only the important decision gates. Full diagnostics
         # remain available through Angelique's console and journal.
@@ -1578,8 +1663,8 @@ class AngeliqueDesktopApp(tk.Tk):
             ("Setup model", "PASS" if plan.get("direction") in {"BUY", "SELL"} else "WAIT",
              str(display.get("model") or "No complete model")),
             ("Structure", "PASS" if analysis.get("valid") else "WAIT", str(analysis.get("reason") or report.get("reason") or "No confirmed structure")),
-            ("Confluence", "PASS" if score is not None and score >= (display.get("minimum_score") or 7) else "WAIT", f"Score {score_text}"),
-            ("Spread", "PASS" if spread not in (None, "--", "-") else "CHECK", f"{_fmt_signal_spread(spread)} {spread_unit}" if spread not in (None, "--", "-") else "Awaiting live spread"),
+            ("Confluence", "PASS" if score is not None and score >= (display.get("minimum_score") or 70) else "WAIT", f"Score {score_text}"),
+            ("Spread", self._signal_spread_gate_status(report, spread, spread_unit), self._signal_spread_gate_detail(report, spread, spread_unit)),
             ("Entry", "PASS" if plan.get("direction") in {"BUY", "SELL"} else "WAIT", "Executable direction confirmed" if plan.get("direction") in {"BUY", "SELL"} else "Waiting for complete entry"),
             ("News", "REVIEW" if plan.get("requires_manual_approval") else "PASS", plan.get("manual_approval_reason") or "No high-impact/news conflict flagged"),
         ]
@@ -1593,9 +1678,9 @@ class AngeliqueDesktopApp(tk.Tk):
             f"{symbol}   {direction if executable else 'WAIT'}",
             f"Model: {display.get('model') or 'Not confirmed'}",
             f"Score: {score_text}   RR: {rr_text}",
-            f"Entry: {_fmt_signal_value(plan.get('entry'))}",
-            f"Stop:  {_fmt_signal_value(plan.get('stop_loss'))}",
-            f"Target:{_fmt_signal_value(plan.get('take_profit'))}",
+            f"Entry: {_fmt_signal_value(plan.get('entry'), signal_digits)}",
+            f"Stop:  {_fmt_signal_value(plan.get('stop_loss'), signal_digits)}",
+            f"Target:{_fmt_signal_value(plan.get('take_profit'), signal_digits)}",
             f"Spread: {_fmt_signal_spread(spread)} {spread_unit}" if spread not in (None, "--", "-") else "Spread: awaiting live feed",
             f"Risk: {risk_text}" + (f"   Budget: ${float(risk_amount):.2f}" if risk_amount is not None else ""),
             f"Stop basis: {plan.get('stop_basis') or 'Not available'}",
@@ -1621,7 +1706,7 @@ class AngeliqueDesktopApp(tk.Tk):
             self._signal_status_var.set(f"{symbol} • {str(state).replace('_', ' ')} • {stamp} • waiting for live market data")
         else:
             self._signal_status_var.set(
-                f"{symbol} • {str(state).replace('_', ' ')} • {stamp} • spread {spread} pips"
+                f"{symbol} • {str(state).replace('_', ' ')} • {stamp} • spread {_fmt_signal_spread(spread)} {spread_unit}"
             )
         # Preserve a terse machine-readable snapshot for compatibility and logs.
         self._signal_report.configure(state="normal")
@@ -1700,7 +1785,7 @@ class AngeliqueDesktopApp(tk.Tk):
                     return
                 self.after(0, lambda t=text: self._append_console("TRADING", t))
             if applied and not getattr(self, "_shutting_down", False):
-                self.after(0, lambda: self._refresh_trading_view() if self._active_center_view in {"trading", "position_monitor"} else None)
+                self.after(0, lambda: self._refresh_trading_view() if self._active_center_view == "trading" else None)
         except Exception as exc:
             if not getattr(self, "_shutting_down", False):
                 self.after(0, lambda error=str(exc): self._append_console("TRADING-ERR", f"Position management cycle failed: {error}"))
@@ -1750,7 +1835,7 @@ class AngeliqueDesktopApp(tk.Tk):
                     return
                 self.after(0, lambda text=message: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: {text}"))
                 self.after(0, lambda text=message: self._append_console("TRADING", text))
-                self.after(0, lambda: self._refresh_trading_view() if self._active_center_view in {"trading", "position_monitor"} else None)
+                self.after(0, lambda: self._refresh_trading_view() if self._active_center_view == "trading" else None)
                 return
 
             if isinstance(state, str) and state.startswith("AUTO_EXECUTE_FAILED"):
@@ -1760,6 +1845,14 @@ class AngeliqueDesktopApp(tk.Tk):
                     return
                 self.after(0, lambda text=message: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: {text}"))
                 self.after(0, lambda text=message: self._append_console("TRADING-ERR", text))
+                return
+
+            if state == "KILL_ZONE_BLOCKED":
+                execution = scan.get("execution", {})
+                reason = execution.get("reason") or "Automatic execution is restricted to the configured ICT kill zones."
+                if getattr(self, "_shutting_down", False):
+                    return
+                self.after(0, lambda text=reason: self._trading_monitor_status_var.set(f"ANGELIQUE MONITOR: AUTO BLOCKED BY KILL ZONE | {text}"))
                 return
 
             if state != "PENDING_APPROVAL":
@@ -1906,6 +1999,7 @@ class AngeliqueDesktopApp(tk.Tk):
                     result.account_mode,
                     result.health,
                     result.positions,
+                    result.analysis,
                 ))
         except Exception as exc:
             error_text = str(exc)
@@ -1917,7 +2011,7 @@ class AngeliqueDesktopApp(tk.Tk):
             return
         self._apply_trading_view_data(*args)
 
-    def _apply_trading_view_data(self, symbol: str, account: dict, market_data: dict, active: bool, bridge_error: str | None, account_mode: str, health: dict | None = None, positions: dict | None = None):
+    def _apply_trading_view_data(self, symbol: str, account: dict, market_data: dict, active: bool, bridge_error: str | None, account_mode: str, health: dict | None = None, positions: dict | None = None, analysis: dict | None = None):
         positions = positions or {}
         position_rows = positions.get("positions", []) if isinstance(positions, dict) else []
         account = {
@@ -1993,6 +2087,7 @@ class AngeliqueDesktopApp(tk.Tk):
                 f"Bridge connected. Account: {account.get('login')} | Balance: ${account.get('balance', 0):,.2f} | Mode: {display_actual_mode}"
             )
 
+        self._last_chart_market_data = market_data or {}
         # The bridge normally returns candles under market_data["timeframes"].
         # Older/alternate bridge responses may instead provide top-level
         # "candles". Normalize both shapes here so a healthy MT5 connection is
@@ -2011,14 +2106,7 @@ class AngeliqueDesktopApp(tk.Tk):
                     selected_candles = timeframe_map.get(str(chart_timeframe).upper())
                     if isinstance(selected_candles, list) and selected_candles:
                         chart_candles = selected_candles
-                    else:
-                        # Graceful fallback: display the first valid returned
-                        # timeframe rather than showing a false connection error.
-                        for returned_tf, returned_candles in timeframe_map.items():
-                            if isinstance(returned_candles, list) and returned_candles:
-                                chart_timeframe = str(returned_tf).upper()
-                                chart_candles = returned_candles
-                                break
+
 
         if chart_candles:
             self._draw_trading_chart(chart_candles)
@@ -2050,6 +2138,8 @@ class AngeliqueDesktopApp(tk.Tk):
                 f"No usable market candles returned{': ' + error_text if error_text else '. MT5 is connected, but this timeframe currently has no usable data.'}"
             )
 
+        self._last_chart_market_data = dict(market_data or {})
+        self._last_chart_account = dict(account or {})
         self._update_bridge_error(active, bridge_error)
 
     def _refresh_position_monitor(self):
@@ -2063,9 +2153,6 @@ class AngeliqueDesktopApp(tk.Tk):
         from skills.trading_skill.position_display import format_position_row
 
         trees = [self._positions_tree]
-        monitor_tree = getattr(self, "_monitor_positions_tree", None)
-        if monitor_tree is not None:
-            trees.append(monitor_tree)
         for tree in trees:
             for item in tree.get_children():
                 tree.delete(item)
@@ -2097,20 +2184,18 @@ class AngeliqueDesktopApp(tk.Tk):
             values = (
                 f"#{row['ticket']}  {row['symbol']} {row['direction']}",
                 f"{display_price(row['current'])} / {display_price(row['entry'])}",
-                f"{display_pips(row['to_stop_pips'])} / {display_pips(row['total_stop_pips'])} pips",
-                f"{display_pips(row['to_target_pips'])} / {display_pips(row['total_target_pips'])} pips",
+                f"{display_pips(row['to_stop'])} / {display_pips(row['total_stop'])} {row.get('distance_unit', 'pips')}",
+                f"{display_pips(row['to_target'])} / {display_pips(row['total_target'])} {row.get('distance_unit', 'pips')}",
                 f"${profit:,.2f}",
                 "-" if row["expected_profit"] is None else f"+${row['expected_profit']:,.2f}",
                 "-" if r_multiple is None else f"{r_multiple:.2f}R", row["status"],
             )
             self._positions_tree.insert("", "end", iid=row_id, values=values, tags=(tag,))
-            if monitor_tree is not None:
-                monitor_tree.insert("", "end", iid=row_id, values=values, tags=(tag,))
         if getattr(self, "_position_monitor_status_var", None) is not None:
             self._position_monitor_status_var.set(f"{len(positions)} open position(s). Live MT5 position data is synchronized.")
 
     def _on_position_selected(self, _event=None):
-        source = self._monitor_positions_tree if self._active_center_view == "position_monitor" else self._positions_tree
+        source = getattr(self, "_positions_tree", None)
         selected = source.selection() if source is not None else ()
         self._selected_position_ticket = None
         self._selected_position_symbol = None
@@ -2260,6 +2345,7 @@ class AngeliqueDesktopApp(tk.Tk):
             return
         self.trading_chart_canvas.delete("all")
         self._last_chart_data = None
+        self._last_full_candles = None
         self._chart_selection_rect_id = None
         self._selection_handle_ids = []
         width = self.trading_chart_canvas.winfo_width() or 860
@@ -2283,155 +2369,319 @@ class AngeliqueDesktopApp(tk.Tk):
 
     def _draw_trading_chart(self, candles):
         if self.trading_chart_canvas is None or not candles:
-            self._draw_trading_placeholder_chart()
-            return
+            self._draw_trading_placeholder_chart(); return
 
-        valid_candles = []
+        valid_candles=[]
         for candle in candles:
-            if not isinstance(candle, dict):
-                continue
+            if not isinstance(candle, dict): continue
             try:
-                open_price = float(candle.get("open", candle.get("o", candle.get("Open", 0))))
-                high_price = float(candle.get("high", candle.get("h", candle.get("High", open_price))))
-                low_price = float(candle.get("low", candle.get("l", candle.get("Low", open_price))))
-                close_price = float(candle.get("close", candle.get("c", candle.get("Close", open_price))))
-            except (TypeError, ValueError):
-                continue
-            if min(open_price, high_price, low_price, close_price) <= 0:
-                continue
+                o=float(candle.get("open", candle.get("o", candle.get("Open", 0))))
+                h=float(candle.get("high", candle.get("h", candle.get("High", o))))
+                l=float(candle.get("low", candle.get("l", candle.get("Low", o))))
+                c=float(candle.get("close", candle.get("c", candle.get("Close", o))))
+            except (TypeError,ValueError): continue
+            if min(o,h,l,c) <= 0: continue
             valid_candles.append(candle)
         if not valid_candles:
-            self._draw_trading_placeholder_chart()
-            return
-
-        # Keep a validated reference for zooming and resize redraws.
-        self._last_full_candles = valid_candles
-
+            self._draw_trading_placeholder_chart(); return
+        self._last_full_candles=valid_candles
+        # Preserve the canonical market metadata used by the Data Window and
+        # chart formatting. Do not invent symbol precision in the GUI.
+        self._last_chart_market_data = getattr(self, "_last_chart_market_data", {}) or {}
         self.trading_chart_canvas.delete("all")
-        width = self.trading_chart_canvas.winfo_width() or 860
-        height = self.trading_chart_canvas.winfo_height() or 220
-        padding = 16
-
-        total = len(valid_candles)
-        view_count = min(self._trading_chart_view_count, total)
-        offset = max(0, int(self._trading_chart_view_offset))
-        start_idx = max(0, total - view_count - offset)
-        end_idx = min(total, start_idx + view_count)
-        selected = valid_candles[start_idx:end_idx]
-
-        # Extract prices and preserve metadata
-        prices = []
+        self._chart_crosshair_ids=[]
+        width=self.trading_chart_canvas.winfo_width() or 900
+        height=self.trading_chart_canvas.winfo_height() or 360
+        left,right,top,bottom=54,78,18,32
+        plot_w=max(20,width-left-right); plot_h=max(20,height-top-bottom)
+        total=len(valid_candles)
+        view_count=min(int(getattr(self,'_trading_chart_view_count',80)),total)
+        offset=max(0,int(getattr(self,'_trading_chart_view_offset',0)))
+        start_idx=max(0,total-view_count-offset); end_idx=min(total,start_idx+view_count)
+        selected=valid_candles[start_idx:end_idx]
+        prices=[]
         for c in selected:
-            o = float(c.get("open", c.get("o", c.get("Open", 0))))
-            h = float(c.get("high", c.get("h", c.get("High", o))))
-            l = float(c.get("low", c.get("l", c.get("Low", o))))
-            cl = float(c.get("close", c.get("c", c.get("Close", o))))
-            t = c.get("time") or c.get("timestamp") or c.get("t")
-            vol = c.get("tick_volume") or c.get("volume") or c.get("v")
-            prices.append({"open": o, "high": h, "low": l, "close": cl, "time": t, "tick_volume": vol, "raw": c})
-
-        closes = [p["close"] for p in prices]
-        if not closes or all(c == 0 for c in closes):
-            self._draw_trading_placeholder_chart()
-            return
-
-        min_price = min(p["low"] for p in prices)
-        max_price = max(p["high"] for p in prices)
-        span = max_price - min_price or 1
-        chart_width = width - padding * 2
-        chart_height = height - padding * 2
-
-        # Compute x positions for candles
-        points_x = []
-        for idx in range(len(prices)):
-            x = padding + (idx / (len(prices) - 1 or 1)) * chart_width
-            points_x.append(x)
-
-        body_width = max(4, chart_width / max(40, len(prices)) * 0.6)
-
-        def y_for(price):
-            return height - padding - ((price - min_price) / span) * chart_height
-
-        for idx, p in enumerate(prices):
-            o = p["open"]
-            h = p["high"]
-            l = p["low"]
-            cl = p["close"]
-            x = points_x[idx]
-
-            y_open = y_for(o)
-            y_close = y_for(cl)
-            y_high = y_for(h)
-            y_low = y_for(l)
-
-            # wick
-            self.trading_chart_canvas.create_line(x, y_high, x, y_low, fill=self._theme("text"), width=1)
-
-            # body
-            top = min(y_open, y_close)
-            bottom = max(y_open, y_close)
-            color = "#2ecc71" if cl >= o else "#e74c3c"
-            self.trading_chart_canvas.create_rectangle(
-                x - body_width / 2,
-                top,
-                x + body_width / 2,
-                bottom,
-                fill=color,
-                outline=self._theme("border"),
-            )
-
-        # Border and label
-        self.trading_chart_canvas.create_rectangle(
-            padding,
-            padding,
-            width - padding,
-            height - padding,
-            outline=self._theme("text"),
-            width=1,
-        )
-        self.trading_chart_canvas.create_text(
-            width - padding - 10,
-            padding + 12,
-            text=f"{len(prices)}-period OHLC (view {start_idx}:{end_idx})",
-            fill=self._theme("text"),
-            font=("Consolas", 9),
-            anchor="ne",
-        )
-
-        # Persistent selection rectangle (most recent portion of the view)
-        try:
-            recent_count = min(8, len(prices))
-            start_x = points_x[-recent_count] - body_width
-            end_x = points_x[-1] + body_width
-            # remove previous selection
-            if self._chart_selection_rect_id:
-                try:
-                    self.trading_chart_canvas.delete(self._chart_selection_rect_id)
-                except Exception:
-                    pass
-            self._chart_selection_rect_id = self.trading_chart_canvas.create_rectangle(start_x, padding, end_x, height - padding, outline=self._theme("accent"), width=2)
-            # draw resize handles
             try:
-                # remove previous handles
-                if getattr(self, "_selection_handle_ids", None):
-                    for hid in getattr(self, "_selection_handle_ids", []):
-                        try:
-                            self.trading_chart_canvas.delete(hid)
-                        except Exception:
-                            pass
-                self._selection_handle_ids = []
-                handle_w = max(6, body_width * 0.6)
-                mid_y = (padding + (height - padding)) / 2
-                left_handle = self.trading_chart_canvas.create_rectangle(start_x - handle_w / 2, mid_y - handle_w / 2, start_x + handle_w / 2, mid_y + handle_w / 2, fill=self._theme("accent"), outline=self._theme("border"))
-                right_handle = self.trading_chart_canvas.create_rectangle(end_x - handle_w / 2, mid_y - handle_w / 2, end_x + handle_w / 2, mid_y + handle_w / 2, fill=self._theme("accent"), outline=self._theme("border"))
-                self._selection_handle_ids.extend([left_handle, right_handle])
-            except Exception:
-                pass
-        except Exception:
-            self._chart_selection_rect_id = None
+                o=float(c.get('open',c.get('o',0))); h=float(c.get('high',c.get('h',o))); l=float(c.get('low',c.get('l',o))); cl=float(c.get('close',c.get('c',o)))
+            except (TypeError,ValueError): continue
+            prices.append({'open':o,'high':h,'low':l,'close':cl,'time':c.get('time') or c.get('timestamp') or c.get('t'),'tick_volume':c.get('tick_volume') or c.get('volume') or c.get('v'),'raw':c})
+        if not prices:
+            self._draw_trading_placeholder_chart(); return
+        min_price=min(x['low'] for x in prices); max_price=max(x['high'] for x in prices); span=max_price-min_price or 1.0
+        def x_for_i(i): return left + (i/max(1,len(prices)-1))*plot_w
+        def y_for(price): return top + (max_price-price)/span*plot_h
+        self._chart_transform={'left':left,'right':right,'top':top,'bottom':bottom,'plot_w':plot_w,'plot_h':plot_h,'min_price':min_price,'max_price':max_price,'start_idx':start_idx,'end_idx':end_idx,'prices':prices,'height':height}
+        # Gridlines and axes, matching the MT5 Data Window feel without obscuring candles.
+        h_steps=6
+        for j in range(h_steps+1):
+            frac=j/h_steps; y=top+frac*plot_h; price=max_price-frac*span
+            self.trading_chart_canvas.create_line(left,y,width-right,y,fill=self._theme('border'),width=1,dash=(2,5))
+            self.trading_chart_canvas.create_text(width-right+5,y,text=self._format_chart_price(price),fill=self._theme('text'),font=('Consolas',7),anchor='w')
+        v_steps=min(10,max(4,len(prices)//20 or 4))
+        for j in range(v_steps+1):
+            frac=j/v_steps; x=left+frac*plot_w
+            self.trading_chart_canvas.create_line(x,top,x,height-bottom,fill=self._theme('border'),width=1,dash=(2,5))
+            idx=min(len(prices)-1,round(frac*(len(prices)-1))); label=self._format_chart_time(prices[idx].get('time'))
+            self.trading_chart_canvas.create_text(x,height-bottom+6,text=label,fill=self._theme('text'),font=('Consolas',7),anchor='n')
+        self.trading_chart_canvas.create_rectangle(left,top,width-right,height-bottom,outline=self._theme('text'),width=1)
+        self._draw_volume_profile(prices, left, top, plot_w, plot_h, min_price, max_price)
+        candle_w=max(2.5,min(14,plot_w/max(24,len(prices))*0.72))
+        points_x=[]
+        for idx,p in enumerate(prices):
+            x=x_for_i(idx); points_x.append(x)
+            yo,yc,yh,yl=map(y_for,(p['open'],p['close'],p['high'],p['low']))
+            self.trading_chart_canvas.create_line(x,yh,x,yl,fill=self._theme('text'),width=1)
+            up=p['close']>=p['open']; body_fill='#22c55e' if up else '#ef4444'
+            self.trading_chart_canvas.create_rectangle(x-candle_w/2,min(yo,yc),x+candle_w/2,max(yo,yc),fill=body_fill,outline=body_fill)
+        latest=prices[-1]
+        self.trading_chart_canvas.create_line(left,y_for(latest['close']),width-right,y_for(latest['close']),fill=self._theme('accent'),width=1,dash=(4,3))
+        self.trading_chart_canvas.create_text(width-right+5,y_for(latest['close']),text=self._format_chart_price(latest['close']),fill=self._theme('accent'),font=('Consolas',7,'bold'),anchor='w')
+        self.trading_chart_canvas.create_text(left+4,top+4,text=f"{len(prices)}-period OHLC  |  {str(self._get_selected_symbol_and_timeframe()[1]).upper()}",fill=self._theme('text'),font=('Consolas',8),anchor='nw')
+        self._last_chart_data={'prices':prices,'points_x':points_x,'start_idx':start_idx}
+        self._redraw_chart_tools()
+        self._update_data_window(prices[-1], latest_index=len(prices)-1)
 
-        # Save last chart data for tooltip/interactions
-        self._last_chart_data = {"prices": prices, "points_x": points_x, "start_idx": start_idx}
+    def _format_chart_price(self, price):
+        try:
+            digits = None
+            market = getattr(self, "_last_chart_market_data", {}) or {}
+            specs = market.get("symbol_specs", {}) if isinstance(market, dict) else {}
+            if isinstance(specs, dict) and specs.get("digits") is not None:
+                digits = int(specs.get("digits") or 0)
+            if digits is None:
+                symbol = str(self._get_selected_symbol_and_timeframe()[0]).upper()
+                digits = 3 if "JPY" in symbol else 5
+                if any(token in symbol for token in ("XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER")):
+                    digits = 2
+            return f"{float(price):.{max(0, digits)}f}"
+        except (TypeError, ValueError):
+            return "--"
+
+    def _format_chart_time(self, value):
+        if value is None:
+            return "--"
+        try:
+            if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+                stamp=float(value)
+                # MT5 bridge timestamps are normally Unix seconds.
+                return datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%d %b %H:%M")
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+        text=str(value).replace("T", " ")
+        return text[:16] if len(text) > 16 else text
+
+    def _update_data_window(self, candle, latest_index=None):
+        if not getattr(self,'_data_window_text',None) or not isinstance(candle,dict): return
+        market=getattr(self,'_last_chart_market_data',{}) or {}
+        bid=market.get('bid','--'); ask=market.get('ask','--')
+        spread=market.get('spread_pips') if market.get('spread_pips') is not None else market.get('spread_points',market.get('spread','--'))
+        unit=market.get('spread_unit') or ('pips' if market.get('spread_pips') is not None else 'points')
+        specs=market.get('symbol_specs',{}) if isinstance(market,dict) else {}
+        symbol, timeframe = self._get_selected_symbol_and_timeframe()
+        rows=[('Symbol',symbol),('Timeframe',timeframe),('Date',self._format_chart_time(candle.get('time') or candle.get('timestamp') or '--')),
+              ('Open',self._format_chart_price(candle.get('open'))),('High',self._format_chart_price(candle.get('high'))),
+              ('Low',self._format_chart_price(candle.get('low'))),('Close',self._format_chart_price(candle.get('close'))),
+              ('Tick Volume',candle.get('tick_volume','--')),('Bid',self._format_chart_price(bid)),('Ask',self._format_chart_price(ask)),
+              ('Spread',f"{spread:.1f} {unit}" if isinstance(spread,(int,float)) else f"{spread} {unit}"),
+              ('Candle',f"{(latest_index if latest_index is not None else 0)+1} / {len(getattr(self,'_last_chart_data',{}).get('prices',[]) or [])}"),
+              ('Digits',specs.get('digits','--')),('Point',self._format_chart_price(specs.get('point')) if specs.get('point') else '--')]
+        text='\n'.join(f"{k:<12} {v}" for k,v in rows)
+        self._data_window_text.configure(state='normal'); self._data_window_text.delete('1.0','end'); self._data_window_text.insert('1.0',text); self._data_window_text.configure(state='disabled')
+
+    def _redraw_chart_view(self):
+        if getattr(self, "_last_full_candles", None):
+            self._draw_trading_chart(self._last_full_candles)
+
+    def _draw_volume_profile(self, prices, left, top, plot_w, plot_h, min_price, max_price):
+        """Draw a TradingView-style visible-range volume profile overlay.
+
+        The bridge supplies tick volume for FX symbols, so rows are built from
+        candle typical prices and split into up/down volume. The Point of
+        Control and a 70% Value Area are then derived from the same rows.
+        """
+        if not getattr(self, "_volume_profile_var", tk.BooleanVar(value=False)).get() or not prices:
+            return
+        rows = max(12, min(48, int(getattr(self, "_volume_profile_rows", 30))))
+        span = max_price - min_price or 1.0
+        row_height = span / rows
+        bins = [{"total": 0.0, "up": 0.0, "down": 0.0} for _ in range(rows)]
+        for p in prices:
+            vol = p.get("tick_volume")
+            try:
+                vol = float(vol) if vol is not None else 0.0
+            except (TypeError, ValueError):
+                vol = 0.0
+            if vol <= 0:
+                continue
+            typical = (p["high"] + p["low"] + p["close"]) / 3.0
+            idx = max(0, min(rows - 1, int((typical - min_price) / row_height)))
+            bins[idx]["total"] += vol
+            if p["close"] >= p["open"]:
+                bins[idx]["up"] += vol
+            else:
+                bins[idx]["down"] += vol
+        total_volume = sum(b["total"] for b in bins)
+        if total_volume <= 0:
+            return
+        poc = max(range(rows), key=lambda i: bins[i]["total"])
+        target = total_volume * float(getattr(self, "_volume_profile_value_area", 0.70))
+        included = {poc}
+        accumulated = bins[poc]["total"]
+        while accumulated < target and len(included) < rows:
+            candidates = []
+            if poc - 1 >= 0:
+                candidates.append(poc - 1)
+            if poc + 1 < rows:
+                candidates.append(poc + 1)
+            candidates = [i for i in candidates if i not in included]
+            if not candidates:
+                break
+            nxt = max(candidates, key=lambda i: bins[i]["total"])
+            included.add(nxt)
+            accumulated += bins[nxt]["total"]
+        val_row, vah_row = min(included), max(included)
+        vah = min_price + (vah_row + 1) * row_height
+        val = min_price + val_row * row_height
+        poc_price = min_price + (poc + 0.5) * row_height
+
+        profile_w = max(85, min(plot_w * 0.22, 165))
+        x_right = left + plot_w - 4
+        max_bar = max(b["total"] for b in bins) or 1.0
+        # Draw before candles so bars remain a backdrop, like TradingView.
+        for i, b in enumerate(bins):
+            y0 = top + (max_price - (min_price + (i + 1) * row_height)) / span * plot_h
+            y1 = top + (max_price - (min_price + i * row_height)) / span * plot_h
+            width = profile_w * (b["total"] / max_bar)
+            if width <= 0:
+                continue
+            base_x = x_right - width
+            total = b["total"] or 1.0
+            up_w = width * (b["up"] / total)
+            in_va = i in included
+            fill = self._theme("accent") if in_va else self._theme("border")
+            self.trading_chart_canvas.create_rectangle(base_x, y0, x_right, y1, fill=fill, outline="", stipple="gray25" if in_va else "gray50", tags=("volume_profile",))
+            if b["up"] and b["down"]:
+                self.trading_chart_canvas.create_rectangle(base_x, y0, base_x + up_w, y1, fill=self._theme("accent"), outline="", stipple="gray50", tags=("volume_profile",))
+        # Key levels.
+        y_poc = top + (max_price - poc_price) / span * plot_h
+        y_vah = top + (max_price - vah) / span * plot_h
+        y_val = top + (max_price - val) / span * plot_h
+        for y, label in ((y_poc, "POC"), (y_vah, "VAH"), (y_val, "VAL")):
+            self.trading_chart_canvas.create_line(left, y, left + plot_w, y, fill=self._theme("accent"), width=1, dash=(4, 3), tags=("volume_profile",))
+            self.trading_chart_canvas.create_text(left + 5, y - 2, text=f"{label} {self._format_chart_price((max_price - (y-top)/plot_h*span))}", fill=self._theme("accent"), font=("Consolas", 6, "bold"), anchor="sw", tags=("volume_profile",))
+
+    def _reset_chart_tool_state(self):
+        self._chart_tool_points = []
+        self._chart_drag_active = False
+        self.trading_chart_canvas.delete("chart_preview")
+        self.trading_chart_canvas.delete("chart_drag_select")
+
+    def _chart_point_from_event(self, event):
+        data = getattr(self, "_last_chart_data", None)
+        t = getattr(self, "_chart_transform", None)
+        if not data or not t or not data.get("points_x"):
+            return None
+        points = data["points_x"]
+        idx = min(range(len(points)), key=lambda i: abs(points[i] - event.x))
+        y = max(t["top"], min(t["top"] + t["plot_h"], event.y))
+        price = t["max_price"] - ((y - t["top"]) / (t["plot_h"] or 1)) * (t["max_price"] - t["min_price"])
+        return idx, price
+
+    def _redraw_chart_tools(self):
+        data=getattr(self,'_chart_transform',None)
+        if not data: return
+        prices=data['prices']; n=len(prices)
+        def xp(idx): return data['left'] + (max(0,min(n-1,idx))/max(1,n-1))*data['plot_w']
+        def yp(price): return data['top'] + (data['max_price']-price)/(data['max_price']-data['min_price'] or 1)*data['plot_h']
+        self.trading_chart_canvas.delete('chart_drawings')
+        for item in getattr(self,'_chart_drawings',[]):
+            kind=item.get('kind'); pts=item.get('points',[])
+            if kind=='VLINE' and pts:
+                x=xp(pts[0][0]); self.trading_chart_canvas.create_line(x,data['top'],x,data['top']+data['plot_h'],fill=self._theme('accent'),width=1,dash=(4,3),tags=('chart_drawings',))
+            elif kind=='HLINE' and pts:
+                y=yp(pts[0][1]); self.trading_chart_canvas.create_line(data['left'],y,data['left']+data['plot_w'],y,fill=self._theme('accent'),width=1,dash=(4,3),tags=('chart_drawings',))
+            elif kind=='TREND' and len(pts)>=2:
+                continue
+            elif kind=='CHANNEL' and len(pts)>=3:
+                (i1,p1),(i2,p2),(i3,p3)=pts[:3]; dx=i2-i1
+                if abs(dx)<1: continue
+                slope=(p2-p1)/dx; base_at_3=p1+slope*(i3-i1); off=p3-base_at_3
+                y0a=p1+slope*(0-i1); y1a=p1+slope*((n-1)-i1)
+                y0b=y0a+off; y1b=y1a+off
+                self.trading_chart_canvas.create_line(xp(0),yp(y0a),xp(n-1),yp(y1a),fill=self._theme('accent'),width=1,tags=('chart_drawings',))
+                self.trading_chart_canvas.create_line(xp(0),yp(y0b),xp(n-1),yp(y1b),fill=self._theme('accent'),width=1,dash=(6,3),tags=('chart_drawings',))
+
+    def _delete_chart_line_at_point(self, idx, price):
+        """Delete the nearest existing horizontal/vertical guide under a click."""
+        transform = getattr(self, "_chart_transform", None)
+        if not transform:
+            return False
+        n = len(transform.get("prices", [])) or 1
+        x = transform["left"] + (max(0, min(n - 1, idx)) / max(1, n - 1)) * transform["plot_w"]
+        y = transform["top"] + (transform["max_price"] - price) / (transform["max_price"] - transform["min_price"] or 1) * transform["plot_h"]
+        tolerances = []
+        for pos, item in enumerate(getattr(self, "_chart_drawings", [])):
+            kind = item.get("kind")
+            pts = item.get("points", [])
+            if not pts or kind not in {"VLINE", "HLINE"}:
+                continue
+            di, dp = pts[0]
+            if kind == "VLINE":
+                lx = transform["left"] + (max(0, min(n - 1, di)) / max(1, n - 1)) * transform["plot_w"]
+                tolerances.append((abs(lx - x), pos))
+            else:
+                ly = transform["top"] + (transform["max_price"] - dp) / (transform["max_price"] - transform["min_price"] or 1) * transform["plot_h"]
+                tolerances.append((abs(ly - y), pos))
+        if tolerances:
+            distance, pos = min(tolerances, key=lambda pair: pair[0])
+            if distance <= 7:
+                self._chart_drawings.pop(pos)
+                self._redraw_chart_tools()
+                return True
+        return False
+
+    def _on_chart_motion(self, event):
+        try:
+            data=getattr(self,'_last_chart_data',None)
+            if not data or not data.get('prices'): return
+            point=self._chart_point_from_event(event)
+            if point is None: return
+            idx, _price = point; p=data['prices'][idx]; self._update_data_window(p,idx)
+            for item in getattr(self,'_chart_crosshair_ids',[]):
+                try: self.trading_chart_canvas.delete(item)
+                except Exception: pass
+            self._chart_crosshair_ids=[]
+            t=getattr(self,'_chart_transform',{})
+            if self._chart_tool_var.get()=='CROSSHAIR':
+                self._chart_crosshair_ids.append(self.trading_chart_canvas.create_line(event.x,t.get('top',0),event.x,t.get('top',0)+t.get('plot_h',0),fill=self._theme('accent'),width=1,dash=(2,2)))
+                self._chart_crosshair_ids.append(self.trading_chart_canvas.create_line(t.get('left',0),event.y,t.get('left',0)+t.get('plot_w',0),event.y,fill=self._theme('accent'),width=1,dash=(2,2)))
+        except Exception:
+            pass
+
+    def _on_chart_button_press(self,event):
+        try:
+            point=self._chart_point_from_event(event)
+            if point is None: return
+            idx, price=point
+            self.trading_chart_canvas.focus_set()
+            # Existing guide objects are directly deletable by clicking them.
+            if self._delete_chart_line_at_point(idx, price):
+                return 'break'
+            tool=self._chart_tool_var.get()
+            if tool == 'VLINE':
+                self._chart_drawings.append({'kind':'VLINE','points':[(idx,price)]}); self._redraw_chart_tools(); return 'break'
+            if tool == 'HLINE':
+                self._chart_drawings.append({'kind':'HLINE','points':[(idx,price)]}); self._redraw_chart_tools(); return 'break'
+        except Exception:
+            pass
+
+    def _on_chart_button_motion(self,event):
+        # All previews are handled by _on_chart_motion so that normal canvas
+        # motion and drawing motion share one coordinate transform.
+        return None
+
+    def _on_chart_button_release(self,event):
+        return None
 
     def _on_trading_chart_resize(self, _event=None):
         if getattr(self, "_shutting_down", False):
@@ -2439,6 +2689,8 @@ class AngeliqueDesktopApp(tk.Tk):
         candles = getattr(self, "_last_full_candles", None)
         if candles:
             self._draw_trading_chart(candles)
+        else:
+            self._draw_trading_placeholder_chart()
 
     def _update_trading_mode_banner(
         self,
@@ -2524,42 +2776,6 @@ class AngeliqueDesktopApp(tk.Tk):
         except Exception:
             pass
 
-    def _on_chart_motion(self, event):
-        try:
-            data = self._last_chart_data
-            if not data or not data.get("prices"):
-                return
-            points = data["points_x"]
-            prices = data["prices"]
-            if not points:
-                return
-            # find nearest index
-            x = event.x
-            nearest = min(range(len(points)), key=lambda i: abs(points[i] - x))
-            p = prices[nearest]
-            txt_lines = []
-            if p.get("time"):
-                txt_lines.append(str(p.get("time")))
-            txt_lines.append(f"O {p['open']:.6f}  H {p['high']:.6f}")
-            txt_lines.append(f"L {p['low']:.6f}  C {p['close']:.6f}")
-            if p.get("tick_volume") is not None:
-                txt_lines.append(f"Vol: {p.get('tick_volume')}")
-            txt = "\n".join(txt_lines)
-            if self._chart_tooltip is None:
-                return
-            try:
-                self.trading_chart_canvas.delete("chart_tooltip")
-            except Exception:
-                pass
-            self._chart_tooltip.configure(text=txt)
-            # place tooltip near cursor
-            try:
-                self.trading_chart_canvas.create_window(event.x + 12, event.y - 12, window=self._chart_tooltip, anchor="nw", tags=("chart_tooltip",))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
     def _hide_chart_tooltip(self):
         try:
             if self.trading_chart_canvas is not None:
@@ -2598,63 +2814,6 @@ class AngeliqueDesktopApp(tk.Tk):
                 except Exception:
                     pass
                 self._mt5_tooltip = None
-        except Exception:
-            pass
-
-    def _on_chart_button_press(self, event):
-        try:
-            self._selection_start_x = event.x
-            self._selection_start_y = event.y
-            # remove any existing ephemeral selection
-            try:
-                self.trading_chart_canvas.delete("chart_drag_select")
-            except Exception:
-                pass
-            self.trading_chart_canvas.create_rectangle(self._selection_start_x, self._selection_start_y, self._selection_start_x, self._selection_start_y, outline=self._theme("accent"), width=1, tags=("chart_drag_select",))
-        except Exception:
-            pass
-
-    def _on_chart_button_motion(self, event):
-        try:
-            # update drag rectangle
-            try:
-                self.trading_chart_canvas.delete("chart_drag_select")
-            except Exception:
-                pass
-            x1 = self._selection_start_x
-            y1 = self._selection_start_y
-            x2 = event.x
-            y2 = event.y
-            self.trading_chart_canvas.create_rectangle(x1, y1, x2, y2, outline=self._theme("accent"), width=1, dash=(2, 2), tags=("chart_drag_select",))
-        except Exception:
-            pass
-
-    def _on_chart_button_release(self, event):
-        try:
-            start_x = getattr(self, "_selection_start_x", event.x)
-            start_y = getattr(self, "_selection_start_y", event.y)
-            drag_width = abs(event.x - start_x)
-            drag_height = abs(event.y - start_y)
-            # A click is for inspection only; do not turn it into a one-candle zoom.
-            if drag_width <= 0:
-                self.trading_chart_canvas.delete("chart_drag_select")
-                return
-            # finalize selection and zoom to it
-            data = getattr(self, "_last_chart_data", None)
-            points = data.get("points_x", []) if data else []
-            if points:
-                sx, ex = sorted((start_x, event.x))
-                start_idx = min(range(len(points)), key=lambda i: abs(points[i] - sx))
-                end_idx = min(range(len(points)), key=lambda i: abs(points[i] - ex))
-                if end_idx < start_idx:
-                    start_idx, end_idx = end_idx, start_idx
-                selection_count = max(1, end_idx - start_idx + 1)
-                total = len(getattr(self, "_last_full_candles", []))
-                absolute_start = data.get("start_idx", 0) + start_idx
-                self._trading_chart_view_count = selection_count
-                self._trading_chart_view_offset = max(0, total - selection_count - absolute_start)
-                self.trading_chart_canvas.delete("chart_drag_select")
-                self._draw_trading_chart(self._last_full_candles)
         except Exception:
             pass
 
@@ -2773,8 +2932,8 @@ class AngeliqueDesktopApp(tk.Tk):
             score_value = float(score)
         except (TypeError, ValueError):
             score_value = 0.0
-        indicator_color = "#22c55e" if score_value >= 8 else "#ef4444"
-        indicator_text = "HIGH CONFIDENCE" if score_value >= 8 else "POSSIBLE / LOWER CONFIDENCE"
+        indicator_color = "#22c55e" if score_value >= 80 else "#ef4444"
+        indicator_text = "HIGH CONFIDENCE" if score_value >= 80 else "POSSIBLE / LOWER CONFIDENCE"
         body = "\n".join([
             "ANGELIQUE - TRADE PLAN SUMMARY",
             "STATUS: READY FOR APPROVAL",
@@ -2782,7 +2941,7 @@ class AngeliqueDesktopApp(tk.Tk):
             f"Broker: {get_value('broker')} | Platform: {get_value('platform')} | Account: {get_value('account_login')}",
             f"Environment: {get_value('account_mode')} | Symbol: {get_value('mt5_symbol')} | Direction: {get_value('direction')}",
             f"PAIR: {get_value('mt5_symbol')}",
-            f"MODE: {mode} | STRATEGY: {strategy_name} | SCORE: {score}/10 | MINIMUM: {profile.get('minimum_score', 7)}/10",
+            f"MODE: {mode} | STRATEGY: {strategy_name} | SCORE: {score}/100 | MINIMUM: {profile.get('minimum_score', 70)}/100",
             f"Stop basis: {get_value('stop_basis')}",
             f"Target basis: {get_value('target_basis')}",
             "",
@@ -2816,7 +2975,7 @@ class AngeliqueDesktopApp(tk.Tk):
 
         indicators = tk.Frame(dialog, bg=self._theme("panel"))
         indicators.pack(fill="x", padx=20, pady=(16, 0))
-        for label in ("PROFIT LIKELIHOOD", "SETUP QUALITY"):
+        for label in ("SETUP QUALITY",):
             indicator = tk.Frame(indicators, bg=self._theme("panel"))
             indicator.pack(side="left", padx=(0, 24))
             light = tk.Canvas(indicator, width=16, height=16, bg=self._theme("panel"), highlightthickness=0)
@@ -2825,7 +2984,7 @@ class AngeliqueDesktopApp(tk.Tk):
             tk.Label(
                 indicator,
                 text=f"{label}: {indicator_text}",
-                fg=self._theme("accent") if score_value >= 8 else self._theme("text"),
+                fg=self._theme("accent") if score_value >= 80 else self._theme("text"),
                 bg=self._theme("panel"),
                 font=("Consolas", 9, "bold"),
             ).pack(side="left")
@@ -2896,7 +3055,7 @@ class AngeliqueDesktopApp(tk.Tk):
                     self.trading_detail_var.set(result),
                     self._append_console("TRADING", result),
                     self._append_console("TRADING-DIAGNOSTIC", detail) if detail else None,
-                    self._refresh_trading_view() if self._active_center_view == "position_monitor" else None,
+                    self._refresh_trading_view() if self._active_center_view == "trading" else None,
                 ))
 
         threading.Thread(target=execute_worker, daemon=True).start()
@@ -2967,67 +3126,70 @@ class AngeliqueDesktopApp(tk.Tk):
             summary = f"Close all positions: {message} (closed {closed}, failed {failed})"
             if not getattr(self, "_shutting_down", False):
                 self.after(0, lambda text=summary, ok=success: self._record_exit_result(text, ok))
-                self.after(0, lambda: self._refresh_trading_view() if self._active_center_view in {"trading", "position_monitor"} else None)
+                self.after(0, lambda: self._refresh_trading_view() if self._active_center_view == "trading" else None)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_avatar(self):
-        # Ensure canvas layout is settled before measuring
+        """Keep the Angelique portrait large and visually dominant."""
+        if self.ring_canvas is None:
+            return
         try:
             self.ring_canvas.update_idletasks()
         except Exception:
             pass
-        width = self.ring_canvas.winfo_width() or 520
-        height = self.ring_canvas.winfo_height() or 520
-        avatar_size = int(min(260, width - 120, height - 120))
-        if avatar_size < 80:
-            avatar_size = 80
-
-        # Only recreate the avatar image when the computed size changes
+        width = self.ring_canvas.winfo_width() or 760
+        height = self.ring_canvas.winfo_height() or 570
         avatar_image = getattr(self, "_avatar_image", None)
-        center_x = self.ring_canvas.winfo_width() // 2
-        center_y = self.ring_canvas.winfo_height() // 2
+        center_x = width // 2
+        center_y = height // 2
+
+        # The core is deliberately large: it should read as the system's
+        # visual identity, not as one small node inside the HUD.
+        avatar_size = int(max(180, min(290, min(width, height) * 0.48)))
+        if avatar_size > min(width - 120, height - 140):
+            avatar_size = int(min(width - 120, height - 140))
+        avatar_size = max(150, avatar_size)
 
         if avatar_image and ImageDraw and ImageTk:
-            if getattr(self, "_avatar_size_cached", 0) != avatar_size or not getattr(self, "_avatar_photo", None):
-                avatar = self._create_circular_avatar(avatar_image, avatar_size)
-                if avatar is not None:
-                    self._avatar_photo = ImageTk.PhotoImage(avatar)
-                    self._avatar_size_cached = avatar_size
-            # Draw or update image on the ring canvas at fixed center coords
-            if self._avatar_canvas_id is not None:
-                try:
+            try:
+                if getattr(self, "_avatar_size_cached", 0) != avatar_size or not getattr(self, "_avatar_photo", None):
+                    avatar = self._create_circular_avatar(avatar_image, avatar_size)
+                    if avatar is not None:
+                        self._avatar_photo = ImageTk.PhotoImage(avatar)
+                        self._avatar_size_cached = avatar_size
+                existing_avatar = False
+                if self._avatar_canvas_id is not None:
+                    try:
+                        existing_avatar = self._avatar_canvas_id in self.ring_canvas.find_all()
+                    except Exception:
+                        existing_avatar = False
+                if existing_avatar:
                     self.ring_canvas.coords(self._avatar_canvas_id, center_x, center_y)
                     self.ring_canvas.itemconfigure(self._avatar_canvas_id, image=self._avatar_photo)
-                except Exception:
-                    # recreate if something went wrong with the canvas item
-                    self._avatar_canvas_id = self.ring_canvas.create_image(center_x, center_y, image=self._avatar_photo, anchor="center")
-            else:
-                self._avatar_canvas_id = self.ring_canvas.create_image(center_x, center_y, image=self._avatar_photo, anchor="center")
-            # Ensure avatar is exactly on top and positioned using integer center coords
-            try:
+                else:
+                    self._avatar_canvas_id = self.ring_canvas.create_image(
+                        center_x, center_y, image=self._avatar_photo, anchor="center", tags=("hud_avatar",)
+                    )
                 self.ring_canvas.coords(self._avatar_canvas_id, int(center_x), int(center_y))
                 self.ring_canvas.tag_raise(self._avatar_canvas_id)
+                if self._avatar_text_id is not None:
+                    self.ring_canvas.delete(self._avatar_text_id)
+                    self._avatar_text_id = None
+                return
             except Exception:
                 pass
-            # remove any fallback text
-            if self._avatar_text_id is not None:
-                try:
-                    self.ring_canvas.delete(self._avatar_text_id)
-                except Exception:
-                    pass
-                self._avatar_text_id = None
-        else:
-            # No image available — draw centered text as fallback on the canvas
-            text = "ANGELIQUE"
-            font_size = max(18, min(32, int(min(width, height) / 18)))
-            if self._avatar_text_id is not None:
-                self.ring_canvas.coords(self._avatar_text_id, center_x, center_y)
-                self.ring_canvas.itemconfigure(self._avatar_text_id, text=text, fill=self._theme("accent"))
-            else:
-                self._avatar_text_id = self.ring_canvas.create_text(center_x, center_y, text=text, fill=self._theme("accent"), font=("Consolas", font_size, "bold"))
-        # old Label-based fallback removed; canvas text is used instead when no image is available
 
+        text = "ANGELIQUE"
+        font_size = max(22, min(42, int(min(width, height) / 15)))
+        if self._avatar_text_id is not None:
+            self.ring_canvas.coords(self._avatar_text_id, center_x, center_y)
+            self.ring_canvas.itemconfigure(self._avatar_text_id, text=text, fill=self._theme("accent"))
+        else:
+            self._avatar_text_id = self.ring_canvas.create_text(
+                center_x, center_y, text=text, fill=self._theme("accent"),
+                font=("Consolas", font_size, "bold")
+            )
     def _build_right_panel(self):
         title = tk.Label(
             self.right_panel,
@@ -3313,130 +3475,203 @@ class AngeliqueDesktopApp(tk.Tk):
         self.bind_all("<Control-m>", lambda e: self._toggle_audio_mode())
 
     def _draw_ring_hud(self):
-        # Only remove ring-related items so the avatar image (and other overlays)
-        # are preserved during resizes/maximize. Using a specific tag prevents
-        # deleting canvas items like the avatar which were previously lost.
+        """Render a large JARVIS-inspired (but original) Angelique system HUD.
+
+        The design uses the restored Angelique portrait as the dominant centre,
+        with nested animated rings, radial ticks, orbit nodes and live telemetry
+        ribbons.  No four-corner card matrix is used.
+        """
+        if self.ring_canvas is None:
+            return
         try:
-            self.ring_canvas.delete('ring')
-        except Exception:
-            # Fallback to clearing all if delete by tag isn't supported for some reason
-            try:
-                self.ring_canvas.delete("all")
-            except Exception:
-                pass
-        try:
+            self.ring_canvas.delete("all")
             self.ring_canvas.update_idletasks()
         except Exception:
-            pass
-        width = self.ring_canvas.winfo_width() or 520
-        height = self.ring_canvas.winfo_height() or 520
-        size = min(width, height)
-        center_x = width // 2
-        center_y = height // 2
-        radius = max(100, int(size * 0.34))
-        # reset ring-specific state
-        self._glow_items = []
-        self._scanner_item: int | None = None
-        self._scanner_dot: int | None = None
-        self._ring_particles = []
+            return
+
+        width = self.ring_canvas.winfo_width() or 760
+        height = self.ring_canvas.winfo_height() or 570
+        bg = self._theme("panel")
+        text = self._theme("text")
+        accent = self._theme("accent")
+        border = self._theme("border")
+        alt = self._theme("panel_alt")
+
+        self._ring_state = {"width": width, "height": height}
+        self._ring_focus = None
+        self._ring_particle_ids = []
+        self._ring_node_ids = []
+        self._ring_node_meta = {}
         self._ring_arc_ids = []
         self._ring_arc_config = []
 
-        theme = self._themes.get(self._theme_name, self._themes["blue"])
-        ring_offsets = [int(size * 0.08), int(size * 0.05), 0, -int(size * 0.08), -int(size * 0.12)]
-        ring_lines = [1, 2, 2, 2, 1]
-        ring_colors = [theme["border"], theme["border"], theme["accent"], theme["accent"], theme["border"]]
+        # Layered HUD backdrop with perspective-style sweep lines.
+        self.ring_canvas.create_rectangle(0, 0, width, height, fill=bg, outline="", tags=("hud",))
+        self.ring_canvas.create_rectangle(10, 10, width - 10, height - 10, outline=border, width=1, tags=("hud",))
+        self.ring_canvas.create_line(22, 54, width - 22, 54, fill=border, dash=(2, 8), tags=("hud",))
+        self.ring_canvas.create_text(24, 28, anchor="w", text="ANGELIQUE • SYNTHESIS CORE", fill=accent,
+                                     font=("Consolas", 12, "bold"), tags=("hud",))
+        self.ring_canvas.create_text(width - 24, 28, anchor="e", text="SYSTEM-WIDE / ONLINE", fill=text,
+                                     font=("Consolas", 7, "bold"), tags=("hud",))
 
-        for offset, width_line, color in zip(ring_offsets, ring_lines, ring_colors):
-            ring = radius + offset
-            self.ring_canvas.create_oval(
-                center_x - ring,
-                center_y - ring,
-                center_x + ring,
-                center_y + ring,
-                outline=color,
-                width=width_line,
-                tags=("ring",),
-            )
+        cx, cy = width / 2.0, height / 2.0 + 4
+        base_r = max(92, min(148, int(min(width, height) * 0.245)))
+        self._ring_state.update({"cx": cx, "cy": cy, "base_r": base_r})
 
-        for idx, angle in enumerate(range(0, 360, 24)):
-            radians = math.radians(angle)
-            x = center_x + (radius + int(size * 0.03)) * math.cos(radians)
-            y = center_y + (radius + int(size * 0.03)) * math.sin(radians)
-            dot = self.ring_canvas.create_oval(
-                x - max(3, int(size * 0.01)),
-                y - max(3, int(size * 0.01)),
-                x + max(3, int(size * 0.01)),
-                y + max(3, int(size * 0.01)),
-                fill=self._theme("accent"),
-                outline="",
-                tags=("ring",),
-            )
-            self._glow_items.append(dot)
+        # Decorative elliptical rings and angular brackets make the centre
+        # read as an active interface instead of a static image.
+        for radius, dash, w in (
+            (base_r + 9, None, 2), (base_r + 24, (3, 6), 1),
+            (base_r + 42, (1, 9), 1), (base_r + 63, (6, 11), 1)
+        ):
+            item = self.ring_canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
+                                                 outline=accent if radius in {base_r + 9, base_r + 42} else border,
+                                                 width=w, dash=dash, tags=("hud_ring",))
+            self._ring_arc_ids.append(item)
 
-        for config_idx, (start, extent, radius_offset, stroke) in enumerate([
-            (30, 90, 15, 2),
-            (140, 85, 30, 2),
-            (250, 110, 42, 2),
-        ]):
-            arc_id = self.ring_canvas.create_arc(
-                center_x - (radius + radius_offset),
-                center_y - (radius + radius_offset),
-                center_x + (radius + radius_offset),
-                center_y + (radius + radius_offset),
-                start=start,
-                extent=extent,
-                style="arc",
-                outline=self._theme("accent"),
-                width=stroke,
-                tags=("ring",),
-            )
-            self._ring_arc_ids.append(arc_id)
-            self._ring_arc_config.append((start, extent, radius_offset, stroke, config_idx * 1.7 + 0.6))
+        # Dense radial ticks.
+        for i in range(72):
+            ang = 2 * math.pi * i / 72.0
+            r1 = base_r + 67
+            r2 = r1 + (9 if i % 6 == 0 else 4)
+            x1, y1 = cx + math.cos(ang) * r1, cy + math.sin(ang) * r1
+            x2, y2 = cx + math.cos(ang) * r2, cy + math.sin(ang) * r2
+            self.ring_canvas.create_line(x1, y1, x2, y2,
+                                         fill=accent if i % 9 == 0 else border,
+                                         width=1, tags=("hud_ring",))
 
+        # Rotating segmented arcs.
+        arc_configs = [
+            (base_r + 20, 18, 78, 1),
+            (base_r + 34, 136, 62, -1),
+            (base_r + 52, 252, 84, 1),
+            (base_r + 67, 312, 34, -1),
+        ]
+        for radius, start_angle, extent, direction in arc_configs:
+            item = self.ring_canvas.create_arc(cx - radius, cy - radius, cx + radius, cy + radius,
+                                               start=start_angle, extent=extent, style="arc",
+                                               outline=accent, width=2, tags=("hud_arc",))
+            self._ring_arc_config.append({"id": item, "start": start_angle, "extent": extent,
+                                          "direction": direction, "radius": radius})
+
+        # Scanner beam.
         self._scanner_item = self.ring_canvas.create_line(
-            center_x,
-            center_y,
-            center_x + radius,
-            center_y,
-            fill=self._theme("accent"),
-            width=max(2, int(size * 0.007)),
-            capstyle="round",
-            tags=("ring",),
+            cx, cy, cx + base_r + 75, cy, fill=accent, width=1, tags=("hud_scan",)
         )
-        self._scanner_dot = None
+        self._scanner_dot = self.ring_canvas.create_oval(
+            cx + base_r + 69, cy - 4, cx + base_r + 77, cy + 4,
+            fill=accent, outline="", tags=("hud_scan",)
+        )
 
-        self.ring_canvas.create_text(
-            center_x,
-            center_y - int(size * 0.18),
-            text="ANGELIQUE",
-            fill=self._theme("accent"),
-            font=("Consolas", max(14, int(size * 0.035)), "bold"),
-            tags=("ring",),
-        )
-        self.ring_canvas.create_text(
-            center_x,
-            center_y + int(size * 0.18),
-            text="SYNTHESIS CORE",
-            fill=self._theme("accent"),
-            font=("Consolas", max(8, int(size * 0.022))),
-            tags=("ring",),
-        )
-        # Reposition avatar after drawing ring elements to guarantee exact center.
-        # The avatar is intentionally not part of the 'ring' tag so it survives
-        # canvas redraws and stays on top.
-        avatar_canvas_id = getattr(self, "_avatar_canvas_id", None)
-        if avatar_canvas_id is not None:
-            try:
-                self.ring_canvas.coords(avatar_canvas_id, center_x, center_y)
-                self.ring_canvas.tag_raise(avatar_canvas_id)
-            except Exception:
-                pass
-        # Ensure avatar exists on the canvas after drawing the ring; recreate if missing
+        # Core aura: multiple transparent-ish outlines pulsed by animation.
+        self._glow_items = []
+        for scale in (0.94, 0.80, 0.66, 0.54):
+            radius = base_r * scale
+            self._glow_items.append(self.ring_canvas.create_oval(
+                cx - radius, cy - radius, cx + radius, cy + radius,
+                outline=accent, width=1, dash=(2, 5) if scale < 0.9 else None,
+                tags=("hud_core",)
+            ))
+
+        self.ring_canvas.create_text(cx, cy - base_r - 34, text="ANGELIQUE", fill=accent,
+                                     font=("Consolas", 14, "bold"), tags=("hud",))
+        self.ring_canvas.create_text(cx, cy + base_r + 30, text="SENSE • REMEMBER • REASON • RESPOND",
+                                     fill=text, font=("Consolas", 7, "bold"), tags=("hud",))
+
+        # Floating subsystem nodes, deliberately outside the rings.
+        node_specs = [
+            ("VISION", -148, "Vision Matrix", lambda: self._set_ring_focus("Vision Matrix", "Visual analysis layer active.")),
+            ("MEMORY", -32, "Memory Vault", lambda: self._set_ring_focus("Memory Vault", "Memory and context layer active.")),
+            ("TRADING", 28, "Trading Bridge", self._enter_trading_view),
+            ("VOICE", 148, "Voice Layer", self._toggle_audio_mode),
+            ("SYSTEM", 212, "System Diagnostics", self._show_system_diagnostics),
+            ("NETWORK", 328, "Network Status", lambda: self._set_ring_focus("Network", "Network and connectivity layer active.")),
+        ]
+        orbit_r = base_r + 103
+        for label, angle_deg, detail, callback in node_specs:
+            angle = math.radians(angle_deg)
+            nx, ny = cx + math.cos(angle) * orbit_r, cy + math.sin(angle) * orbit_r
+            inner_r = base_r + 64
+            ix, iy = cx + math.cos(angle) * inner_r, cy + math.sin(angle) * inner_r
+            self.ring_canvas.create_line(ix, iy, nx, ny, fill=border, width=1, dash=(2, 6), tags=("hud_nodes",))
+            node = self.ring_canvas.create_oval(nx - 16, ny - 16, nx + 16, ny + 16,
+                                                fill=alt, outline=accent, width=1, tags=("hud_node",))
+            self.ring_canvas.create_oval(nx - 6, ny - 6, nx + 6, ny + 6,
+                                         outline=border, width=1, tags=("hud_node_detail",))
+            text_id = self.ring_canvas.create_text(nx, ny + 26, text=label, fill=text,
+                                                   font=("Consolas", 7, "bold"), tags=("hud_node_text",))
+            self._ring_node_ids.extend([node, text_id])
+            self._ring_node_meta[node] = {"label": label, "detail": detail, "callback": callback,
+                                          "text_id": text_id, "x": nx, "y": ny}
+            for target in (node, text_id):
+                self.ring_canvas.tag_bind(target, "<Enter>", lambda e, item=node: self._ring_node_hover(item, True))
+                self.ring_canvas.tag_bind(target, "<Leave>", lambda e, item=node: self._ring_node_hover(item, False))
+                self.ring_canvas.tag_bind(target, "<Button-1>", lambda e, item=node: self._ring_node_click(item))
+
+        # Fine particle field to add depth and continuous motion.
+        self._ring_particles = []
+        for i in range(44):
+            angle = 2 * math.pi * i / 44.0
+            radius = orbit_r + 4 + (i % 8) * 7
+            pid = self.ring_canvas.create_oval(0, 0, 0, 0, fill=accent, outline="", tags=("hud_particle",))
+            self._ring_particle_ids.append(pid)
+            self._ring_particles.append({"id": pid, "angle": angle,
+                                          "radius": radius, "speed": 0.0035 + (i % 5) * 0.0012,
+                                          "size": 1 + (i % 3)})
+
+        # Compact live telemetry ribbons instead of the old corner cards.
+        def ribbon(x, y, w, label, value):
+            self.ring_canvas.create_line(x, y, x + w, y, fill=border, tags=("hud_ribbon",))
+            self.ring_canvas.create_text(x, y + 13, anchor="w", text=label, fill=text,
+                                         font=("Consolas", 6), tags=("hud_ribbon",))
+            self.ring_canvas.create_text(x + w, y + 13, anchor="e", text=value, fill=accent,
+                                         font=("Consolas", 7, "bold"), tags=("hud_ribbon",))
+
+        cpu = self._system_stats.get("cpu", 0)
+        mem = self._system_stats.get("memory", 0)
+        net = self._system_stats.get("network_mbps", 0)
+        status = self._system_stats.get("status", "READY")
+        ribbon(28, height - 78, width * 0.22, "CPU", f"{cpu}%")
+        ribbon(width * 0.38, height - 78, width * 0.22, "MEMORY", f"{mem}%")
+        ribbon(width * 0.68, height - 78, width * 0.22, "NET", f"{net:.1f} Mbps")
+        self.ring_canvas.create_text(width - 24, height - 32, anchor="e", text=f"STATUS • {status}",
+                                     fill=accent, font=("Consolas", 8, "bold"), tags=("hud",))
+
+        self._update_avatar()
+        if self._avatar_canvas_id is not None:
+            self.ring_canvas.tag_raise(self._avatar_canvas_id)
+        self._set_ring_focus("System Core", "Select a subsystem node to interact with Angelique.", log=False)
+    def _set_ring_focus(self, title: str, detail: str = "", *, log: bool = True):
+        self._ring_focus = title
+        if self.center_status_label is not None and getattr(self, "_active_center_view", "home") == "home":
+            self.center_status_label.configure(text=f"FOCUS: {title.upper()}" if not detail else f"FOCUS: {title.upper()} • {detail}")
+        if log:
+            self._append_console("CORE", f"Focus changed to {title}. {detail}".strip())
+
+    def _ring_node_hover(self, item_id: int, active: bool):
+        meta = self._ring_node_meta.get(item_id)
+        if not meta or self.ring_canvas is None:
+            return
         try:
-            self._update_avatar()
+            self.ring_canvas.itemconfigure(item_id, outline=self._theme("accent") if active else self._theme("border"), width=2 if active else 1)
+            self.ring_canvas.itemconfigure(meta["text_id"], fill=self._theme("accent") if active else self._theme("text"))
+            if active:
+                self._set_ring_focus(meta["detail"], "Interactive subsystem node", log=False)
         except Exception:
             pass
+
+    def _ring_node_click(self, item_id: int):
+        meta = self._ring_node_meta.get(item_id)
+        if not meta:
+            return "break"
+        self._set_ring_focus(meta["detail"])
+        callback = meta.get("callback")
+        if callable(callback):
+            try:
+                callback()
+            except Exception as exc:
+                self._append_console("CORE", f"Subsystem action failed: {exc}")
+        return "break"
 
     def _set_avatar_status(self, mode: str | None, text: str | None = None):
         if self._avatar_status_blink_job is not None:
@@ -3490,65 +3725,45 @@ class AngeliqueDesktopApp(tk.Tk):
         self._avatar_status_blink_job = self.after(400, self._animate_avatar_status)
 
     def _animate_ring(self):
-        self._ring_animation_job = None
-        self._animation_phase += 0.16
-        self._scanner_angle = (self._scanner_angle + 3) % 360
-
-        if self._glow_items:
-            for idx, item in enumerate(self._glow_items):
-                self.ring_canvas.itemconfigure(item, fill=self._theme("accent"))
-
+        """Animate the home HUD without rebuilding its canvas."""
+        if getattr(self, "_shutting_down", False):
+            self._ring_animation_job = None
+            return
         try:
-            self.ring_canvas.update_idletasks()
+            if getattr(self, "_active_center_view", None) == "home" and self.ring_canvas is not None and self._ring_state:
+                self._animation_phase = (self._animation_phase + 0.04) % (2 * math.pi)
+                self._scanner_angle = (self._scanner_angle + 2.0) % 360
+                state = self._ring_state
+                cx, cy, base_r = state["cx"], state["cy"], state["base_r"]
+
+                for cfg in self._ring_arc_config:
+                    cfg["start"] = (cfg["start"] + cfg["direction"] * 1.15) % 360
+                    self.ring_canvas.itemconfigure(cfg["id"], start=cfg["start"])
+
+                ang = math.radians(self._scanner_angle)
+                sx = cx + math.cos(ang) * (base_r + 75)
+                sy = cy + math.sin(ang) * (base_r + 75)
+                self.ring_canvas.coords(self._scanner_item, cx, cy, sx, sy)
+                self.ring_canvas.coords(self._scanner_dot, sx - 4, sy - 4, sx + 4, sy + 4)
+
+                pulse = (math.sin(self._animation_phase) + 1.0) * 0.5
+                for idx, item in enumerate(self._glow_items):
+                    factor = 0.95 + idx * 0.03 + pulse * 0.025
+                    radius = base_r * factor
+                    self.ring_canvas.coords(item, cx - radius, cy - radius, cx + radius, cy + radius)
+                    self.ring_canvas.itemconfigure(item, width=1 if pulse < 0.58 else 2)
+
+                for particle in self._ring_particles:
+                    particle["angle"] = (particle["angle"] + particle["speed"]) % (2 * math.pi)
+                    r = particle["radius"] + math.sin(self._animation_phase + particle["angle"] * 2) * 1.5
+                    x = cx + math.cos(particle["angle"]) * r
+                    y = cy + math.sin(particle["angle"]) * r
+                    size = particle["size"]
+                    self.ring_canvas.coords(particle["id"], x - size, y - size, x + size, y + size)
+                    self.ring_canvas.itemconfigure(particle["id"], state="normal" if pulse > 0.15 else "hidden")
         except Exception:
             pass
-        width = self.ring_canvas.winfo_width() or 520
-        height = self.ring_canvas.winfo_height() or 520
-        size = min(width, height)
-        center_x = width // 2
-        center_y = height // 2
-        radius = max(100, int(size * 0.34))
-
-        radians = math.radians(self._scanner_angle)
-        x = center_x + radius * math.cos(radians)
-        y = center_y + radius * math.sin(radians)
-        if self._scanner_item is not None:
-            self.ring_canvas.coords(self._scanner_item, center_x, center_y, x, y)
-
-        scanner_dot_id = getattr(self, "_scanner_dot", None)
-        if scanner_dot_id is not None:
-            self.ring_canvas.delete(scanner_dot_id)
-            self._scanner_dot = None
-
-        for particle, phase_offset, orbit_radius, base_angle, radius_delta in self._ring_particles:
-            orbit_radians = base_angle + self._animation_phase * 0.9 + phase_offset
-            px = center_x + (orbit_radius * 0.9 + math.sin(self._animation_phase + phase_offset) * 22) * math.cos(orbit_radians)
-            py = center_y + (orbit_radius * 0.9 + math.sin(self._animation_phase + phase_offset) * 22) * math.sin(orbit_radians)
-            self.ring_canvas.coords(particle, px - radius_delta, py - radius_delta, px + radius_delta, py + radius_delta)
-
-        for idx, arc_id in enumerate(self._ring_arc_ids):
-            start, extent, radius_offset, stroke, speed = self._ring_arc_config[idx]
-            new_start = (start + self._animation_phase * 18 * speed) % 360
-            new_extent = extent + int(12 * math.sin(self._animation_phase * 1.3 + idx))
-            self.ring_canvas.itemconfigure(arc_id, start=new_start, extent=new_extent)
-
-        avatar_canvas_id = getattr(self, "_avatar_canvas_id", None)
-        if avatar_canvas_id is not None:
-            try:
-                self.ring_canvas.tag_raise(avatar_canvas_id)
-                self.ring_canvas.coords(avatar_canvas_id, int(center_x), int(center_y))
-            except Exception:
-                pass
-
-        if self._avatar_status_text_id is not None:
-            try:
-                self.ring_canvas.coords(self._avatar_status_text_id, int(center_x), int(center_y + size * 0.28))
-                self.ring_canvas.tag_raise(self._avatar_status_text_id)
-            except Exception:
-                pass
-
-        self._ring_animation_job = self.after(40, self._animate_ring)
-
+        self._ring_animation_job = self.after(50, self._animate_ring)
     def _build_mission_ticker(self):
         ticker_frame = tk.Frame(self.right_panel, bg=self._theme("panel_alt"), bd=1, relief="solid")
         ticker_frame.pack(fill="x", padx=20, pady=(0, 18))

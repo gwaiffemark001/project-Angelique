@@ -16,6 +16,7 @@ class TradingRefreshResult:
     instruments: Any = None
     health: dict[str, Any] | None = None
     positions: dict[str, Any] | None = None
+    analysis: dict[str, Any] | None = None
 
 
 class TradingHubController:
@@ -86,12 +87,17 @@ class TradingHubController:
                 else:
                     from skills.trading_skill.profiles import get_trading_profile
                     profile = get_trading_profile(self.trading_mode)
-                    required = profile.analysis_required_timeframes
-                    count = max(profile.candle_count(tf) for tf in required)
+                    required = list(profile.analysis_required_timeframes)
+                    selected_tf = str(timeframe or config.DEFAULT_TRADING_TIMEFRAME).upper()
+                    # The chart timeframe is a first-class request. Analysis still
+                    # receives the profile-required set, while the selected chart
+                    # timeframe is added when it is outside that set.
+                    request_timeframes = list(dict.fromkeys([*required, selected_tf]))
+                    count = max(profile.candle_count(tf) for tf in request_timeframes)
                     market_data = bridge.request("market", {
                         "symbol": resolved,
                         "account_mode": account_mode,
-                        "timeframes": list(required),
+                        "timeframes": request_timeframes,
                         "count": count,
                     })
             except Exception as exc:
@@ -114,18 +120,52 @@ class TradingHubController:
                 positions = {"status": "error", "error": str(exc), "positions": []}
 
         candles = market_data.get("timeframes", {}) if isinstance(market_data, dict) else {}
-        fresh = bool(candles) and not bool(market_data.get("stale")) and not bool(market_data.get("error"))
-        quotes = float(market_data.get("bid") or 0) > 0 and float(market_data.get("ask") or 0) > 0
+        analysis = None
+        if candles:
+            try:
+                from skills.trading_skill.analysis import analyze_structure
+                from skills.trading_skill.profiles import get_trading_profile
+                profile = get_trading_profile(self.trading_mode)
+                # UI diagnostics never authorize execution; the workflow remains
+                # the only execution gate.
+                analysis = analyze_structure(candles, profile=profile)
+            except Exception as exc:
+                analysis = {"valid": False, "decision": "BLOCKED", "reason": str(exc)}
+        from skills.trading_skill.profiles import get_trading_profile
+        from skills.trading_skill.data_quality import assess_candles
+        required_profile = get_trading_profile(self.trading_mode)
+        quality = {}
+        for tf in required_profile.analysis_required_timeframes:
+            quality[tf] = assess_candles(
+                candles.get(tf, []),
+                tf,
+                minimum_candles=required_profile.minimum_analysis_candles(tf),
+            )
+        quality_states = {item.get("status") for item in quality.values()} if quality else {"missing"}
+        quote_ok = float(market_data.get("bid") or 0) > 0 and float(market_data.get("ask") or 0) > 0
+        base_market_ok = bool(candles) and not bool(market_data.get("error")) and quote_ok
+        if "stale" in quality_states:
+            market_quality_state = "STALE"
+        elif "insufficient" in quality_states:
+            market_quality_state = "INSUFFICIENT_HISTORY"
+        elif quality_states - {"fresh"}:
+            market_quality_state = "UNAVAILABLE"
+        elif base_market_ok:
+            market_quality_state = "LIVE"
+        else:
+            market_quality_state = "UNAVAILABLE"
+        fresh = market_quality_state == "LIVE"
         health = {
             "mt5": "CONNECTED" if account["mode_match"] else "MODE_MISMATCH" if snapshot.connected else "DISCONNECTED",
             "bridge": "CONNECTED" if account["mode_match"] else "BLOCKED",
             "account": "CONNECTED" if account["mode_match"] else "MODE_MISMATCH" if snapshot.connected else "DISCONNECTED",
             "broker": snapshot.broker or "UNKNOWN",
-            "market_data": "LIVE" if fresh and quotes else "STALE/UNAVAILABLE",
+            "market_data": market_quality_state,
+            "data_quality": quality,
             "symbol": "RESOLVED" if not market_data.get("error") else "UNRESOLVED",
             "last_tick": market_data.get("last_tick") or market_data.get("timestamp") or "unknown",
             "monitor": "RUNNING",
-            "trading_enabled": bool(account["mode_match"] and fresh and quotes),
+            "trading_enabled": bool(account["mode_match"] and fresh),
         }
 
         return TradingRefreshResult(
@@ -138,6 +178,7 @@ class TradingHubController:
             instruments=instruments,
             health=health,
             positions=positions,
+            analysis=analysis,
         )
 
     def monitor_opportunities(self, account_mode: str, allowed_symbols: list[str] | None = None) -> dict:

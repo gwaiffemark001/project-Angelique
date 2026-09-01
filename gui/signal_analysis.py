@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from skills.trading_skill.profiles import get_trading_profile
+from skills.trading_skill.profiles import get_trading_profile, max_spread_policy
 from skills.trading_skill.service import auto_execution_enabled, prepare_trade
+from skills.trading_skill.news import get_forex_news, get_market_calendar
 
 
 def _required_timeframes(profile: Any) -> tuple[str, ...]:
@@ -35,20 +36,13 @@ def signal_ui_contract(report: dict[str, Any]) -> dict[str, Any]:
         "score": confluence.get("score"),
         "minimum_score": confluence.get("minimum_score", 0),
         "score_passed": confluence.get("score_passed"),
-        # Explicit naming so no consumer can mistake this for a win probability.
-        "strategy_quality_score": report.get("strategy_quality_score", confluence.get("score")),
-        "minimum_quality_score": report.get("minimum_quality_score",
-                                            confluence.get("minimum_score", 0)),
-        "score_meaning": report.get(
-            "strategy_quality_score_meaning",
-            "Setup completeness for the selected strategy (0-100). NOT a win probability.",
-        ),
-        "failed_hard_requirements": confluence.get("failed_hard_requirements", []),
-        "authoritative": report.get("authoritative", {}),
         "model": strategy.get("name") or assessment.get("model"),
         "spread_pips": report.get("spread_pips"),
         "spread_points": report.get("spread_points"),
         "spread_unit": report.get("spread_unit"),
+        "instrument_class": report.get("instrument_class") or (report.get("symbol_specs") or {}).get("instrument_class"),
+        "maximum_spread_value": report.get("maximum_spread_value"),
+        "maximum_spread_unit": report.get("maximum_spread_unit"),
         "direction": plan.get("direction"),
         "entry": plan.get("entry"),
         "stop_loss": plan.get("stop_loss"),
@@ -79,6 +73,10 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
     analysis = details.get("analysis", {}) or {}
     account = _account_dict(result.account)
     market = _market_dict(result.market)
+    specs = dict(market.get("symbol_specs") or {})
+    specs.setdefault("bid", market.get("bid"))
+    specs.setdefault("ask", market.get("ask"))
+    policy = max_spread_policy(symbol, specs, trading_mode)
     plan = result.plan.as_dict() if result.plan else None
     decision_state = result.decision_state or result.state.value
     direction = plan.get("direction") if plan else analysis.get("direction") or "NONE"
@@ -89,6 +87,37 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
         execution_state = "MANUAL_APPROVAL_REQUIRED" if plan.get("requires_manual_approval") else (
             "AUTO_ENABLED" if auto_execution_enabled(account_mode) else "MANUAL_APPROVAL_REQUIRED"
         )
+
+    # News/calendar is an operator-information feed, so it is fetched even
+    # when the trade workflow is blocked by missing data or an incomplete setup.
+    # When the canonical workflow already assessed news, reuse that exact result.
+    news_context = analysis.get("news_context") if isinstance(analysis.get("news_context"), dict) else None
+    if news_context is None:
+        try:
+            raw_headlines = get_forex_news()
+            raw_calendar = get_market_calendar(symbol=symbol)
+            news_context = {
+                "status": "ready" if raw_headlines or raw_calendar else "unavailable",
+                "bias": "neutral",
+                "high_impact": any(str(item.get("impact", "")).lower() in {"high", "red", "3"} for item in (raw_calendar or [])),
+                "high_impact_imminent": False,
+                "directional_conflict": False,
+                "reason": "News/calendar feed retrieved for operator display.",
+                "headlines": [x for x in (raw_headlines or []) if x.get("freshness") != "unavailable"][:8],
+                "calendar_events": [x for x in (raw_calendar or []) if x.get("freshness") != "unavailable"][:20],
+                "calendar": [x for x in (raw_calendar or []) if str(x.get("impact", "")).lower() in {"high", "red", "3"}][:8],
+                "data_quality": {
+                    "headlines": "available" if raw_headlines and not all(x.get("freshness") == "unavailable" for x in raw_headlines) else "unavailable",
+                    "calendar": "available" if raw_calendar and not all(x.get("freshness") == "unavailable" for x in raw_calendar) else "unavailable",
+                },
+            }
+        except Exception as exc:
+            news_context = {
+                "status": "unavailable", "bias": "neutral", "high_impact": False,
+                "high_impact_imminent": False, "directional_conflict": False,
+                "reason": f"News/calendar unavailable: {exc}", "headlines": [], "calendar": [], "calendar_events": [],
+                "data_quality": {"headlines": "unavailable", "calendar": "unavailable"},
+            }
 
     # Build explicit evidence rows from the canonical analysis. These values are
     # the same ones the workflow used to make its decision.
@@ -106,9 +135,6 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
         "setup_missing": setup_assessment.get("missing", []),
         "setup_reason": setup_assessment.get("reason"),
         "confluence": confluence,
-        "hard_requirements": confluence.get("hard_requirements", []),
-        "failed_hard_requirements": confluence.get("failed_hard_requirements", []),
-        "evidence_families": confluence.get("evidence_families", {}),
         "indicator_reasons": analysis.get("indicator_reasons", []),
         "smc_reasons": analysis.get("smc_reasons", []),
         "session_context": analysis.get("session_context", {}),
@@ -137,28 +163,9 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
         "trends": analysis.get("trends", {}),
         "smc": smc,
         "structure": analysis,
+        "news_context": news_context,
         "setup_evidence": evidence,
         "confluence": confluence,
-        # The single authoritative decision object. Every displayed value must
-        # be read from here rather than recomputed, so the UI can never show a
-        # number that differs from the one the execution decision used.
-        "authoritative": ((plan or {}).get("analysis_audit") or {}).get("authoritative")
-        or {
-            "strategy": analysis.get("strategy_name"),
-            "strategy_quality_score": analysis.get("strategy_quality_score"),
-            "minimum_quality_score": analysis.get("minimum_quality_score"),
-            "score_meaning": analysis.get("strategy_quality_score_meaning"),
-            "strategy_evaluation": (strategy_selected.get("metadata") or {}).get("evaluation"),
-            "data_quality": analysis.get("data_quality", {}),
-        },
-        "strategy_quality_score": analysis.get("strategy_quality_score",
-                                               confluence.get("score")),
-        "minimum_quality_score": analysis.get("minimum_quality_score",
-                                              confluence.get("minimum_score")),
-        "strategy_quality_score_meaning": analysis.get(
-            "strategy_quality_score_meaning",
-            "Setup completeness for the selected strategy (0-100). NOT a win probability.",
-        ),
         "reasons": analysis.get("reasons", []),
         "market_errors": analysis.get("market_errors", {}),
         "latest": market,
@@ -167,6 +174,9 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
         "spread_pips": market.get("spread_pips"),
         "spread_points": market.get("spread_points"),
         "spread_unit": market.get("spread_unit"),
+        "instrument_class": market.get("instrument_class") or policy.get("instrument_class"),
+        "maximum_spread_value": market.get("maximum_spread_value", policy.get("max_value")),
+        "maximum_spread_unit": market.get("maximum_spread_unit", policy.get("max_unit")),
         "advisory_plan": plan or {
             "status": "WAITING" if decision_state == "WAIT" else "NOT_EXECUTABLE",
             "direction": direction if direction in {"BUY", "SELL"} else "NONE",

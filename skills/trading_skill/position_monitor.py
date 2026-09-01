@@ -10,32 +10,6 @@ from .profiles import get_trading_profile
 from core import config
 
 
-#: Per-strategy management policy.
-#:
-#: These thresholds are POLICY, not statistically validated parameters. They
-#: encode the intent of each strategy: a mean-reversion trade must be allowed to
-#: reach its mean, a breakout must survive its retest, and a trend trade should
-#: be given room to run.
-STRATEGY_MANAGEMENT: dict[str, dict[str, Any]] = {
-    "TREND_FOLLOWING": {"break_even_at_r": 1.5, "trail_at_r": 2.0,
-                        "trail_atr_multiple": 1.5, "target_is_terminal": False},
-    "MOMENTUM":        {"break_even_at_r": 1.0, "trail_at_r": 1.5,
-                        "trail_atr_multiple": 1.0, "target_is_terminal": False},
-    "BREAKOUT":        {"break_even_at_r": 1.0, "trail_at_r": 2.0,
-                        "trail_atr_multiple": 1.5, "target_is_terminal": True},
-    # Mean reversion targets the mean. Moving to break-even at +1R routinely
-    # scratches the trade a few candles before the mean is reached.
-    "MEAN_REVERSION":  {"break_even_at_r": None, "trail_at_r": None,
-                        "trail_atr_multiple": 0.5, "target_is_terminal": True},
-    "SMC":             {"break_even_at_r": 1.0, "trail_at_r": 2.0,
-                        "trail_atr_multiple": 1.0, "target_is_terminal": False},
-    "AMD":             {"break_even_at_r": 1.0, "trail_at_r": 2.0,
-                        "trail_atr_multiple": 1.0, "target_is_terminal": False},
-    "DEFAULT":         {"break_even_at_r": 1.0, "trail_at_r": 2.0,
-                        "trail_atr_multiple": 1.0, "target_is_terminal": False},
-}
-
-
 class PositionMonitor:
     def __init__(self, bridge_client: Any = None):
         self.bridge = bridge_client or WineBridgeClient()
@@ -65,20 +39,7 @@ class PositionMonitor:
         direction = str(position.get("direction", position.get("type", "BUY"))).upper()
         entry = float(position.get("entry", position.get("open_price", position.get("price_open", 0))) or 0)
         stop_loss = float(position.get("stop_loss", position.get("sl", 0)) or 0)
-        # A position is valued at the price that would CLOSE it: a BUY closes
-        # at Bid, a SELL closes at Ask. Using the mid overstates every long's
-        # R-multiple by half the spread and can trigger break-even or trailing
-        # a fraction of a pip before the move has actually happened.
-        is_long = direction in {"BUY", "LONG", "0"}
-        bid = float(market.get("bid") or 0) or None
-        ask = float(market.get("ask") or 0) or None
-        if is_long and bid:
-            current, price_side = bid, "bid"
-        elif not is_long and ask:
-            current, price_side = ask, "ask"
-        else:
-            current = float(market.get("price", position.get("current_price", entry)) or entry)
-            price_side = "mid_fallback"
+        current = float(market.get("price", position.get("current_price", entry)) or entry)
         distance = abs(entry - stop_loss)
         if distance <= 0:
             return {"ticket": position.get("ticket"), "valid": False, "action": "HOLD", "reason": "Missing structural stop distance."}
@@ -94,13 +55,6 @@ class PositionMonitor:
             "valid": True,
             "r_multiple": round(r_multiple, 4),
             "current_price": current,
-            "price_side": price_side,
-            "bid": bid,
-            "ask": ask,
-            "r_multiple_basis": (
-                f"Favourable move measured at {price_side.upper()} (the price that closes a "
-                f"{'BUY' if is_long else 'SELL'}), divided by the original stop distance."
-            ),
             "floating_profit": position.get("profit", position.get("floating_profit")),
             "swap": position.get("swap"),
             "spread_pips": market.get("spread_pips"),
@@ -158,46 +112,23 @@ class PositionMonitor:
                 reason=market.get("invalidation_reason") or "Market structure has shifted against this position; closing to protect capital.",
             )
             return result
-        # ------------------------------------------------------------------
-        # Strategy-specific management. A mean-reversion trade targeting the
-        # mean and a trend-following trade riding an impulse should not be
-        # managed with the same +1R / +2R rule -- a fixed break-even at +1R
-        # stops a mean-reversion trade out just before it completes.
-        # These are POLICY defaults and are configurable per strategy.
-        # ------------------------------------------------------------------
-        strategy = str(position.get("strategy") or market.get("strategy") or "SMC").upper()
-        policy = STRATEGY_MANAGEMENT.get(strategy, STRATEGY_MANAGEMENT["DEFAULT"])
-        result["strategy"] = strategy
-        result["management_policy"] = dict(policy)
-
-        atr_value = float(market.get("atr", 0) or 0)
-        structure_level = market.get("structure_stop")
-        trail_at = policy["trail_at_r"]
-        break_even_at = policy["break_even_at_r"]
-
-        if policy["target_is_terminal"] and market.get("target_reached"):
-            result.update(action="EXIT",
-                          reason=f"{strategy} target reached; this strategy exits at its target "
-                                 "rather than trailing beyond it.")
-            return result
-
-        if trail_at is not None and r_multiple >= trail_at:
+        if r_multiple >= 2.0:
+            atr_value = float(market.get("atr", 0) or 0)
+            structure_level = market.get("structure_stop")
             if structure_level is not None or atr_value > 0:
                 result.update(
                     action="TRAIL",
-                    reason=f"{strategy}: position reached +{r_multiple:.2f}R (trail threshold "
-                           f"+{trail_at}R); trail using structure and ATR.",
+                    reason="Position reached +2R; trail using structure and ATR.",
                     suggested_stop=structure_level if structure_level is not None else (
-                        current - atr_value * policy["trail_atr_multiple"]
-                        if is_long
-                        else current + atr_value * policy["trail_atr_multiple"]
+                        current - atr_value * profile.sl_atr_multiplier
+                        if direction in {"BUY", "LONG", "0"}
+                        else current + atr_value * profile.sl_atr_multiplier
                     ),
                 )
-        elif break_even_at is not None and r_multiple >= break_even_at:
+        elif r_multiple >= 1.0:
             result.update(
                 action="BREAK_EVEN",
-                reason=f"{strategy}: position reached +{r_multiple:.2f}R (break-even threshold "
-                       f"+{break_even_at}R); move the stop to entry.",
+                reason="Position reached +1R; move stop approximately to break-even.",
                 suggested_stop=entry,
             )
         return result

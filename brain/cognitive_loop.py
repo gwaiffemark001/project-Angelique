@@ -8,6 +8,7 @@ from core import audit
 from core.tool_registry import GLOBAL_TOOL_REGISTRY
 from core.pending_actions import add_pending, find_pending_for_session, confirm_and_remove, get_pending, PENDING_PLAN_SERVICE
 from core.execution_gateway import GATEWAY as EXEC_GATEWAY
+from core.local_ai_router import get_local_router
 import brain.llm_interface as llm_interface
 # Compatibility wrappers so tests can patch either `brain.cognitive_loop.query_llm`
 # or `brain.llm_interface.query_llm`. Using wrappers ensures runtime calls always
@@ -908,8 +909,6 @@ def resolve_user_query(user_input: str, session_id: str | None = None) -> dict:
 
     except Exception:
         pass
-    except Exception:
-        pass
 
     with _REQUEST_LOCK:
         # 1) Think: silently extract facts and persist them for non-action requests
@@ -1355,71 +1354,64 @@ def _extract_tool_decision(raw_response: str, user_input: str, session_id: str |
     clarification_messages.append({"role": "user", "content": clarification_prompt})
     clarified = query_llm(clarification_messages, temperature=0.0)
     refined = extract_json_from_text(clarified or "")
-
-    refined = extract_json_from_text(clarified or "")
     if isinstance(refined, dict) and refined:
         return refined, None
     return None, clarified or None
 
 
 def extract_facts_silently(user_input: str):
-    """Silently extracts facts, scoring their emotional importance and episodic context."""
+    """Extract explicit facts with the local Qwen parser, then persist them.
+
+    The legacy LLM parser remains a fallback for machines without Ollama.
+    """
     if _looks_like_general_query(user_input):
+        return
+    try:
+        routed = get_local_router().extract_facts(user_input)
+    except Exception as exc:
+        routed = None
+        print(f"[DEBUG] Local fact router unavailable: {exc}")
+    if routed is not None:
+        for item in routed.get("extracted_facts", []):
+            entity = str(item.get("entity", "")).strip() or "User"
+            key = str(item.get("category", "general")).strip().lower()
+            value = str(item.get("fact", "")).strip()
+            if not value:
+                continue
+            # Keep extraction deterministic. The category becomes a stable key
+            # while the full explicit statement is preserved as the value.
+            if key == "general":
+                key = "fact"
+            importance = 5
+            save_fact_to_db(entity, key, value, importance, "local_qwen_extraction")
         return
 
     extraction_prompt = (
         "You are a strict cognitive fact-extraction engine. Analyze the user's input below.\n"
         "Extract ALL facts about ANY person mentioned. Return ONLY a valid JSON list of objects.\n"
-        "If there are no new facts to extract (e.g., the user is just asking a question), return EXACTLY: []\n\n"
-        "STRICT RULES:\n"
-        "- Output ONLY a JSON list. No markdown, no explanations.\n"
-        "- Each object MUST have exactly five keys: 'person', 'key', 'value', 'importance', 'context'.\n"
-        "- 'person': If about the speaker ('I', 'my'), set to 'User'. Otherwise, use their exact name.\n"
-        "- 'key': A short, lowercase phrase (e.g., 'favorite dish', 'spouse name').\n"
-        "- 'value': The specific detail. NEVER use empty strings.\n"
-        "- 'importance': An integer from 1 to 10. \n"
-        "   * 1-3: Trivial (e.g., favorite color, what they ate for lunch).\n"
-        "   * 4-6: Normal (e.g., their job, their hobbies, a friend's name).\n"
-        "   * 7-9: Highly Important (e.g., their spouse's name, a major life event, a medical condition).\n"
-        "   * 10: Critical (e.g., life-threatening allergy, deep personal trauma, core life goal).\n"
-        "- 'context': A very brief (3-5 words) description of the situation (e.g., 'talking about weekend', 'discussing work').\n\n"
+        "If there are no new facts to extract, return EXACTLY: []\n\n"
+        "STRICT RULES: person, key, value, importance, context. Never invent facts.\n"
         f"User input: '{user_input}'"
     )
-    
     try:
         raw_content = query_llm([{"role": "user", "content": extraction_prompt}], temperature=0.0)
-        if raw_content is None:
-            print("⚠️ [DEBUG] Silent extraction skipped: LLM returned None")
+        if not raw_content:
             return
-            
         clean_content = raw_content.replace("```json", "").replace("```", "").strip()
-        list_match = re.search(r'\[.*\]', clean_content, re.DOTALL)
-        obj_match = re.search(r'\{.*\}', clean_content, re.DOTALL)
+        list_match = re.search(r"\[.*\]", clean_content, re.DOTALL)
+        obj_match = re.search(r"\{.*\}", clean_content, re.DOTALL)
         json_str = list_match.group(0) if list_match else (obj_match.group(0) if obj_match else clean_content)
-        
         facts = json.loads(json_str)
-        facts_list = facts if isinstance(facts, list) else [facts]
-        
-        for item in facts_list:
-            if isinstance(item, dict) and "person" in item and "key" in item:
-                person = str(item.get("person", "User")).strip()
-                key = str(item.get("key", "")).lower().strip()
-                value = str(item.get("value", "")).strip()
-                
-                # Extract new emotional/episodic data
-                importance = int(item.get("importance", 5))
-                context = str(item.get("context", "")).strip()
-                
-                if not person or not key or value == "" or value.lower() == "unknown":
-                    continue
-                    
-                key = key.replace(f"{person.lower()}'s ", "").replace("my ", "").replace("your ", "").strip()
-                save_fact_to_db(person, key, value, importance, context)
-                
-                imp_emoji = "🔥" if importance >= 8 else "⭐" if importance >= 5 else "📌"
-                print(f"🧠 [Memory Update] {imp_emoji} [{importance}/10] '{person}' / '{key}' = '{value}' (Context: {context})")
-    except Exception as e:
-        print(f"⚠️ [DEBUG] Silent extraction failed: {e}")
+        for item in facts if isinstance(facts, list) else [facts]:
+            if not isinstance(item, dict):
+                continue
+            person = str(item.get("person", "User")).strip() or "User"
+            key = str(item.get("key", "fact")).lower().strip() or "fact"
+            value = str(item.get("value", "")).strip()
+            if value and value.lower() != "unknown":
+                save_fact_to_db(person, key, value, max(1, min(10, int(item.get("importance", 5)))), str(item.get("context", "")).strip())
+    except Exception as exc:
+        print(f"[DEBUG] Silent extraction failed: {exc}")
 
 
 def orchestrate_models(user_text: str, session_id: str | None = None) -> dict:
@@ -1669,6 +1661,8 @@ def run_cognitive_loop(user_input: str) -> str:
         recent_history = []
 
     messages = _build_messages_with_history(system_prompt, user_input, session_id=session_id)
+    if memory_text and memory_text != "None. You do not know this yet.":
+        messages.insert(1, {"role": "system", "content": "RETRIEVED MEMORY (use only these facts; do not infer beyond them):\n" + memory_text})
     # Ensure the current user input is present as the final user message
     try:
         if not any(m.get("role") == "user" and m.get("content") == user_input for m in messages):

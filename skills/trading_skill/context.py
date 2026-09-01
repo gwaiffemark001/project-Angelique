@@ -5,19 +5,54 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .indicators import snapshot
-from .evidence import detect_candle_pattern, detect_wave_context
-from .market_structure import build_structure
+from .evidence import detect_amd_phase as detect_amd_evidence, detect_candle_pattern, detect_ifvg, detect_wave_context
+from .fvg_engine import detect_fvg_playbook
 from .smc import ZoneRegistry, detect_smc
 
-# ICT helpers are used for supplementary context only. The AMD detector is
-# deliberately NOT imported here any more: `smc.detect_smc` already produces
-# the sequenced AMD phase machine from `amd.py`, and importing the older
-# heuristic detector silently overwrote it.
+# Import ICT core concepts
 try:
-    from skills.trading.ict_core import is_prime_time, analyze_premium_discount, identify_ote_zone
+    from skills.trading.ict_core import (
+        analyze_premium_discount,
+        identify_ote_zone,
+        get_kill_zone_status,
+        calculate_ote,
+    )
     ICT_AVAILABLE = True
 except ImportError:
     ICT_AVAILABLE = False
+
+
+def _ict_snapshot(candles: list[dict[str, Any]]) -> dict[str, Any]:
+    if not ICT_AVAILABLE or len(candles) < 20:
+        return {"status": "unavailable"}
+    try:
+        import pandas as pd
+        df = pd.DataFrame(candles)
+        needed = {"high", "low", "close", "open"}
+        if not needed.issubset(df.columns):
+            return {"status": "invalid_data"}
+        # Ensure numeric columns are usable before passing them to ICT helpers.
+        for name in needed:
+            df[name] = pd.to_numeric(df[name], errors="coerce")
+        df = df.dropna(subset=list(needed))
+        if len(df) < 20:
+            return {"status": "insufficient_data"}
+        ote = identify_ote_zone(df, lookback=min(50, len(df)))
+        pd_zone = analyze_premium_discount(df, lookback=min(50, len(df)))
+        now = datetime.now(timezone.utc)
+        amd_cycle = detect_amd_phase(df, now)
+        kill_status, kill_zone = get_kill_zone_status(now)
+        latest = df.iloc[-1]
+        return {
+            "status": "ready",
+            "ote": ote or {},
+            "premium_discount": pd_zone or {},
+            "amd": {"phase": amd_cycle.current_phase.value, "complete": amd_cycle.is_complete, "accumulation_low": amd_cycle.accumulation_low, "accumulation_high": amd_cycle.accumulation_high, "manipulation_low": amd_cycle.manipulation_low, "manipulation_high": amd_cycle.manipulation_high},
+            "kill_zone": {"status": kill_status, "name": kill_zone, "timestamp": now.isoformat()},
+            "current_price": float(latest["close"]),
+        }
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
 
 
 def _trend(candles: list[dict[str, Any]]) -> str:
@@ -29,7 +64,8 @@ def _trend(candles: list[dict[str, Any]]) -> str:
     if len(candles) < 9:
         return "unknown"
     try:
-        bias = build_structure(candles).bias
+        from .smc import _structure
+        bias = _structure(candles[-200:]).get("bias")
         if bias in {"bullish", "bearish"}:
             return bias
     except Exception:
@@ -56,13 +92,7 @@ class MarketContext:
     confluence: dict[str, Any] = field(default_factory=dict)
 
 
-def build_market_context(
-    timeframes: dict[str, list[dict[str, Any]]],
-    windows: dict[str, dict[str, int]] | None = None,
-    registry: ZoneRegistry | None = None,
-    *,
-    trades_24_7: bool = False,
-) -> MarketContext:
+def build_market_context(timeframes: dict[str, list[dict[str, Any]]], windows: dict[str, dict[str, int]] | None = None, registry: ZoneRegistry | None = None) -> MarketContext:
     windows = windows or {}
     trend_candles = {
         timeframe: candles[-windows.get(timeframe, {}).get("trend", len(candles)):]
@@ -76,12 +106,14 @@ def build_market_context(
     indicator_data = {timeframe: snapshot(candles) for timeframe, candles in timeframes.items()}
     smc_data = {}
     for timeframe, candles in smc_candles.items():
-        # detect_smc already returns lifecycle-correct FVG/IFVG evidence and the
-        # sequenced AMD result. Only genuinely supplementary observations are
-        # merged in here -- nothing overwrites the canonical keys.
-        evidence = detect_smc(candles, timeframe=timeframe, registry=registry,
-                              trades_24_7=trades_24_7)
-        evidence.setdefault("candle_pattern", detect_candle_pattern(candles))
-        evidence.setdefault("wave_context", detect_wave_context(candles))
+        evidence = detect_smc(candles, timeframe=timeframe, registry=registry)
+        evidence.update({
+            "ifvg": detect_ifvg(candles, evidence.get("fair_value_gaps", [])),
+            "fvg_playbook": detect_fvg_playbook(candles),
+            "amd": detect_amd_evidence(candles),
+            "ict": _ict_snapshot(candles),
+            "candle_pattern": detect_candle_pattern(candles),
+            "wave_context": detect_wave_context(candles),
+        })
         smc_data[timeframe] = evidence
-    return MarketContext(trends=trends, indicators=indicator_data, smc=smc_data)
+    return MarketContext(trends=trends, indicators=indicator_data, smc=smc_data, ict={tf: data.get("ict", {}) for tf, data in smc_data.items()})

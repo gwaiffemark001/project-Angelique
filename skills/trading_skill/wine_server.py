@@ -378,19 +378,20 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
         tick_value = info.get("trade_tick_value")
         point = float(info.get("point", 0) or 0)
         digits = int(info.get("digits", 0) or 0)
-        # Compute spread in pips when tick_size is available. Pip definition:
-        # - For most FX pairs a pip = 0.0001 (4th decimal) but brokers may use
-        #   fractional pricing; use tick_size to normalize.
-        spread_pips = None
-        try:
-            from core.price_units import pip_size_from_specs
-            if tick_size:
-                pip_unit = pip_size_from_specs(symbol, {"point": point, "digits": digits})
-                spread_pips = raw_spread / pip_unit if pip_unit > 0 else None
-        except Exception:
-            spread_pips = None
-
-        spread_points = raw_spread / point if point > 0 else None
+        specs_for_units = {
+            "tick_size": tick_size,
+            "tick_value": tick_value,
+            "point": point,
+            "digits": digits,
+            "bid": bid,
+            "ask": ask,
+        }
+        from core.price_units import normalize_spread, instrument_class
+        normalized_spread = normalize_spread(symbol, raw_spread, specs_for_units)
+        spread_pips = normalized_spread.get("spread_pips")
+        spread_points = normalized_spread.get("spread_points")
+        spread_ticks = normalized_spread.get("spread_ticks")
+        spread_unit = normalized_spread.get("spread_unit")
         return {
             "status": "connected",
             "requested_symbol": requested_symbol,
@@ -401,8 +402,34 @@ def market(request: dict[str, Any]) -> dict[str, Any]:
             "spread": raw_spread,
             "spread_price": raw_spread,
             "spread_points": spread_points,
-            "symbol_specs": _symbol_specs_payload(info, margin_per_volume=margin_per_volume),
+            "symbol_specs": {
+                "tick_size": info.get("trade_tick_size"),
+                "tick_value": info.get("trade_tick_value"),
+                "volume_min": info.get("volume_min"),
+                "volume_max": info.get("volume_max"),
+                "volume_step": info.get("volume_step"),
+                "margin_per_volume": margin_per_volume,
+                "point": point,
+                "digits": digits,
+                "swap_long": info.get("swap_long"),
+                "swap_short": info.get("swap_short"),
+                "swap_mode": info.get("swap_mode"),
+                "swap_rollover3days": info.get("swap_rollover3days"),
+                "commission_per_lot": info.get("commission_per_lot", info.get("trade_commission")),
+                "trade_stops_level": info.get("trade_stops_level"),
+                "trade_freeze_level": info.get("trade_freeze_level"),
+                "trade_mode": info.get("trade_mode"),
+                "instrument_class": instrument_class(symbol, specs_for_units),
+                "contract_size": info.get("trade_contract_size"),
+                "currency_base": info.get("currency_base"),
+                "currency_profit": info.get("currency_profit"),
+                "currency_margin": info.get("currency_margin"),
+                "bid": bid,
+                "ask": ask,
+            },
             "spread_pips": spread_pips,
+            "spread_ticks": spread_ticks,
+            "spread_unit": spread_unit,
             "analysis_uses_closed_candles_only": True,
         }
     except Exception as exc:
@@ -774,221 +801,6 @@ def close_all_positions(request: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "status": "error", "error": str(exc), "closed": [], "failed": []}
 
 
-
-# --------------------------------------------------------------------------
-# Symbol specification payload
-# --------------------------------------------------------------------------
-#: Every MT5 symbol property the trading engine needs. Instrument
-#: classification, pip semantics, volume normalisation, stops/freeze validation
-#: and margin all depend on these, so they are returned as one complete object
-#: rather than the partial subset the bridge used to send.
-_SPEC_FIELDS = (
-    "point", "digits", "spread", "spread_float",
-    "trade_tick_size", "trade_tick_value", "trade_tick_value_profit", "trade_tick_value_loss",
-    "trade_contract_size", "trade_calc_mode", "trade_mode", "trade_exemode",
-    "trade_stops_level", "trade_freeze_level",
-    "volume_min", "volume_max", "volume_step", "volume_limit",
-    "currency_base", "currency_profit", "currency_margin",
-    "margin_initial", "margin_maintenance", "margin_hedged",
-    "filling_mode", "order_mode", "expiration_mode",
-    "swap_long", "swap_short", "swap_mode", "swap_rollover3days",
-    "session_deals", "session_buy_orders", "session_sell_orders",
-    "path", "description", "visible", "select", "category", "exchange",
-)
-
-
-def _symbol_specs_payload(info: dict[str, Any], margin_per_volume: Any = None) -> dict[str, Any]:
-    """Return the complete broker specification for a symbol."""
-    payload: dict[str, Any] = {field: info.get(field) for field in _SPEC_FIELDS}
-    # Aliases kept for existing consumers.
-    payload.update({
-        "tick_size": info.get("trade_tick_size"),
-        "tick_value": info.get("trade_tick_value"),
-        "tick_value_profit": info.get("trade_tick_value_profit"),
-        "tick_value_loss": info.get("trade_tick_value_loss"),
-        "contract_size": info.get("trade_contract_size"),
-        "stops_level": info.get("trade_stops_level"),
-        "freeze_level": info.get("trade_freeze_level"),
-        "commission_per_lot": info.get("commission_per_lot", info.get("trade_commission")),
-        "margin_per_volume": margin_per_volume,
-    })
-    return payload
-
-
-@_mt5_session_locked
-def symbol_specs(request: dict[str, Any]) -> dict[str, Any]:
-    """READ-ONLY full symbol specification. Never sends an order."""
-    expected_broker = str(request.get("expected_broker") or "").upper() or None
-    requested_mode = _mode(request.get("account_mode"))
-    requested = request.get("symbols") or ([request.get("symbol")] if request.get("symbol") else [])
-    requested = [str(item).strip() for item in requested if str(item or "").strip()]
-    if not requested:
-        return {"status": "error", "error": "At least one symbol is required."}
-    try:
-        mt5 = importlib.import_module("MetaTrader5")
-        if not _connect(mt5, requested_mode):
-            return {"status": "error", "error": "MT5 initialization failed"}
-        guard_error = _account_guard_error(mt5, requested_mode, expected_broker)
-        if guard_error:
-            return {"status": "error", "error": guard_error}
-        account_info = mt5.account_info()
-        out: dict[str, Any] = {}
-        errors: dict[str, str] = {}
-        for name in requested:
-            resolved = _resolve(mt5, name)
-            if not resolved:
-                errors[name] = "Symbol could not be resolved on this broker."
-                continue
-            if not mt5.symbol_select(resolved, True):
-                errors[name] = "symbol_select failed; the symbol is not available in Market Watch."
-                continue
-            info = mt5.symbol_info(resolved)
-            if info is None:
-                errors[name] = "symbol_info returned None."
-                continue
-            data = info._asdict() if hasattr(info, "_asdict") else dict(info)
-            tick = mt5.symbol_info_tick(resolved)
-            tick_data = (tick._asdict() if hasattr(tick, "_asdict") else dict(tick)) if tick else {}
-            margin_per_volume = None
-            try:
-                probe = float(data.get("volume_min") or 0.01)
-                reference = float(tick_data.get("ask") or tick_data.get("bid") or 0)
-                if reference > 0:
-                    value = mt5.order_calc_margin(mt5.ORDER_TYPE_BUY, resolved, probe, reference)
-                    if value is not None and probe > 0:
-                        margin_per_volume = float(value) / probe
-            except Exception:
-                margin_per_volume = None
-            out[name] = {
-                "mt5_symbol": resolved,
-                "specs": _symbol_specs_payload(data, margin_per_volume=margin_per_volume),
-                "tick": {"bid": tick_data.get("bid"), "ask": tick_data.get("ask"),
-                         "last": tick_data.get("last"), "time": tick_data.get("time")},
-            }
-        return {
-            "status": "connected",
-            "symbols": out,
-            "errors": errors,
-            "account_currency": getattr(account_info, "currency", None),
-            "account_leverage": getattr(account_info, "leverage", None),
-            "margin_mode": getattr(account_info, "margin_mode", None),
-            "read_only": True,
-        }
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
-
-
-@_mt5_session_locked
-def calculate_margin(request: dict[str, Any]) -> dict[str, Any]:
-    """Broker-authoritative margin via MT5 order_calc_margin."""
-    expected_broker = str(request.get("expected_broker") or "").upper() or None
-    requested_mode = _mode(request.get("account_mode"))
-    symbol = str(request.get("symbol") or "").strip()
-    direction = str(request.get("direction") or "BUY").upper()
-    volume = float(request.get("volume", 0) or 0)
-    price = float(request.get("price", 0) or 0)
-    if not symbol or volume <= 0 or price <= 0:
-        return {"status": "error", "error": "symbol, volume and price are required."}
-    try:
-        mt5 = importlib.import_module("MetaTrader5")
-        if not _connect(mt5, requested_mode):
-            return {"status": "error", "error": "MT5 initialization failed"}
-        guard_error = _account_guard_error(mt5, requested_mode, expected_broker)
-        if guard_error:
-            return {"status": "error", "error": guard_error}
-        resolved = _resolve(mt5, symbol) or symbol
-        # order_calc_margin fails on symbols that are not selected.
-        mt5.symbol_select(resolved, True)
-        order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
-        value = mt5.order_calc_margin(order_type, resolved, volume, price)
-        if value is None:
-            error = mt5.last_error() if hasattr(mt5, "last_error") else None
-            return {"status": "error",
-                    "error": f"MT5 order_calc_margin returned no value ({error})."}
-        account_info = mt5.account_info()
-        return {
-            "status": "connected", "margin": float(value), "symbol": resolved,
-            "direction": direction, "volume": volume, "price": price,
-            "account_currency": getattr(account_info, "currency", None),
-            "free_margin": getattr(account_info, "margin_free", None),
-            "margin_level": getattr(account_info, "margin_level", None),
-        }
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
-
-
-@_mt5_session_locked
-def order_preflight(request: dict[str, Any]) -> dict[str, Any]:
-    """Broker-side OrderCheck. Validates an order WITHOUT sending it."""
-    expected_broker = str(request.get("expected_broker") or "").upper() or None
-    requested_mode = _mode(request.get("account_mode"))
-    symbol = str(request.get("symbol") or "").strip()
-    direction = str(request.get("direction") or "BUY").upper()
-    volume = float(request.get("volume", 0) or 0)
-    price = float(request.get("price", 0) or 0)
-    stop_loss = float(request.get("stop_loss", 0) or 0)
-    take_profit = float(request.get("take_profit", 0) or 0)
-    if not symbol or volume <= 0:
-        return {"status": "error", "error": "symbol and a positive volume are required."}
-    try:
-        mt5 = importlib.import_module("MetaTrader5")
-        if not _connect(mt5, requested_mode):
-            return {"status": "error", "error": "MT5 initialization failed"}
-        guard_error = _account_guard_error(mt5, requested_mode, expected_broker)
-        if guard_error:
-            return {"status": "error", "error": guard_error}
-        resolved = _resolve(mt5, symbol) or symbol
-        mt5.symbol_select(resolved, True)
-        info = mt5.symbol_info(resolved)
-        tick = mt5.symbol_info_tick(resolved)
-        if info is None or tick is None:
-            return {"status": "error", "error": f"No live quote available for {resolved}."}
-        if price <= 0:
-            price = float(tick.ask if direction == "BUY" else tick.bid)
-
-        filling = getattr(mt5, "ORDER_FILLING_FOK")
-        modes = int(getattr(info, "filling_mode", 0) or 0)
-        if modes & 2:
-            filling = getattr(mt5, "ORDER_FILLING_IOC")
-        elif modes & 1:
-            filling = getattr(mt5, "ORDER_FILLING_FOK")
-
-        order_request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": resolved,
-            "volume": volume,
-            "type": mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL,
-            "price": price,
-            "deviation": int(request.get("deviation", 20) or 20),
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": filling,
-        }
-        if stop_loss > 0:
-            order_request["sl"] = stop_loss
-        if take_profit > 0:
-            order_request["tp"] = take_profit
-
-        result = mt5.order_check(order_request)
-        if result is None:
-            error = mt5.last_error() if hasattr(mt5, "last_error") else None
-            return {"status": "error", "error": f"MT5 order_check returned no result ({error})."}
-        data = result._asdict() if hasattr(result, "_asdict") else dict(result)
-        data.pop("request", None)
-        return {
-            "status": "connected",
-            "retcode": int(data.get("retcode", -1)),
-            "comment": data.get("comment"),
-            "balance": data.get("balance"), "equity": data.get("equity"),
-            "profit": data.get("profit"), "margin": data.get("margin"),
-            "margin_free": data.get("margin_free"), "margin_level": data.get("margin_level"),
-            "symbol": resolved, "direction": direction, "volume": volume,
-            "price": price, "stop_loss": stop_loss or None, "take_profit": take_profit or None,
-            "order_sent": False,
-        }
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
-
-
 async def handle(websocket, path=None):
     async for message in websocket:
         payload = json.loads(message)
@@ -1005,8 +817,6 @@ async def handle(websocket, path=None):
                 "close_all_positions": "close_all_positions",
                 "modify_position": "modify_position",
                 "recent_deals": "recent_deals",
-                "get_symbol_specs": "symbol_specs",
-                "order_check": "order_preflight",
             }.get(payload.get("action"))
         if operation == "ping":
             await websocket.send(json.dumps({"status": "pong"}))
@@ -1031,12 +841,6 @@ async def handle(websocket, path=None):
             result = recent_deals(payload)
         elif operation == "calculate_profit":
             result = calculate_profit(payload)
-        elif operation == "calculate_margin":
-            result = calculate_margin(payload)
-        elif operation == "symbol_specs":
-            result = symbol_specs(payload)
-        elif operation == "order_preflight":
-            result = order_preflight(payload)
         else:
             result = {"status": "error", "error": f"Unknown operation: {operation}"}
         await websocket.send(json.dumps(result))

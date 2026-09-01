@@ -3,6 +3,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 from core import config
+from core.local_ai_router import get_local_router
 
 # --- Optional Heavy Dependencies ---
 try:
@@ -28,7 +29,7 @@ except Exception as e:
     embedding_functions = None
 
 DEVICE = "cpu"
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = int(getattr(config, "MEMORY_EMBEDDING_DIM", 768))
 EMBEDDING_MODEL = None
 _chroma_client = None
 _memory_collection = None
@@ -89,6 +90,25 @@ def _get_embedding_model():
     if EMBEDDING_MODEL is not None:
         return EMBEDDING_MODEL
 
+    # Prefer the installed Nomic model through Angelique's local tri-model
+    # router. This keeps semantic search local and uses the model the user
+    # actually installed instead of silently downloading another encoder.
+    try:
+        router = get_local_router()
+        state = router.discover_models()
+        if state.embedder:
+            class _NomicAdapter:
+                def encode(self, texts):
+                    values = [texts] if isinstance(texts, str) else list(texts)
+                    vectors = router.embed(values)
+                    if not vectors:
+                        raise RuntimeError("Nomic embedding request failed")
+                    return np.asarray(vectors, dtype=np.float32)[0] if isinstance(texts, str) else np.asarray(vectors, dtype=np.float32)
+            EMBEDDING_MODEL = _NomicAdapter()
+            return EMBEDDING_MODEL
+    except Exception as e:
+        print(f"[Memory] Nomic router embedding unavailable; using local fallback: {e}")
+
     if SentenceTransformer is not None:
         try:
             model = SentenceTransformer('all-MiniLM-L6-v2', device=DEVICE)
@@ -140,7 +160,7 @@ def _get_memory_collection():
             is_persistent=True,
             anonymized_telemetry=False,
         ))
-        _memory_collection = _chroma_client.get_or_create_collection(name=config.MEMORY_COLLECTION_NAME)
+        _memory_collection = _chroma_client.get_or_create_collection(name=getattr(config, "MEMORY_SEMANTIC_COLLECTION_NAME", config.MEMORY_COLLECTION_NAME))
         print(f"✅ [Memory] ChromaDB initialized at {path}")
     except Exception as e:
         print(f"⚠️ [Memory] ChromaDB init failed: {e}")
@@ -217,6 +237,13 @@ def save_to_vector_db(entity: str, key: str, value: str, importance: int = 5, co
             doc_id = f"fact_{entity.lower()}_{key.replace(' ', '_').lower()}_{int(importance)}"
             metadata = {"entity": entity, "key": key, "value": value, "importance": importance, "context": context, "type": "fact"}
 
+        # Entity tags are part of the embedded text so semantic retrieval has
+        # a hard lexical identity anchor in addition to metadata filtering.
+        if item_type != "conversation":
+            try:
+                combined_text = get_local_router().tagged_fact(entity, key, value, context)
+            except Exception:
+                pass
         embedding = model.encode(combined_text)
         if hasattr(embedding, "tolist"):
             embedding = embedding.tolist()
@@ -239,7 +266,7 @@ def save_to_vector_db(entity: str, key: str, value: str, importance: int = 5, co
     except Exception as e:
         print(f"❌ [Memory] ChromaDB save failed: {e}")
 
-def search_memory(query: str, top_k: int = 5, include_conversation: bool = True) -> list:
+def search_memory(query: str, top_k: int = 5, include_conversation: bool = True, entity: str | None = None) -> list:
     col = _get_memory_collection()
     if col is None:
         return []
@@ -255,7 +282,10 @@ def search_memory(query: str, top_k: int = 5, include_conversation: bool = True)
         if isinstance(query_embedding, list) and len(query_embedding) == 1 and isinstance(query_embedding[0], list):
             query_embedding = query_embedding[0]
 
-        results = col.query(query_embeddings=[query_embedding], n_results=top_k * 2)
+        where = None
+        if entity:
+            where = {"entity": str(entity).strip()}
+        results = col.query(query_embeddings=[query_embedding], n_results=top_k * 2, where=where) if where else col.query(query_embeddings=[query_embedding], n_results=top_k * 2)
         
         formatted = []
         if results and results.get("metadatas"):
@@ -284,9 +314,9 @@ def query_conversation_memory(query: str, top_k: int = 5) -> list:
     return search_conversation_memory(query, top_k=top_k)
 
 
-def query_fact_memory(query: str, top_k: int = 5) -> list:
+def query_fact_memory(query: str, top_k: int = 5, entity: str | None = None) -> list:
     """Query fact/knowledge memory only (explicit wrapper)."""
-    return semantic_search(query, top_k=top_k)
+    return search_memory(query, top_k=top_k, include_conversation=False, entity=entity)
 
 
 def save_fact(entity: str, key: str, value: str, importance: int = 5, context: str = "") -> None:

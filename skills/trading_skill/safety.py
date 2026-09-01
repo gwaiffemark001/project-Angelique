@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from core import config
-from .profiles import max_spread_for_symbol
+from core.price_units import spread_policy, instrument_class
 
 
 def validate_trade_setup(
@@ -25,26 +25,16 @@ def validate_trade_setup(
     spread: float | None = None,
     spread_pips: float | None = None,
     spread_points: float | None = None,
+    spread_ticks: float | None = None,
+    symbol_specs: dict[str, Any] | None = None,
     minimum_rr: float = 2.0,
     maximum_spread_pips: float | None = None,
     maximum_spread_points: float | None = None,
-    specs: dict[str, Any] | None = None,
-    net_rr: float | None = None,
-    spread_gate: dict[str, Any] | None = None,
+    maximum_spread_price: float | None = None,
+    maximum_spread_unit: str | None = None,
+    countertrend: bool = False,
 ) -> dict[str, Any]:
-    """Hard safety checks that gate trading decisions before execution.
-
-    Spread is gated in the instrument's own unit, decided by the broker's
-    metadata rather than by matching substrings in the symbol name. When
-    ``net_rr`` is supplied it is enforced in addition to the gross RR, because
-    only the net figure reflects the trade's real economics.
-
-    ``spread_gate`` is the authoritative result produced by
-    :mod:`spread_model.evaluate_spread_gate`. When present it replaces the
-    legacy hard-coded profile ceilings: it is based on live raw bid/ask,
-    instrument class, the observed rolling distribution and the actual
-    spread-to-stop / spread-to-reward economics of this specific trade.
-    """
+    """Hard safety checks that gate trading decisions before execution."""
     checks: list[str] = []
     reasons: list[str] = []
 
@@ -66,24 +56,15 @@ def validate_trade_setup(
     rr = abs(take_profit - entry) / max(distance_to_sl, 1e-9)
     tolerance = 1e-9
     if rr < minimum_rr - tolerance:
-        reasons.append(f"Gross reward-to-risk {rr:.2f}:1 is below the minimum required ({minimum_rr:.2f}:1).")
+        reasons.append(f"Reward-to-risk is below the minimum required ({minimum_rr:.2f}:1).")
     else:
-        checks.append(f"Gross risk-reward OK: {rr:.2f}:1")
-    if net_rr is not None:
-        if float(net_rr) < minimum_rr - tolerance:
-            reasons.append(
-                f"NET reward-to-risk after spread, commission and swap is {float(net_rr):.2f}:1, "
-                f"below the minimum {minimum_rr:.2f}:1 (gross was {rr:.2f}:1)."
-            )
-        else:
-            checks.append(f"Net risk-reward OK after costs: {float(net_rr):.2f}:1 (gross {rr:.2f}:1).")
-    else:
-        checks.append("NOTE: only the gross RR was verified; net RR after costs was not supplied.")
+        checks.append(f"Risk-reward OK: {rr:.2f}:1")
 
+    expected_risk = float(config.TRADING_RISK_PER_TRADE_PERCENT) * (0.5 if countertrend else 1.0)
     if risk_percent <= 0:
         reasons.append("Risk percentage must be positive.")
-    elif abs(float(risk_percent) - float(config.TRADING_RISK_PER_TRADE_PERCENT)) > 1e-9:
-        reasons.append(f"Risk policy requires {config.TRADING_RISK_PER_TRADE_PERCENT:.2f}% per trade; received {float(risk_percent):.2f}%.")
+    elif abs(float(risk_percent) - expected_risk) > 1e-9:
+        reasons.append(f"Risk policy requires {expected_risk:.2f}% for this setup; received {float(risk_percent):.2f}%.")
     if risk_percent > config.TRADING_MAX_RISK_PERCENT:
         reasons.append(f"Risk percentage exceeds the configured maximum ({config.TRADING_MAX_RISK_PERCENT:.2f}%).")
     if risk_amount <= 0:
@@ -102,73 +83,69 @@ def validate_trade_setup(
     else:
         checks.append("Projected margin level remains acceptable.")
 
-    # The instrument's spread unit comes from broker metadata (trade_calc_mode
-    # and the currency fields), not from the symbol string. An FX pip ceiling is
-    # never applied to gold, crypto or an index.
-    uses_pips = True
-    instrument_class = "UNKNOWN"
-    try:
-        from .instruments import FX_CLASSES, build_profile
-        instrument_profile = build_profile(symbol or "", specs or {})
-        instrument_class = instrument_profile.instrument_class
-        uses_pips = instrument_class in FX_CLASSES and instrument_profile.pip_size is not None
-    except Exception:
-        instrument_profile = None
-    if spread_gate is not None:
-        gate_allowed = bool(spread_gate.get("allowed", False))
-        gate_reasons = list(spread_gate.get("reasons", []) or [])
-        gate_checks = list(spread_gate.get("checks", []) or [])
-        measurement = spread_gate.get("measurement", {}) or {}
-        if not gate_allowed:
-            reasons.extend(gate_reasons or ["Instrument-aware spread gate rejected the trade."])
-        else:
-            checks.append("Instrument-aware spread gate passed.")
-        checks.extend(f"Spread gate: {line}" for line in gate_checks)
-        # Keep the display fields accurate regardless of which engine decided.
-        if "spread_pips" in measurement:
-            spread_pips = measurement.get("spread_pips")
-        if "spread_points" in measurement:
-            spread_points = measurement.get("spread_points")
-        if "spread_percent_of_price" in measurement:
-            checks.append(f"Spread {measurement.get('spread_percent_of_price'):.3f}% of price.")
-    elif not uses_pips and spread_points is not None:
-        max_points = float(maximum_spread_points or 0.0)
-        if max_points > 0 and spread_points > max_points + 1e-9:
-            reasons.append(f"Spread is too wide for {instrument_class}: {spread_points:.0f} MT5 points "
-                           f"> maximum allowed {max_points:.0f} points.")
-        else:
-            checks.append(f"Spread OK: {spread_points:.0f} MT5 points (max {max_points:.0f}, {instrument_class}).")
-    elif not uses_pips:
-        reasons.append(f"{symbol} is classified as {instrument_class}, which has no pip definition, "
-                       "but no MT5-point spread was supplied. Spread cannot be validated.")
-    elif spread_pips is not None:
+    # Spread is always gated in raw executable price units using the symbol's
+    # broker metadata. Display units (pips, ticks, %) are informational.
+    specs = dict(symbol_specs or {})
+    policy = spread_policy(symbol or "", specs, specs.get("trading_mode", "DAY_TRADING"))
+    current_price_spread = None
+    if spread is not None:
         try:
-            max_allowed = float(
-                maximum_spread_pips
-                if maximum_spread_pips is not None
-                else max_spread_for_symbol(symbol or "", None)
-            )
-        except Exception:
-            max_allowed = 0.0
-        if max_allowed > 0 and spread_pips > max_allowed + 1e-9:
-            reasons.append(f"Spread is too wide: {spread_pips:.2f} pips > maximum allowed {max_allowed:.2f} pips.")
-        else:
-            checks.append(f"Spread OK: {spread_pips:.2f} pips (max {max_allowed:.2f}).")
-    elif spread is not None and spread > 0:
-        reasons.append("Spread could not be normalized into the unit required for this symbol.")
-    else:
-        reasons.append("No spread was supplied; execution cost cannot be verified.")
+            current_price_spread = abs(float(spread))
+        except (TypeError, ValueError):
+            current_price_spread = None
+    max_price = None
+    if maximum_spread_price is not None:
+        try:
+            max_price = float(maximum_spread_price)
+        except (TypeError, ValueError):
+            max_price = None
+    if max_price is None:
+        # Backward-compatible explicit unit limits used by tests/legacy callers.
+        klass = instrument_class(symbol or "", specs)
+        if maximum_spread_pips is not None and klass in {"FX_MAJOR", "FX_CROSS"}:
+            from core.price_units import pip_size_from_specs
+            pip = pip_size_from_specs(symbol or "", specs)
+            if pip <= 0:
+                pair = str(symbol or "").upper().replace("/", "")
+                pip = 0.01 if pair.endswith("JPY") else 0.0001
+            max_price = float(maximum_spread_pips) * pip
+        elif maximum_spread_points is not None:
+            point = float(specs.get("point", 0) or 0)
+            if point > 0:
+                max_price = float(maximum_spread_points) * point
+        if max_price is None:
+            max_price = float(policy.get("max_price", 0.0) or 0.0)
 
+    if current_price_spread is None or current_price_spread <= 0:
+        # Legacy callers may provide only a normalized spread value. Keep that
+        # path valid for tests/manual validation, while production workflow
+        # supplies the raw broker spread as the authoritative value.
+        klass = instrument_class(symbol or "", specs)
+        if klass in {"FX_MAJOR", "FX_CROSS"} and spread_pips is not None and maximum_spread_pips is not None:
+            if float(spread_pips) > float(maximum_spread_pips) + 1e-9:
+                reasons.append(f"Spread is too wide: {float(spread_pips):.2f} pips > maximum {float(maximum_spread_pips):.2f} pips.")
+            else:
+                checks.append(f"Spread OK: {float(spread_pips):.2f} pips (max {float(maximum_spread_pips):.2f}).")
+        elif spread_points is not None and maximum_spread_points is not None:
+            if float(spread_points) > float(maximum_spread_points) + 1e-9:
+                reasons.append(f"Spread is too wide: {float(spread_points):.2f} points > maximum {float(maximum_spread_points):.2f} points.")
+            else:
+                checks.append(f"Spread OK: {float(spread_points):.2f} points (max {float(maximum_spread_points):.2f}).")
+        else:
+            reasons.append("Live spread is unavailable or invalid.")
+    elif max_price <= 0:
+        reasons.append("No valid symbol-specific maximum spread policy is available.")
+    elif current_price_spread > max_price + 1e-12:
+        shown_current = spread_pips if policy["max_unit"] == "pips" else spread_ticks if policy["max_unit"] == "ticks" else (current_price_spread / max((float(specs.get("bid", 0) or 0) + float(specs.get("ask", 0) or 0)) / 2.0, 1e-12) * 100 if policy["max_unit"] == "%" else current_price_spread)
+        reasons.append(f"Spread is too wide: {float(shown_current):.2f} {policy['max_unit']} > maximum {float(policy['max_value']):.2f} {policy['max_unit']}.")
+    else:
+        shown_current = spread_pips if policy["max_unit"] == "pips" else spread_ticks if policy["max_unit"] == "ticks" else (current_price_spread / max((float(specs.get("bid", 0) or 0) + float(specs.get("ask", 0) or 0)) / 2.0, 1e-12) * 100 if policy["max_unit"] == "%" else current_price_spread)
+        checks.append(f"Spread OK: {float(shown_current):.2f} {policy['max_unit']} (max {float(policy['max_value']):.2f}).")
     valid = not reasons
     return {
         "valid": valid,
-        "instrument_class": instrument_class,
-        "spread_unit": "pips" if uses_pips else "points",
-        "gross_rr": rr,
-        "net_rr": net_rr,
         "check_count": len(checks),
         "checks": checks,
         "reasons": reasons,
-        "spread_gate": spread_gate,
         "summary": "Trade safety checks passed." if valid else "Trade safety checks failed.",
     }

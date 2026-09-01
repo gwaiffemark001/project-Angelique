@@ -218,8 +218,10 @@ def get_forex_news(symbol: str | None = None) -> list[dict[str, str]]:
             if title_key in seen_titles:
                 continue
             seen_titles.add(title_key)
-            if symbol and symbol not in headline["title"].upper() and symbol not in headline["source"].upper():
-                continue
+            # Do not require the literal broker symbol (e.g. EURUSD.VX) to
+            # appear in a headline. Symbol relevance is resolved later by
+            # currency/asset context; requiring the exact symbol silently
+            # dropped almost all legitimate market headlines.
             aggregated.append(headline)
             if len(aggregated) >= 24:
                 break

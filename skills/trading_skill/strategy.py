@@ -29,11 +29,19 @@ SETUP_MODELS = {
         "required": ("structural_event", "displacement", "fvg", "retracement", "entry_confirmation"),
         "optional": ("order_block", "liquidity_sweep", "ema", "rsi", "macd", "bollinger", "adx"),
     },
+    "IFVG_REVERSAL": {
+        "required": ("ifvg", "inversion", "retest", "entry_confirmation"),
+        "optional": ("liquidity_sweep", "next_level", "candle_confirmation"),
+    },
+    "SWEEP_CONTINUATION": {
+        "required": ("liquidity_sweep", "continuation", "entry_confirmation"),
+        "optional": ("next_level", "stop_beyond_sweep"),
+    },
 }
 
 # When more than one model is complete on the same candle, prefer the one
 # with the strongest structural confirmation first.
-_MODEL_PRIORITY = ("SWEEP_REVERSAL", "BOS_CONTINUATION", "ORDER_BLOCK_RETRACEMENT", "FVG_RETRACEMENT")
+_MODEL_PRIORITY = ("IFVG_REVERSAL", "FVG_RETRACEMENT", "SWEEP_REVERSAL", "BOS_CONTINUATION", "ORDER_BLOCK_RETRACEMENT", "SWEEP_CONTINUATION")
 
 
 def _zone_for(model: str, fvg: dict | None, order_block: dict | None) -> dict | None:
@@ -89,6 +97,66 @@ def _evaluate_model(
 def identify_setup(direction: str, setup_smc: dict[str, Any], entry_smc: dict[str, Any]) -> dict[str, Any]:
     """Evaluate all supported models and return the best complete one."""
     expected = "bullish" if direction == "BUY" else "bearish"
+    playbook = setup_smc.get("fvg_playbook", {}) if isinstance(setup_smc.get("fvg_playbook"), dict) else {}
+    tradeable_ifvg = [x for x in playbook.get("tradeable_ifvg", []) if x.get("type") == expected]
+    tradeable_fvgs = [x for x in playbook.get("tradeable", []) if x.get("type") == expected]
+    continuation = playbook.get("continuation") if isinstance(playbook.get("continuation"), dict) else None
+
+    # The guide's exact FVG playbook is evaluated before the broader SMC models.
+    # It prevents a generic breakout from bypassing the retest/inversion rules.
+    if tradeable_ifvg:
+        zone = tradeable_ifvg[-1]
+        return {
+            "model": "IFVG_REVERSAL", "direction": direction,
+            "required": list(SETUP_MODELS["IFVG_REVERSAL"]["required"]),
+            "optional": list(SETUP_MODELS["IFVG_REVERSAL"]["optional"]),
+            "stages": {"ifvg": True, "inversion": True, "retest": True, "entry_confirmation": True},
+            "missing": [], "zone": zone, "confirmation_event": None, "complete": True,
+            "alternate_models_available": [],
+            "reason": "Inverse FVG has flipped polarity and held its retest.",
+            "supporting_evidence": {"ifvg": playbook.get("ifvg", []), "fvg_playbook": playbook},
+        }
+    if tradeable_fvgs:
+        zone = tradeable_fvgs[-1]
+        retest = zone.get("retest", {}) if isinstance(zone.get("retest"), dict) else {}
+        if retest.get("holds"):
+            return {
+                "model": "FVG_RETRACEMENT", "direction": direction,
+                "required": list(SETUP_MODELS["FVG_RETRACEMENT"]["required"]),
+                "optional": list(SETUP_MODELS["FVG_RETRACEMENT"]["optional"]),
+                "stages": {"structural_event": bool(zone.get("breaks_swing")), "displacement": bool(zone.get("displacement")), "fvg": True, "retracement": True, "entry_confirmation": True, "candle_confirmation": True},
+                "missing": [], "zone": zone, "confirmation_event": None, "complete": True,
+                "alternate_models_available": [],
+                "reason": "Swing-breaking displacement FVG retested and held.",
+                "supporting_evidence": {"ifvg": playbook.get("ifvg", []), "fvg_playbook": playbook},
+            }
+    # Missed higher-timeframe retrace: descend to the entry timeframe and
+    # continue the same displacement/FVG/retest rules instead of chasing.
+    entry_playbook = entry_smc.get("fvg_playbook", {}) if isinstance(entry_smc.get("fvg_playbook"), dict) else {}
+    lower_fvgs = [x for x in entry_playbook.get("tradeable", []) if x.get("type") == expected and isinstance(x.get("retest"), dict) and x.get("retest", {}).get("holds")]
+    if lower_fvgs:
+        zone = lower_fvgs[-1]
+        return {
+            "model": "FVG_RETRACEMENT", "direction": direction,
+            "required": list(SETUP_MODELS["FVG_RETRACEMENT"]["required"]),
+            "optional": list(SETUP_MODELS["FVG_RETRACEMENT"]["optional"]) + ["lower_timeframe_fallback"],
+            "stages": {"structural_event": bool(zone.get("breaks_swing")), "displacement": bool(zone.get("displacement")), "fvg": True, "retracement": True, "entry_confirmation": True, "lower_timeframe_fallback": True},
+            "missing": [], "zone": zone, "confirmation_event": None, "complete": True,
+            "alternate_models_available": [],
+            "reason": "Higher-timeframe gap did not supply the retest; a lower-timeframe continuation FVG retest held.",
+            "supporting_evidence": {"ifvg": entry_playbook.get("ifvg", []), "fvg_playbook": entry_playbook, "source_timeframe": "entry"},
+        }
+    if continuation and continuation.get("tradeable") and continuation.get("direction") == direction:
+        return {
+            "model": "SWEEP_CONTINUATION", "direction": direction,
+            "required": list(SETUP_MODELS["SWEEP_CONTINUATION"]["required"]),
+            "optional": list(SETUP_MODELS["SWEEP_CONTINUATION"]["optional"]),
+            "stages": {"liquidity_sweep": True, "continuation": True, "entry_confirmation": True, "next_level": continuation.get("target_reference") is not None, "stop_beyond_sweep": continuation.get("stop_reference") is not None},
+            "missing": [], "zone": {"low": continuation.get("stop_reference"), "high": continuation.get("target_reference")}, "confirmation_event": None, "complete": True,
+            "alternate_models_available": [],
+            "reason": "Post-NY sweep produced no meaningful reaction/FVG, so continuation fallback is active.",
+            "supporting_evidence": {"fvg_playbook": playbook},
+        }
     sweep = setup_smc.get("liquidity_sweep") == (
         "sell_side_liquidity_sweep" if direction == "BUY" else "buy_side_liquidity_sweep"
     )
@@ -140,6 +208,8 @@ def identify_setup(direction: str, setup_smc: dict[str, Any], entry_smc: dict[st
         "BOS_CONTINUATION": directional_bos,
         "ORDER_BLOCK_RETRACEMENT": order_block is not None,
         "FVG_RETRACEMENT": fvg is not None,
+        "IFVG_REVERSAL": bool(tradeable_ifvg),
+        "SWEEP_CONTINUATION": bool(continuation and continuation.get("tradeable") and continuation.get("direction") == direction),
     }
 
     complete_models = [model for model in _MODEL_PRIORITY if reachable[model] and evaluations[model]["complete"]]

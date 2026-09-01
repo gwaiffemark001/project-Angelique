@@ -155,22 +155,15 @@ def detect_wave_context(candles: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def detect_ifvg(candles: list[dict[str, Any]], fair_value_gaps: list[dict[str, Any]]) -> dict[str, Any]:
-    """Detect an IFVG only after invalidation and an opposite-side retest."""
-    values = _closed(candles)
-    candidates = []
-    for gap in fair_value_gaps:
-        if not isinstance(gap, dict) or gap.get("status") != "INVALIDATED":
-            continue
-        low, high = float(gap.get("low", 0) or 0), float(gap.get("high", 0) or 0)
-        if low <= 0 or high <= low:
-            continue
-        original = gap.get("type")
-        flipped = "bearish" if original == "bullish" else "bullish"
-        try:
-            formation_index = max(0, int(gap.get("formation_index", 0)) + 1)
-        except (TypeError, ValueError):
-            formation_index = 0
-        post_invalidation = values[formation_index:]
-        retest = any(low <= _value(candle, "close") <= high for candle in post_invalidation[-5:])
-        candidates.append({"type": flipped, "low": low, "high": high, "source_fvg": gap.get("zone_id") or gap.get("formation_index"), "status": "CONFIRMED_IFVG" if retest else "IFVG_CANDIDATE", "retest": retest, "entry_confirmation": False})
-    return {"status": "ready", "candidates": candidates, "confirmed": [item for item in candidates if item["status"] == "CONFIRMED_IFVG"], "tradeable": False}
+    """Expose the canonical IFVG playbook through the legacy evidence API."""
+    from .fvg_engine import detect_fvg_playbook
+    playbook = detect_fvg_playbook(candles)
+    candidates = playbook.get("ifvg", []) if isinstance(playbook, dict) else []
+    return {
+        "status": playbook.get("status", "ready") if isinstance(playbook, dict) else "ready",
+        "candidates": candidates,
+        "confirmed": [x for x in candidates if x.get("status") in {"CONFIRMED_IFVG", "TRADEABLE_IFVG"}],
+        "tradeable": bool(playbook.get("tradeable_ifvg")) if isinstance(playbook, dict) else False,
+        "tradeable_candidates": playbook.get("tradeable_ifvg", []) if isinstance(playbook, dict) else [],
+    }
+

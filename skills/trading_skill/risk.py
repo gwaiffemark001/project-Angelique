@@ -16,18 +16,22 @@ def account_risk_percent(equity: float) -> float:
     return float(config.TRADING_RISK_PER_TRADE_PERCENT)
 
 
-def effective_risk_percent(equity: float, requested_risk_percent: float | None = None) -> float:
-    """Enforce the single 1% target; never silently downgrade or upgrade it."""
+def effective_risk_percent(equity: float, requested_risk_percent: float | None = None, *, countertrend: bool = False) -> float:
+    """Return the policy risk, halved for explicitly sanctioned countertrend plans."""
     allowed = account_risk_percent(equity)
     if requested_risk_percent is None:
-        return allowed
-    try:
-        requested = float(requested_risk_percent)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Risk percentage must be numeric.") from exc
-    if abs(requested - allowed) > 1e-9:
-        raise ValueError(f"Risk policy requires exactly {allowed:.2f}% target risk; requested {requested:.2f}% is not permitted.")
-    return allowed
+        requested = allowed
+    else:
+        try:
+            requested = float(requested_risk_percent)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Risk percentage must be numeric.") from exc
+    target = allowed * 0.5 if countertrend else allowed
+    # A caller may not choose arbitrary risk. Only 1% and the engine-generated
+    # 0.5% countertrend rate are valid.
+    if abs(requested - target) > 1e-9:
+        raise ValueError(f"Risk policy allows {target:.2f}% for this setup; requested {requested:.2f}% is not permitted.")
+    return target
 
 
 def _canonical_symbol(symbol: Any) -> str:
@@ -47,12 +51,13 @@ def validate_profile_limits(
     new_risk_percent: float | None = None,
     symbol: str | None = None,
     direction: str = "BUY",
+    countertrend: bool = False,
 ) -> dict[str, Any]:
     """Validate position count, 1% risk policy, loss limits and portfolio exposure."""
     reasons: list[str] = []
     try:
         equity = float(account.get("equity", 0) or 0)
-        planned_risk = effective_risk_percent(equity, config.TRADING_RISK_PER_TRADE_PERCENT if new_risk_percent is None else new_risk_percent) if equity > 0 else None
+        planned_risk = effective_risk_percent(equity, config.TRADING_RISK_PER_TRADE_PERCENT if new_risk_percent is None else new_risk_percent, countertrend=countertrend) if equity > 0 else None
     except ValueError as exc:
         return {"valid": False, "reasons": [str(exc)], "position_count": len(positions), "same_symbol_position_count": 0, "open_risk_percent": 0.0}
 
@@ -114,24 +119,14 @@ def build_risk(
     *,
     loss_per_lot: float | None = None,
     profit_per_lot_at_tp: float | None = None,
-    require_authoritative: bool = False,
-    symbol: str = "",
+    countertrend: bool = False,
 ) -> dict:
-    """Size a position against the risk budget.
-
-    ``loss_per_lot`` should come from the broker (``order_calc_profit``). When
-    it is absent this function can fall back to a tick-value approximation for
-    **planning and display**, but the result is tagged
-    ``authoritative=False``. Execution paths pass ``require_authoritative=True``
-    and the fallback is refused -- see ``broker_calc.solve_volume_for_risk``,
-    which is the sizing routine the execution preflight actually uses.
-    """
     distance = abs(entry - stop_loss)
     if distance <= 0:
         raise ValueError("Stop loss must be based on a distinct invalidation price.")
     if equity <= 0:
         raise ValueError("Account equity is unavailable.")
-    risk_percent = effective_risk_percent(equity, risk_percent)
+    risk_percent = effective_risk_percent(equity, risk_percent, countertrend=countertrend)
 
     tick_size = float(symbol_specs.get("tick_size", 0) or 0)
     tick_value = float(symbol_specs.get("tick_value", 0) or 0)
@@ -140,49 +135,34 @@ def build_risk(
     maximum = float(symbol_specs.get("volume_max", 0) or 0)
     if min(step, minimum, maximum) <= 0:
         raise ValueError("MT5 volume specifications are incomplete; volume cannot be calculated.")
-    authoritative = loss_per_lot is not None
-    calculation_source = "order_calc_profit"
     if loss_per_lot is None:
-        if require_authoritative:
-            raise ValueError(
-                "BROKER_CALCULATION_UNAVAILABLE: order_calc_profit did not return a value for "
-                f"{symbol or 'this symbol'}. Automatic execution is blocked; a generic "
-                "tick-value fallback is not safe for cross-currency or non-FX instruments."
-            )
         if min(tick_size, tick_value) <= 0:
             raise ValueError("Broker-calculated P/L is unavailable and tick specifications are incomplete.")
-        # Prefer the loss-side tick value: profit and loss tick values differ
-        # for instruments whose profit currency is not the account currency.
-        loss_tick_value = float(symbol_specs.get("tick_value_loss", 0) or 0) or tick_value
-        loss_per_lot = (distance / tick_size) * loss_tick_value
-        calculation_source = "tick_value_estimate"
+        loss_per_lot = (distance / tick_size) * tick_value
     loss_per_lot = abs(float(loss_per_lot))
     if loss_per_lot <= 0:
         raise ValueError("Unable to calculate monetary loss at stop loss.")
 
-    risk_amount = equity * config.TRADING_RISK_PER_TRADE_PERCENT / 100
+    risk_amount = equity * risk_percent / 100
     raw_volume = risk_amount / loss_per_lot
     if config.TRADING_MINIMUM_LOT_PROTECTION and raw_volume < minimum:
-        raise ValueError(f"Broker minimum volume would exceed the 1% risk ceiling (ideal volume {raw_volume:.8f}, minimum {minimum:.8f}).")
+        raise ValueError(f"Broker minimum volume would exceed the configured risk ceiling (ideal volume {raw_volume:.8f}, minimum {minimum:.8f}).")
 
     # Always round DOWN to the broker's step to protect the risk ceiling.
     steps = int(raw_volume / step + 1e-12)
     volume = min(maximum, steps * step)
     volume = round(volume, 8)
     if volume < minimum:
-        raise ValueError("Normalized volume is below the broker minimum; trade rejected to protect the 1% risk ceiling.")
+        raise ValueError("Normalized volume is below the broker minimum; trade rejected to protect the configured risk ceiling.")
 
     actual_risk = loss_per_lot * volume
     actual_risk_percent = actual_risk / equity * 100
     if actual_risk_percent > config.TRADING_MAX_RISK_PERCENT + 1e-9:
-        raise ValueError(f"Normalized volume would exceed the 1% risk ceiling ({actual_risk_percent:.4f}%).")
+        raise ValueError(f"Normalized volume would exceed the configured risk ceiling ({actual_risk_percent:.4f}%).")
 
     margin_per_volume = float(symbol_specs.get("margin_per_volume", 0) or 0)
     if config.TRADING_MARGIN_PROTECTION and margin_per_volume <= 0:
-        raise ValueError(
-            "BROKER_CALCULATION_UNAVAILABLE: order_calc_margin did not return a margin requirement; "
-            "position safety cannot be verified and execution is blocked."
-        )
+        raise ValueError("MT5 margin requirement is unavailable; position safety cannot be verified.")
     margin_required = margin_per_volume * volume
     free_margin_after = free_margin - margin_required
     configured_minimum = max(float(minimum_free_margin or 0), equity * config.TRADING_MIN_FREE_MARGIN_PERCENT / 100)
@@ -201,14 +181,6 @@ def build_risk(
         "actual_risk_amount": actual_risk,
         "actual_risk_percent": actual_risk_percent,
         "loss_per_lot": loss_per_lot,
-        "calculation_source": calculation_source,
-        "authoritative": authoritative,
-        "calculation_note": (
-            "Loss per lot supplied by the broker (order_calc_profit)."
-            if authoritative else
-            "APPROXIMATION from tick value. Not broker-authoritative; must not be used "
-            "for automatic execution."
-        ),
         "expected_profit_at_tp": (abs(float(profit_per_lot_at_tp)) * volume if profit_per_lot_at_tp is not None else None),
         "minimum_free_margin": configured_minimum,
         "margin_required": margin_required,

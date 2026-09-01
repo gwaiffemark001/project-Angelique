@@ -6,9 +6,8 @@ from .confluence import evaluate_confluence
 from .strategy import identify_setup
 from .strategy_engine import select_strategy
 from .smc import ZoneRegistry
-from .data_quality import assess_candles, blocker_for
-from .indicators import required_history
-from .session_levels import current_session
+from .data_quality import assess_candles
+from .session_manager import current_session
 
 
 def _support_resistance(candles: list[dict[str, Any]], timeframe: str) -> dict[str, Any]:
@@ -22,15 +21,7 @@ def _support_resistance(candles: list[dict[str, Any]], timeframe: str) -> dict[s
     return {"resistance": resistance, "support": support}
 
 
-def analyze_structure(
-    timeframes: dict[str, list[dict[str, Any]]],
-    profile=None,
-    registry: ZoneRegistry | None = None,
-    *,
-    symbol: str = "",
-    specs: dict[str, Any] | None = None,
-    trades_24_7: bool = False,
-) -> dict[str, Any]:
+def analyze_structure(timeframes: dict[str, list[dict[str, Any]]], profile=None, registry: ZoneRegistry | None = None) -> dict[str, Any]:
     """Run the deterministic strategy analysis pipeline.
 
     A profile is required for production analysis because it defines the
@@ -42,48 +33,24 @@ def analyze_structure(
     if not timeframes:
         return {"valid": False, "decision": "BLOCKED_BY_DATA", "reason": "No timeframe candles were provided.", "trends": {}, "indicators": {}, "smc": {}}
 
-    # Crypto is 24/7 and must never inherit the FX weekend model. The broker
-    # symbol profile (currency_base / instrument_class) is the source of truth,
-    # so broker-suffixed crypto names resolve correctly here too.
-    if not trades_24_7 and (symbol or specs):
-        try:
-            from .instruments import build_profile
-            trades_24_7 = bool(build_profile(symbol or "", specs or {}).trades_24_7)
-        except Exception:
-            trades_24_7 = False
-
     required = tuple(profile.analysis_required_timeframes)
-    # Two distinct concerns, deliberately kept apart:
-    #
-    #   1. DATA QUALITY asks "did the broker give us the history this profile
-    #      asked for?" -- so the gate is the profile's own requested depth.
-    #      Very long timeframes (W1) legitimately have less history available.
-    #   2. INDICATOR READINESS asks "is this particular indicator trustworthy
-    #      on this series?" -- handled per indicator by `indicators.snapshot`,
-    #      which returns None until its own warm-up is satisfied.
-    #
-    # Collapsing the two would block all W1 analysis merely because a 200-EMA
-    # cannot be computed there, even though W1 is only used for trend bias.
     quality = {
-        tf: assess_candles(
-            timeframes.get(tf, []), tf,
-            minimum_candles=min(profile.candle_count(tf), required_history()),
-            require_closed=True, symbol=symbol, trades_24_7=trades_24_7,
-        )
+        tf: assess_candles(timeframes.get(tf, []), tf, minimum_candles=profile.minimum_analysis_candles(tf), require_closed=True)
         for tf in required
     }
-    blockers = {tf: result for tf, result in quality.items() if not result.get("tradeable")}
+    blockers = {tf: result for tf, result in quality.items() if result.get("status") != "fresh"}
     if blockers:
-        codes = sorted({blocker_for(result) for result in blockers.values() if blocker_for(result)})
+        statuses = {result.get("status") for result in blockers.values()}
+        if "stale" in statuses:
+            decision, reason = "STALE_MARKET_DATA", "Required closed-candle data is stale."
+        elif "insufficient" in statuses:
+            decision, reason = "INSUFFICIENT_HISTORY", "Required closed-candle history is insufficient for the strategy indicators."
+        else:
+            decision, reason = "BLOCKED_BY_DATA", "Required market candles are missing or invalid."
         return {
             "valid": False,
-            "decision": "BLOCKED_BY_DATA",
-            "blocker_codes": codes,
-            "reason": "; ".join(
-                f"{tf}: {result.get('reason')}" for tf, result in sorted(blockers.items())
-            ),
-            "minimum_candles_required": {tf: min(profile.candle_count(tf), required_history())
-                                         for tf in required},
+            "decision": decision,
+            "reason": reason,
             "trends": {},
             "indicators": {},
             "smc": {},
@@ -91,8 +58,7 @@ def analyze_structure(
         }
 
     windows = {tf: profile.analysis_windows(tf) for tf in timeframes}
-    context = build_market_context(timeframes, windows=windows, registry=registry,
-                                   trades_24_7=trades_24_7)
+    context = build_market_context(timeframes, windows=windows, registry=registry)
     trends, indicators, smc = context.trends, context.indicators, context.smc
     context_tf = profile.context_timeframe
     trend_tf = profile.trend_timeframe
@@ -114,16 +80,13 @@ def analyze_structure(
     if smc_assessment.get("complete"):
         smc_structure["decision"] = "BUY_PLAN_READY" if expected_direction == "BUY" else "SELL_PLAN_READY"
 
-    session_context = current_session(trades_24_7=trades_24_7)
     strategy_result = select_strategy(
         timeframes=timeframes,
         indicators=indicators,
         trends=trends,
         structure=smc_structure,
-        smc=smc,
-        session=session_context,
-        profile=profile,
         preferred=getattr(profile, "strategy_mode", "AUTO"),
+        setup_tf=setup_tf,
     )
     selected = strategy_result["selected"]
     decision = selected.get("state")
@@ -135,11 +98,6 @@ def analyze_structure(
         final_decision = "NO_SETUP"
 
     sr = {tf: _support_resistance(c[-windows.get(tf, {}).get("support_resistance", len(c)):], tf) for tf, c in timeframes.items() if c}
-    # `confluence` is now a VIEW of the selected strategy's own evaluation, not
-    # a second competing score. It is handed the exact evaluation object the
-    # selector ranked, so the two can never disagree.
-    from .strategy_evaluation import StrategyEvaluation
-    selected_meta_for_view = (selected.get("metadata") or {}).get("evaluation")
     confluence = evaluate_confluence(
         selected.get("direction") or expected_direction or "BUY",
         trends,
@@ -147,51 +105,66 @@ def analyze_structure(
         smc,
         profile=profile,
         strategy_name=selected.get("name") or "SMC",
-        session=session_context,
-        timeframes_data=timeframes,
     )
     score = float(confluence.get("score", 0) or 0)
-    minimum_score = int(confluence.get("minimum_score") or getattr(profile, "minimum_quality_score", 70))
-    confluence = {**confluence, "minimum_score": minimum_score, "score_passed": score >= minimum_score}
+    minimum_score = int(profile.minimum_score)
+    htf_alignment = confluence.get("htf_alignment", {}) if isinstance(confluence.get("htf_alignment"), dict) else {}
+    daily_bias = str(htf_alignment.get("daily_bias") or trends.get("D1") or "unknown").lower()
+    selected_direction = selected.get("direction") or expected_direction
+    execution_model_for_gate = str((smc_assessment or {}).get("model") or selected.get("name") or "SMC").upper()
+    bias_independent = execution_model_for_gate in {"FVG_RETRACEMENT", "IFVG_REVERSAL", "SWEEP_CONTINUATION"}
+    countertrend = bool(selected_direction in {"BUY", "SELL"} and daily_bias in {"bullish", "bearish"} and ((selected_direction == "BUY" and daily_bias == "bearish") or (selected_direction == "SELL" and daily_bias == "bullish")))
+    daily_unknown = selected_direction in {"BUY", "SELL"} and daily_bias not in {"bullish", "bearish"}
+    if selected_direction in {"BUY", "SELL"} and not bias_independent and (daily_unknown or (countertrend and score < 100)):
+        gate_reason = "Daily HTF bias is unavailable; actionable entries require alignment." if daily_unknown else f"Countertrend entry blocked: Daily bias is {daily_bias}, but {score:.0f}/100 quality is below the perfect-score countertrend requirement."
+        final_decision = "WAIT"
+        confluence = {**confluence, "ready": False, "score_passed": False, "htf_alignment": {**htf_alignment, "countertrend": countertrend, "countertrend_allowed": False, "gate": gate_reason}}
+    else:
+        gate_reason = ("FVG playbook is bias-independent; direction is derived from the sweep/reaction/inversion." if bias_independent else ("Countertrend 100/100 exception accepted with half risk." if countertrend else "Daily HTF bias aligned."))
+        confluence = {**confluence, "minimum_score": minimum_score, "score_passed": score >= minimum_score, "htf_alignment": {**htf_alignment, "bias_independent_setup": bias_independent, "countertrend": countertrend if not bias_independent else False, "countertrend_allowed": bool((countertrend and score >= 100) or bias_independent), "gate": gate_reason}}
+
+    session_context = current_session()
     selected_meta = selected.get("metadata") or {}
-    setup_assessment = selected_meta.get("setup") if isinstance(selected_meta, dict) else None
+    setup_assessment = None
+    if isinstance(selected_meta, dict):
+        setup_assessment = selected_meta.get("setup") or selected_meta.get("strategy_plan")
     if not isinstance(setup_assessment, dict):
         setup_assessment = smc_assessment
+    plan_meta = (selected_meta or {}).get("strategy_plan") if isinstance(selected_meta, dict) else None
+    # SMC/ICT candidates store completion on the setup assessment, while
+    # indicator/rule-based strategies store it in strategy_plan. Normalise
+    # this into one explicit flag so downstream execution cannot treat an
+    # incomplete strategy as a finished plan.
+    strategy_complete = bool(
+        (plan_meta or {}).get("complete", False)
+        if isinstance(plan_meta, dict)
+        else setup_assessment.get("complete", False)
+    )
+    setup_assessment = {**setup_assessment, "strategy_name": selected.get("name"), "strategy_complete": strategy_complete}
+    execution_model = str(setup_assessment.get("model") or selected.get("name") or "SMC")
 
     return {
         "valid": True,
         "direction": selected.get("direction") or expected_direction,
         "decision": final_decision,
-        "reason": ("Strategy selected: " + str(selected.get("name")) + ". " + " ".join(selected.get("reasons", []))) if selected.get("reasons") else selected.get("state", "WAIT"),
+        "reason": gate_reason if final_decision == "WAIT" and "HTF" in gate_reason or "Countertrend" in gate_reason else (("Strategy selected: " + str(selected.get("name")) + ". " + " ".join(selected.get("reasons", []))) if selected.get("reasons") else selected.get("state", "WAIT")),
         "trends": trends,
         "indicators": indicators,
         "smc": smc,
         "strategy": strategy_result,
         "strategy_name": selected.get("name"),
-        "strategy_quality_score": score,
-        "strategy_quality_score_meaning": (
-            "Completeness of the selected strategy's own setup definition on a 0-100 scale. "
-            "It is NOT a win probability and no probability is implied."
-        ),
-        "minimum_quality_score": minimum_score,
-        "hard_requirements_failed": confluence.get("failed_hard_requirements", []),
+        "execution_model": execution_model,
         "session_context": session_context,
+        "ict": context.ict,
+        "htf_alignment": confluence.get("htf_alignment", {}),
         "setup_assessment": setup_assessment,
         "confluence": confluence,
         "data_quality": quality,
         "indicator_reasons": [f"{tf}: RSI={float(v.get('rsi_14', 0) or 0):.1f}, MACD hist={float(v.get('macd_histogram', 0) or 0):.6f}, ADX={float(v.get('adx_14', 0) or 0):.1f}" for tf, v in indicators.items() if v.get("readiness", {}).get("rsi_14")],
-        "smc_reasons": [
-            f"{tf}: liquidity={(v.get('liquidity_sweep') or {}).get('pool', {}).get('kind', 'none')}, "
-            f"shift={v.get('structure_shift') or 'none'}, "
-            f"tradeable FVGs={len(v.get('tradeable_gaps', []))}/{len(v.get('fair_value_gaps', []))}, "
-            f"OB={'present' if v.get('order_block') else 'none'}, "
-            f"location={v.get('location', 'unknown')}, "
-            f"AMD={(v.get('amd') or {}).get('phase', 'unclear')}"
-            for tf, v in smc.items()
-        ],
+        "smc_reasons": [f"{tf}: liquidity={v.get('liquidity_sweep') or 'none'}, shift={v.get('structure_shift') or 'none'}, FVGs={len(v.get('fair_value_gaps', []))}, OB={'present' if v.get('order_block') else 'none'}, location={v.get('location', 'unknown')}" for tf, v in smc.items()],
         "stages": {
             "higher_timeframe_context": {context_tf: trends.get(context_tf), trend_tf: trends.get(trend_tf)},
-            "market_structure": {tf: (v.get("market_structure") or {}).get("bias", "unknown") for tf, v in smc.items()},
+            "market_structure": {tf: v.get("structure", {}).get("bias", "unknown") for tf, v in smc.items()},
             "support_resistance": sr,
             "entry_model": selected.get("name"),
             "strategy_selection": strategy_result,

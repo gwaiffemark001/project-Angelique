@@ -120,10 +120,10 @@ try:
     def t_gui():
         app=AngeliqueDesktopApp(); app.update_idletasks()
         assert app.winfo_width()>=1200 and app.winfo_height()>=760
-        for attr in ("send_button","mic_button","training_toggle_button","_position_monitor_button","_signal_button"):
+        for attr in ("send_button","mic_button","training_toggle_button","_signal_button"):
             assert getattr(app,attr,None) is not None, attr
         dims=f"{app.winfo_width()}x{app.winfo_height()}"; app.destroy(); return dims
-    check("gui","original UI render/buttons",t_gui)
+    check("gui","current UI render/buttons",t_gui)
 except Exception as e:
     results.append({"group":"gui","skill":"import","passed":False,"detail":f"{type(e).__name__}: {e}"})
 

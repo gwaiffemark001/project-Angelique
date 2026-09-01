@@ -458,12 +458,12 @@ try:
  from gui.angelique_desktop import AngeliqueDesktopApp
  def gui_probe():
   app=AngeliqueDesktopApp(); app.update_idletasks()
-  required=['send_button','mic_button','training_toggle_button','_position_monitor_button','_signal_button']
+  required=['send_button','mic_button','training_toggle_button','_signal_button']
   missing=[x for x in required if getattr(app,x,None) is None]
   dims=(app.winfo_width(),app.winfo_height()); app.destroy()
   assert not missing, missing; assert dims[0]>=1200 and dims[1]>=760,dims
   return dims
- check('gui','original UI and buttons',gui_probe,'real-X11')
+ check('gui','current UI and buttons',gui_probe,'real-X11')
 except Exception as e:
  RESULTS.append({'group':'gui','operation':'import','status':'FAIL','mode':'real-X11','detail':f'{type(e).__name__}: {e}'})
 

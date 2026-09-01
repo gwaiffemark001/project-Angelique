@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from .account_manager import account_manager
 from .compat import build_default_workflow
 from .journal import record_trade
@@ -130,10 +132,20 @@ def run_position_management(account_mode: str = "demo", trading_mode: str = "DAY
             count = max(profile.candle_count(tf) for tf in required)
             raw_market = active.adapter.market(symbol, required, account_mode, count)
             timeframes = raw_market.get("timeframes", {}) or {}
+            from core.price_units import normalize_spread, spread_policy
+            specs = dict(raw_market.get("symbol_specs", {}) or {})
+            specs.setdefault("bid", raw_market.get("bid")); specs.setdefault("ask", raw_market.get("ask")); specs.setdefault("trading_mode", profile.mode.value)
+            normalized = normalize_spread(symbol, float(raw_market.get("spread") or 0), specs) if raw_market.get("spread") is not None else {}
+            policy = spread_policy(symbol, specs, profile.mode.value)
             entry["price"] = raw_market.get("bid") if direction == "SELL" else raw_market.get("ask")
             entry["spread_pips"] = raw_market.get("spread_pips")
             entry["spread_points"] = raw_market.get("spread_points")
-            entry["spread_unit"] = raw_market.get("spread_unit")
+            entry["spread_unit"] = normalized.get("spread_unit") or raw_market.get("spread_unit")
+            entry["spread_ticks"] = normalized.get("spread_ticks")
+            entry["instrument_class"] = normalized.get("instrument_class") or policy.get("instrument_class")
+            entry["maximum_spread_value"] = policy.get("max_value")
+            entry["maximum_spread_unit"] = policy.get("max_unit")
+            entry["maximum_spread_price"] = policy.get("max_price")
 
             quality = {tf: assess_candles(timeframes.get(tf, []), tf) for tf in required}
             quality_ok = bool(raw_market.get("bid") and raw_market.get("ask")) and not raw_market.get("stale") and not raw_market.get("error") and all(item.get("status") == "fresh" for item in quality.values())
@@ -184,10 +196,10 @@ def decide_and_act(
     """One full autopilot cycle. Scans for a plan; every gate (setup
     completeness, risk, margin, spread, minimum RR, portfolio limits,
     daily/weekly loss caps) has already run by the time scan_universe
-    returns a plan. The ONE remaining gate is news: a plan is executed
-    immediately unless it is flagged requires_manual_approval (a
-    high-impact calendar event is imminent, or scraped news bias
-    conflicts with the trade direction), in which case it's returned as
+    returns a plan. News can require explicit approval, and automatic
+    execution is restricted to configured ICT kill zones. A plan flagged
+    requires_manual_approval (a
+    high-impact calendar event is present), in which case it's returned as
     PENDING_APPROVAL for the GUI to surface for explicit sign-off."""
     mode_key = str(account_mode or "demo").strip().lower()
     blocked_until = float(_auto_execution_blocked_until.get(mode_key, 0.0) or 0.0)
@@ -211,6 +223,16 @@ def decide_and_act(
         return {**scan, "state": "PENDING_APPROVAL", "execution": {"state": "MANUAL_APPROVAL_REQUIRED", "reason": plan.get("manual_approval_reason", "News interference requires approval."), "plan": plan}}
 
     confirmation_phrase = plan.get("confirmation_phrase")
+    # Kill-zone timing is an auto-execution gate only. A human-approved plan
+    # can still be executed deliberately outside the prime window.
+    if getattr(config, "TRADING_KILL_ZONE_ENFORCED", True):
+        try:
+            from skills.trading.ict_core import get_kill_zone_status
+            status, zone_name = get_kill_zone_status(datetime.now(timezone.utc))
+            if status != "ACTIVE":
+                return {**scan, "state": "KILL_ZONE_BLOCKED", "execution": {"state": "AUTO_BLOCKED_KILL_ZONE", "reason": "Automatic execution is restricted to an ICT kill zone.", "zone": zone_name, "plan": plan}}
+        except Exception as exc:
+            return {**scan, "state": "KILL_ZONE_BLOCKED", "execution": {"state": "AUTO_BLOCKED_KILL_ZONE", "reason": f"Kill-zone validation failed safely closed: {exc}", "plan": plan}}
     if not auto_execution_enabled(account_mode):
         return {**scan, "state": "PENDING_APPROVAL", "execution": {"state": "APPROVAL_REQUIRED", "reason": "Automatic execution is disabled for this account mode.", "message": f"Automatic execution is disabled for {account_mode.upper()} mode.", "plan": plan}}
     result = execute_trade(confirmation_phrase)

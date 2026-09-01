@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from enum import Enum
 from core import config
+from core.price_units import spread_policy, instrument_class
 
 
 class TradingMode(str, Enum):
@@ -25,19 +26,16 @@ class TradingProfile:
     max_positions: int
     max_daily_loss: float
     max_weekly_loss: float
-    minimum_score: int = 7
-    #: Minimum strategy_quality_score (0-100) for an executable setup.
-    #: POLICY, not a statistically validated threshold.
-    minimum_quality_score: int = 70
+    minimum_score: int = 70
     minimum_rr: float = config.TRADING_MIN_RR
     sl_atr_multiplier: float = 0.5
     monitor_interval_seconds: int = 10
     expected_hold_days: int = 1
     allow_weekend_holding: bool = False
     strategy_mode: str = "AUTO"
-    # For non-FX instruments we use an explicit MT5-point ceiling rather than
-    # pretending that a universal FX "pip" has the same meaning everywhere.
-    max_spread_metal_points: float = 350.0
+    # Retained for compatibility with older callers; symbol-aware policies
+    # below are authoritative.
+    max_spread_metal_points: float = 40.0
 
     @property
     def required_timeframes(self) -> tuple[str, ...]:
@@ -53,7 +51,7 @@ class TradingProfile:
     def analysis_required_timeframes(self) -> tuple[str, ...]:
         if self.mode is TradingMode.SWING:
             return ("W1", "D1", "H4", "H1")
-        return ("H4", "H1", "M15", "M5")
+        return ("D1", "H4", "H1", "M15", "M5")
 
     @property
     def analysis_optional_timeframes(self) -> tuple[str, ...]:
@@ -62,23 +60,23 @@ class TradingProfile:
         return ("D1", "M30", "M1", "W1", "MN")
 
     def candle_count(self, timeframe: str) -> int:
-        """Candles to request.
-
-        The depth is driven by the indicator warm-up requirements rather than
-        by round numbers: a 200-period EMA cannot be evaluated on 250 candles,
-        and silently reporting one anyway is how bad signals are produced.
-        """
-        from .indicators import required_history
-
+        """Return the fetch depth needed by the profile, including indicator warm-up."""
         tf = str(timeframe).upper()
         if self.mode is TradingMode.SWING:
-            base = {"W1": 220, "D1": 400, "H4": 400, "H1": 350, "M15": 250, "MN": 120}.get(tf, 250)
-        else:
-            base = {"D1": 300, "H4": 400, "H1": 400, "M30": 350, "M15": 350, "M5": 300, "M1": 250}.get(tf, 250)
-        # Long-history timeframes (W1/MN) are limited by what exists at all.
-        if tf in {"W1", "MN"}:
-            return base
-        return max(base, required_history())
+            return {"W1": 220, "D1": 300, "H4": 300, "H1": 250, "M15": 120, "MN": 100}.get(tf, 150)
+        return {"D1": 220, "H4": 250, "H1": 250, "M30": 180, "M15": 180, "M5": 120, "M1": 120}.get(tf, 150)
+
+    def minimum_analysis_candles(self, timeframe: str) -> int:
+        """Minimum closed history required to compute the actual strategy inputs.
+
+        This is deliberately lower than the fetch depth on short entry frames.
+        EMA200 is the deepest common indicator, so trend frames retain a 205+
+        requirement while entry/context frames are not unnecessarily blocked.
+        """
+        tf = str(timeframe).upper()
+        if self.mode is TradingMode.SWING:
+            return {"W1": 205, "D1": 205, "H4": 205, "H1": 80}.get(tf, 60)
+        return {"D1": 205, "H4": 205, "H1": 205, "M15": 80, "M5": 60}.get(tf, 60)
 
     def analysis_windows(self, timeframe: str) -> dict[str, int]:
         depth = self.candle_count(timeframe)
@@ -163,24 +161,29 @@ def normalize_trading_mode(mode: TradingMode | str | None) -> TradingMode:
 
 
 def max_spread_for_symbol(symbol: str, mode: TradingMode | str | None = None) -> float:
-    """Return the maximum spread in the configured unit.
-
-    For FX this is pips. For metals, callers should use max_spread_for_symbol
-    only for UI text; enforcement is performed by safety.py using MT5 points.
-    """
+    """Return the symbol-aware maximum spread display value."""
     profile = get_trading_profile(mode)
-    return float(profile.max_spread_pips)
+    return float(spread_policy(symbol, {}, profile.mode.value)["max_value"])
 
 
 def is_metal_symbol(symbol: str) -> bool:
-    name=str(symbol or "").upper()
-    return any(token in name for token in ("XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER"))
+    return instrument_class(symbol) == "METAL"
 
 
 def max_spread_points_for_symbol(symbol: str, mode: TradingMode | str | None = None) -> float:
-    profile=get_trading_profile(mode)
-    return float(profile.max_spread_metal_points if is_metal_symbol(symbol) else profile.max_spread_points)
+    """Compatibility helper returning a point ceiling where it is defined."""
+    profile = get_trading_profile(mode)
+    policy = spread_policy(symbol, {}, profile.mode.value)
+    klass = policy.get("instrument_class")
+    if klass in {"FX_MAJOR", "FX_CROSS"}:
+        # Conventional 10 MT5 points per FX pip for fractional pricing.
+        return float(policy["max_value"]) * 10.0
+    return float(policy["max_value"])
 
+
+def max_spread_policy(symbol: str, specs: dict | None = None, mode: TradingMode | str | None = None) -> dict:
+    profile = get_trading_profile(mode)
+    return spread_policy(symbol, specs or {}, profile.mode.value)
 
 def get_trading_profile(mode: TradingMode | str | None = None) -> TradingProfile:
     return PROFILES[normalize_trading_mode(mode)]

@@ -22,9 +22,12 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # --- LLM Configuration ---
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_REQUEST_TIMEOUT_S = float(os.getenv("OLLAMA_REQUEST_TIMEOUT_S", "8"))
-PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "qwen2.5:3b")
+PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "llama3.1:latest")
 CODER_MODEL = os.getenv("CODER_MODEL", "qwen2.5-coder:7b")
-LOCAL_FALLBACK_MODEL = os.getenv("LOCAL_FALLBACK_MODEL", "qwen2.5:3b")
+LOCAL_FALLBACK_MODEL = os.getenv("LOCAL_FALLBACK_MODEL", "llama3.1:latest")
+OLLAMA_CODER_MODEL = os.getenv("OLLAMA_CODER_MODEL", "qwen2.5-coder:7b")
+OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "llama3.1:latest")
+OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text:latest")
 
 BLUESMINDS_API_KEY = os.getenv("BLUESMINDS_API_KEY", "")
 BLUESMINDS_BASE_URL = os.getenv("BLUESMINDS_BASE_URL", "https://api.bluesminds.com/v1")
@@ -85,12 +88,14 @@ TRADING_MARGIN_PROTECTION = os.getenv("TRADING_MARGIN_PROTECTION", "true").lower
 TRADING_MARTINGALE_ENABLED = os.getenv("TRADING_MARTINGALE_ENABLED", "false").lower() in ("1", "true", "yes")
 TRADING_MAX_DRAWDOWN_PERCENT = float(os.getenv("TRADING_MAX_DRAWDOWN_PERCENT", "8.0"))
 TRADING_MAX_CONSECUTIVE_LOSSES = int(os.getenv("TRADING_MAX_CONSECUTIVE_LOSSES", "3"))
-TRADING_AUTO_EXECUTION = os.getenv("TRADING_AUTO_EXECUTION", "false").lower() in ("1", "true", "yes")
+TRADING_AUTO_EXECUTION = os.getenv("TRADING_AUTO_EXECUTION", "true").lower() in ("1", "true", "yes")
+TRADING_KILL_ZONE_ENFORCED = os.getenv("TRADING_KILL_ZONE_ENFORCED", "true").lower() in ("1", "true", "yes")
+TRADING_AMD_GATE_ENFORCED = os.getenv("TRADING_AMD_GATE_ENFORCED", "true").lower() in ("1", "true", "yes")
 TRADING_LIVE_AUTO_EXECUTION = os.getenv("TRADING_LIVE_AUTO_EXECUTION", "false").lower() in ("1", "true", "yes")
 TRADING_SWING_EXPECTED_HOLD_DAYS = int(os.getenv("TRADING_SWING_EXPECTED_HOLD_DAYS", "7"))
 TRADING_SWING_ALLOW_WEEKEND_HOLDING = os.getenv("TRADING_SWING_ALLOW_WEEKEND_HOLDING", "true").lower() in ("1", "true", "yes")
 TRADING_MIN_RR_RATIO = float(os.getenv("ANGELIQUE_TRADING_MIN_RR_RATIO", "2.0"))
-TRADING_MAX_SPREAD = float(os.getenv("ANGELIQUE_TRADING_MAX_SPREAD", "3.0"))
+TRADING_MAX_SPREAD = float(os.getenv("ANGELIQUE_TRADING_MAX_SPREAD", "3.0"))  # Legacy fallback; symbol-aware spread_policy is authoritative.
 TRADING_CONFIDENCE_THRESHOLD = float(os.getenv("ANGELIQUE_TRADING_CONFIDENCE_THRESHOLD", "80.0"))
 TRADING_RSI_MIN = float(os.getenv("ANGELIQUE_TRADING_RSI_MIN", "30.0"))
 TRADING_RSI_MAX = float(os.getenv("ANGELIQUE_TRADING_RSI_MAX", "70.0"))
@@ -109,6 +114,8 @@ DEFAULT_TRADING_TIMEFRAME = os.getenv("ANGELIQUE_DEFAULT_TRADING_TIMEFRAME", TRA
 # --- Database Configuration (ABSOLUTE PATHS) ---
 DB_PATH = str(DATA_DIR / "angelique.db")
 CHROMA_DB_PATH = str(DATA_DIR / "chroma_memory")
+MEMORY_SEMANTIC_COLLECTION_NAME = os.getenv("MEMORY_SEMANTIC_COLLECTION_NAME", "angelique_memory_v2")
+MEMORY_EMBEDDING_DIM = int(os.getenv("MEMORY_EMBEDDING_DIM", "768"))
 
 # --- Runtime directories and data paths ---
 LOG_DIR = DATA_DIR / "logs"
@@ -163,7 +170,7 @@ NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-70b-instruct")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
 _OLLAMA_CONFIGURED_MODELS = os.getenv("OLLAMA_MODEL_CANDIDATES", "").strip()
-_OLLAMA_DEFAULT_MODELS = f"{LOCAL_FALLBACK_MODEL},{PRIMARY_MODEL},{CODER_MODEL},qwen2.5:3b,llama3.1"
+_OLLAMA_DEFAULT_MODELS = f"{OLLAMA_CHAT_MODEL},{LOCAL_FALLBACK_MODEL},{PRIMARY_MODEL},{CODER_MODEL},qwen2.5:3b,llama3.1"
 OLLAMA_MODEL_CANDIDATES = [
     s.strip() for s in (_OLLAMA_CONFIGURED_MODELS or _OLLAMA_DEFAULT_MODELS).split(",") if s.strip()
 ]

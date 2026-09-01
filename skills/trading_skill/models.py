@@ -27,6 +27,9 @@ class WorkflowState(str, Enum):
     NO_SETUP = "NO_SETUP"
     TRADE_READY = "TRADE_READY"
     BLOCKED_BY_DATA = "BLOCKED_BY_DATA"
+    INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+    STALE_MARKET_DATA = "STALE_MARKET_DATA"
+    BROKER_METADATA_INCOMPLETE = "BROKER_METADATA_INCOMPLETE"
     WAIT = "WAIT"
     BUY_PLAN_READY = "BUY_PLAN_READY"
     SELL_PLAN_READY = "SELL_PLAN_READY"
@@ -72,8 +75,13 @@ class MarketSnapshot:
     stale: bool = False
     error: str | None = None
     spread_points: float | None = None
+    spread_ticks: float | None = None
     spread_price: float | None = None
     spread_unit: str | None = None
+    instrument_class: str | None = None
+    maximum_spread_value: float | None = None
+    maximum_spread_unit: str | None = None
+    maximum_spread_price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -167,6 +175,7 @@ class TradePlan:
             "equity_at_decision": self.equity_at_decision,
             "spread_price": self.spread_price,
             "spread_points": self.spread_points,
+            "spread_ticks": self.spread_ticks,
             "spread_pips": self.spread_pips,
             "calculated_volume": self.calculated_volume,
             "actual_risk_amount": self.actual_risk_amount,
