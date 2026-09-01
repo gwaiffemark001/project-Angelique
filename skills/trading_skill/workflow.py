@@ -140,14 +140,26 @@ class TradingWorkflow:
         if slippage > acceptable_slippage:
             return False, f"Price moved too far from the approved entry ({current_price:.6f} vs {plan.entry:.6f})."
 
-        fresh_analysis = analyze_structure(market.timeframes, profile=plan_profile, registry=self._zone_registry)
+        fresh_analysis = analyze_structure(
+            market.timeframes, profile=plan_profile, registry=self._zone_registry,
+            symbol=plan.mt5_symbol, specs=specs,
+        )
         expected_decision = "BUY_PLAN_READY" if plan.direction == "BUY" else "SELL_PLAN_READY"
         if not fresh_analysis.get("valid"):
-            return False, "Technical setup changed before execution; the approved plan is stale."
-        fresh_score = float((fresh_analysis.get("confluence") or {}).get("score", 0) or 0)
-        fresh_minimum = int(plan_profile.minimum_score)
+            reason = fresh_analysis.get("reason") or "technical setup changed"
+            return False, f"Analysis is no longer valid before execution: {reason}"
+        fresh_score = float(fresh_analysis.get("strategy_quality_score", 0) or 0)
+        fresh_minimum = int(fresh_analysis.get("minimum_quality_score")
+                            or getattr(plan_profile, "minimum_quality_score", 70))
+        # A hard requirement failing is disqualifying on its own -- the score
+        # can never buy the trade past it.
+        failed = fresh_analysis.get("hard_requirements_failed") or []
+        if failed:
+            return False, ("Hard requirements are no longer satisfied: "
+                           f"{', '.join(str(item) for item in failed)}.")
         if fresh_score < fresh_minimum:
-            return False, f"Fresh confluence score {fresh_score:.0f}/10 is below the required {fresh_minimum}/10."
+            return False, (f"Fresh strategy_quality_score {fresh_score:.0f}/100 is below the "
+                           f"required {fresh_minimum}/100. (Setup completeness, not a win probability.)")
         if fresh_analysis.get("decision") != expected_decision:
             return False, "Technical setup changed before execution; the approved plan is stale."
 
@@ -189,13 +201,68 @@ class TradingWorkflow:
             minimum_rr=plan_profile.minimum_rr,
             maximum_spread_pips=max_spread_for_symbol(plan.mt5_symbol, plan_profile.mode),
             maximum_spread_points=max_spread_points_for_symbol(plan.mt5_symbol, plan_profile.mode),
+            specs=specs,
         )
         if not safety["valid"]:
             return False, f"Revalidation safety failed: {'; '.join(safety['reasons'])}"
 
         if abs(risk["volume"] - plan.volume) > 1e-8:
             return False, "Calculated volume changed during revalidation."
-        return True, "Revalidation passed."
+
+        # -- final broker-side gate ----------------------------------------
+        # Everything above validated OUR model of the trade. This validates the
+        # BROKER's model: live spread, tick grid, stops_level/freeze_level on
+        # the correct side of the book, broker-solved volume, order_calc_margin
+        # and finally OrderCheck. Nothing is sent to the trade server.
+        approved, preflight_reason, execution = self._broker_preflight(
+            plan, plan_profile, market, specs, fresh_account,
+        )
+        self._last_preflight = execution
+        if not approved:
+            return False, preflight_reason
+        return True, "Revalidation and broker preflight passed."
+
+    def _broker_preflight(self, plan, plan_profile, market, specs, account):
+        """Run the authoritative broker preflight. Returns (ok, reason, execution)."""
+        from .execution_preflight import PreflightConfig, preflight as run_preflight
+        from .mt5_adapter import BrokerCalculatorAdapter
+
+        calculator = BrokerCalculatorAdapter(self.adapter, plan.account_mode)
+        order_checker = None
+        if callable(getattr(self.adapter, "order_preflight", None)):
+            order_checker = calculator.order_check
+        try:
+            result = run_preflight(
+                symbol=plan.mt5_symbol,
+                direction=plan.direction,
+                specs=specs,
+                tick={"bid": market.bid, "ask": market.ask,
+                      "time": datetime.now(timezone.utc).isoformat()},
+                plan={
+                    "entry": plan.entry, "stop_loss": plan.stop_loss,
+                    "take_profit": plan.take_profit,
+                    "risk_percent": config.TRADING_RISK_PER_TRADE_PERCENT,
+                    "minimum_rr": plan_profile.minimum_rr,
+                    "generated_at": getattr(plan, "generated_at", None)
+                    or datetime.now(timezone.utc).isoformat(),
+                },
+                account={
+                    "equity": account.equity, "balance": account.balance,
+                    "margin_free": account.free_margin, "margin": account.used_margin,
+                    "currency": getattr(account, "currency", None),
+                    "trade_allowed": True, "trade_expert": True,
+                },
+                calculator=calculator,
+                order_checker=order_checker,
+                config=PreflightConfig(require_order_check=order_checker is not None),
+            )
+        except Exception as exc:
+            return False, f"Broker preflight could not be completed: {exc}", None
+        if not result.approved:
+            codes = ", ".join(blocker.code for blocker in result.blockers)
+            detail = "; ".join(blocker.message for blocker in result.blockers)
+            return False, f"Broker preflight blocked the trade [{codes}]: {detail}", result.as_dict()
+        return True, "Broker preflight passed.", result.as_dict()
 
     def prepare(self, requested_symbol: str, account_mode: str = "demo", count: int | None = None, risk_percent: float | None = None) -> WorkflowResult:
         mode = normalize_mode(account_mode)
@@ -323,7 +390,9 @@ class TradingWorkflow:
             }
             return WorkflowResult(WorkflowState.BLOCKED_BY_DATA, "BLOCKED_BY_DATA: required broker data is missing, invalid, or stale.", decision_state="BLOCKED_BY_DATA", account=account, market=market, details={"data_blockers": blockers})
 
-        analysis = analyze_structure(market.timeframes, profile=self.profile, registry=self._zone_registry)
+        analysis = analyze_structure(market.timeframes, profile=self.profile,
+                                     registry=self._zone_registry,
+                                     symbol=mt5_symbol, specs=specs)
         if not analysis["valid"]:
             return WorkflowResult(WorkflowState.NO_SETUP, f"NO_SETUP: {analysis['reason']}", decision_state="NO_SETUP", account=account, market=market, details={"analysis": analysis})
         if analysis.get("decision") != ("BUY_PLAN_READY" if analysis.get("direction") == "BUY" else "SELL_PLAN_READY"):
@@ -338,32 +407,41 @@ class TradingWorkflow:
                 details={"analysis": analysis, "decision": decision, "audit": analysis.get("setup_assessment", {})},
             )
 
-        news_context = assess_news(mt5_symbol, analysis["direction"])
+        # News is an execution-risk input. It NEVER modifies the technical
+        # score -- a pending release does not make a chart pattern better or
+        # worse. Relevant imminent events route the plan to manual approval.
+        news_context = assess_news(mt5_symbol, analysis["direction"], specs)
         analysis = {**analysis, "news_context": news_context}
-        base_score = analysis.get("confluence", {}).get("score", 0)
-        adjusted_score = max(0, min(10, base_score + news_context.get("score_adjustment", 0)))
+        quality_score = float(analysis.get("strategy_quality_score", 0) or 0)
+        minimum_quality = int(analysis.get("minimum_quality_score")
+                              or getattr(self.profile, "minimum_quality_score", 70))
+        score_passed = quality_score >= minimum_quality
         analysis["confluence"] = {
             **analysis.get("confluence", {}),
-            "base_score": base_score,
-            "news_adjustment": news_context.get("score_adjustment", 0),
-            "score": adjusted_score,
+            "score": quality_score,
+            "maximum_score": 100,
+            "minimum_score": minimum_quality,
+            "score_passed": score_passed,
+            "ready": score_passed,
+            "news_adjustment": 0,
+            "news_adjustment_policy": news_context.get("score_adjustment_policy", ""),
             "news_reason": news_context.get("reason", ""),
-            "ready": adjusted_score >= self.profile.minimum_score,
+            "score_meaning": ("Setup completeness for the selected strategy (0-100). "
+                              "This is NOT a win probability."),
         }
-        score_passed = adjusted_score >= self.profile.minimum_score
-        analysis["confluence"] = {**analysis["confluence"], "score_passed": score_passed, "minimum_score": self.profile.minimum_score}
         if not score_passed:
             return WorkflowResult(
                 WorkflowState.WAIT,
-                f"WAIT: confluence score {adjusted_score:.0f}/10 is below the required {self.profile.minimum_score}/10.",
+                f"WAIT: strategy_quality_score {quality_score:.0f}/100 is below the required "
+                f"{minimum_quality}/100. (Setup completeness, not a win probability.)",
                 decision_state="WAIT",
                 account=account,
                 market=market,
                 details={
                     "analysis": analysis,
-                    "failure_stage": "confluence_score",
-                    "score": adjusted_score,
-                    "minimum_score": self.profile.minimum_score,
+                    "failure_stage": "strategy_quality_score",
+                    "strategy_quality_score": quality_score,
+                    "minimum_quality_score": minimum_quality,
                     "score_passed": False,
                 },
             )
@@ -375,7 +453,8 @@ class TradingWorkflow:
         # limits) still applies in full; this only changes whether the
         # finished plan is allowed to auto-execute at the bottom of this
         # method.
-        manual_hold = bool(news_context.get("high_impact_imminent") or news_context.get("directional_conflict"))
+        manual_hold = bool(news_context.get("requires_manual_approval")
+                           or news_context.get("high_impact_imminent"))
         manual_hold_reason = news_context.get("reason", "") if manual_hold else ""
 
         portfolio = validate_profile_limits(
@@ -392,9 +471,16 @@ class TradingWorkflow:
         latest = market.timeframes[self.profile.entry_timeframe][-1]
         entry = float(market.ask if analysis["direction"] == "BUY" and market.ask else market.bid if analysis["direction"] == "SELL" and market.bid else latest["close"])
         selected_strategy = str(analysis.get("strategy_name") or ((analysis.get("strategy") or {}).get("selected") or {}).get("name") or "SMC")
+        # The selected strategy's OWN plan context (measured-move target,
+        # mean-reversion mean, AMD invalidation, SMC zone) is passed through so
+        # the executed plan is the plan that was scored.
+        selected_candidate = (analysis.get("strategy") or {}).get("selected") or {}
+        strategy_plan_context = ((selected_candidate.get("metadata") or {})
+                                 .get("evaluation") or {}).get("plan_context") or {}
         level_result = calculate_trade_levels(
             symbol=mt5_symbol, direction=analysis["direction"], strategy=selected_strategy,
-            analysis=analysis, timeframes=market.timeframes, specs=specs, profile=self.profile, entry=entry,
+            analysis=analysis, timeframes=market.timeframes, specs=specs, profile=self.profile,
+            entry=entry, bid=market.bid, ask=market.ask, plan_context=strategy_plan_context,
         )
         if not level_result.get("valid"):
             return WorkflowResult(
@@ -433,6 +519,36 @@ class TradingWorkflow:
         except ValueError as exc:
             return WorkflowResult(WorkflowState.BLOCKED_BY_RISK, f"BLOCKED_BY_RISK: {exc}", decision_state="BLOCKED_BY_RISK", account=account, market=market, details={"analysis": analysis})
 
+        # Net economics from the SAME authoritative inputs the UI will display.
+        net_economics = None
+        try:
+            from .costs import CostAssumptions, ExecutionPrices, estimate_costs, reward_to_risk
+            stop_distance = abs(entry - stop_loss)
+            money_per_unit = (abs(risk["risk_amount"]) / (stop_distance * risk["volume"])
+                              if stop_distance > 0 and risk["volume"] else None)
+            costs = estimate_costs(
+                __import__("skills.trading_skill.instruments", fromlist=["build_profile"])
+                .build_profile(mt5_symbol, specs),
+                volume=risk["volume"],
+                spread_price=market.spread_price,
+                money_per_price_unit_per_lot=money_per_unit,
+                assumptions=CostAssumptions(
+                    commission_per_lot_per_side=float(specs.get("commission_per_lot") or 0.0)
+                ),
+                direction=analysis["direction"],
+            )
+            net_economics = reward_to_risk(
+                entry=entry, stop_loss=stop_loss, take_profit=take_profit,
+                minimum_rr=self.minimum_rr,
+                gross_risk_money=risk["risk_amount"],
+                gross_reward_money=risk.get("expected_profit_at_tp"),
+                costs=costs,
+                execution_prices=(ExecutionPrices(analysis["direction"], market.bid, market.ask)
+                                  if market.bid and market.ask else None),
+            )
+        except Exception:
+            net_economics = None
+
         safety = validate_trade_setup(
             symbol=mt5_symbol,
             direction=analysis["direction"],
@@ -452,6 +568,8 @@ class TradingWorkflow:
             minimum_rr=self.minimum_rr,
             maximum_spread_pips=max_spread_for_symbol(mt5_symbol, self.profile.mode),
             maximum_spread_points=max_spread_points_for_symbol(mt5_symbol, self.profile.mode),
+            specs=specs,
+            net_rr=net_economics.net_rr if net_economics else None,
         )
         if not safety["valid"]:
             return WorkflowResult(WorkflowState.BLOCKED_BY_RISK, f"BLOCKED_BY_RISK: {'; '.join(safety['reasons'])}", decision_state="BLOCKED_BY_RISK", account=account, market=market, details={"analysis": analysis, "safety": safety})
@@ -539,6 +657,51 @@ class TradingWorkflow:
                 "support_resistance": analysis.get("stages", {}).get("support_resistance", {}),
                 "confluence": confluence,
                 "session_context": analysis.get("session_context", {}),
+                # ---- the single authoritative decision object --------------
+                # Everything the UI renders must come from here. It is the same
+                # object the execution decision was made from, so a displayed
+                # number can never diverge from the number that was gated on.
+                "authoritative": {
+                    "strategy": selected_strategy,
+                    "strategy_quality_score": analysis.get("strategy_quality_score"),
+                    "minimum_quality_score": analysis.get("minimum_quality_score"),
+                    "score_meaning": analysis.get("strategy_quality_score_meaning"),
+                    "strategy_evaluation": ((selected_candidate.get("metadata") or {})
+                                            .get("evaluation")),
+                    "instrument_class": level_result.get("instrument_class"),
+                    "entry": entry,
+                    "entry_side": "ask" if analysis["direction"] == "BUY" else "bid",
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "stop_basis": level_result.get("stop_basis"),
+                    "target_basis": level_result.get("target_basis"),
+                    "stop_distance_display": level_result.get("stop_distance_display"),
+                    "target_distance_display": level_result.get("target_distance_display"),
+                    "gross_rr": level_result.get("rr"),
+                    "net_rr": net_economics.net_rr if net_economics else None,
+                    "economics": net_economics.as_dict() if net_economics else None,
+                    "volume": risk["volume"],
+                    "risk_amount": risk["risk_amount"],
+                    "risk_calculation_source": risk.get("calculation_source"),
+                    "risk_authoritative": risk.get("authoritative"),
+                    "margin_required": risk["margin_required"],
+                    "broker_validation": level_result.get("broker_validation"),
+                    "spread": {
+                        "price": market.spread_price,
+                        "points": market.spread_points,
+                        "pips": market.spread_pips,
+                        "unit": market.spread_unit,
+                    },
+                    "news": {
+                        "requires_manual_approval": news_context.get("requires_manual_approval"),
+                        "relevant_assets": news_context.get("relevant_assets"),
+                        "score_adjustment": 0,
+                        "policy": news_context.get("score_adjustment_policy"),
+                    },
+                    "data_quality": analysis.get("data_quality", {}),
+                    "note": ("Broker preflight (live spread, stops_level, order_calc_margin, "
+                             "OrderCheck) runs again immediately before execution."),
+                },
             },
             requires_manual_approval=manual_hold,
             manual_approval_reason=manual_hold_reason,

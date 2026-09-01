@@ -26,6 +26,9 @@ class TradingProfile:
     max_daily_loss: float
     max_weekly_loss: float
     minimum_score: int = 7
+    #: Minimum strategy_quality_score (0-100) for an executable setup.
+    #: POLICY, not a statistically validated threshold.
+    minimum_quality_score: int = 70
     minimum_rr: float = config.TRADING_MIN_RR
     sl_atr_multiplier: float = 0.5
     monitor_interval_seconds: int = 10
@@ -59,10 +62,23 @@ class TradingProfile:
         return ("D1", "M30", "M1", "W1", "MN")
 
     def candle_count(self, timeframe: str) -> int:
+        """Candles to request.
+
+        The depth is driven by the indicator warm-up requirements rather than
+        by round numbers: a 200-period EMA cannot be evaluated on 250 candles,
+        and silently reporting one anyway is how bad signals are produced.
+        """
+        from .indicators import required_history
+
         tf = str(timeframe).upper()
         if self.mode is TradingMode.SWING:
-            return {"W1": 200, "D1": 300, "H4": 300, "H1": 250, "M15": 200, "MN": 100}.get(tf, 150)
-        return {"D1": 200, "H4": 250, "H1": 250, "M30": 250, "M15": 250, "M5": 200, "M1": 150}.get(tf, 150)
+            base = {"W1": 220, "D1": 400, "H4": 400, "H1": 350, "M15": 250, "MN": 120}.get(tf, 250)
+        else:
+            base = {"D1": 300, "H4": 400, "H1": 400, "M30": 350, "M15": 350, "M5": 300, "M1": 250}.get(tf, 250)
+        # Long-history timeframes (W1/MN) are limited by what exists at all.
+        if tf in {"W1", "MN"}:
+            return base
+        return max(base, required_history())
 
     def analysis_windows(self, timeframe: str) -> dict[str, int]:
         depth = self.candle_count(timeframe)

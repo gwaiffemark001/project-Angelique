@@ -35,6 +35,16 @@ def signal_ui_contract(report: dict[str, Any]) -> dict[str, Any]:
         "score": confluence.get("score"),
         "minimum_score": confluence.get("minimum_score", 0),
         "score_passed": confluence.get("score_passed"),
+        # Explicit naming so no consumer can mistake this for a win probability.
+        "strategy_quality_score": report.get("strategy_quality_score", confluence.get("score")),
+        "minimum_quality_score": report.get("minimum_quality_score",
+                                            confluence.get("minimum_score", 0)),
+        "score_meaning": report.get(
+            "strategy_quality_score_meaning",
+            "Setup completeness for the selected strategy (0-100). NOT a win probability.",
+        ),
+        "failed_hard_requirements": confluence.get("failed_hard_requirements", []),
+        "authoritative": report.get("authoritative", {}),
         "model": strategy.get("name") or assessment.get("model"),
         "spread_pips": report.get("spread_pips"),
         "spread_points": report.get("spread_points"),
@@ -96,6 +106,9 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
         "setup_missing": setup_assessment.get("missing", []),
         "setup_reason": setup_assessment.get("reason"),
         "confluence": confluence,
+        "hard_requirements": confluence.get("hard_requirements", []),
+        "failed_hard_requirements": confluence.get("failed_hard_requirements", []),
+        "evidence_families": confluence.get("evidence_families", {}),
         "indicator_reasons": analysis.get("indicator_reasons", []),
         "smc_reasons": analysis.get("smc_reasons", []),
         "session_context": analysis.get("session_context", {}),
@@ -126,6 +139,26 @@ def analyze_symbol(symbol: str, account_mode: str, timeframes: list[str], tradin
         "structure": analysis,
         "setup_evidence": evidence,
         "confluence": confluence,
+        # The single authoritative decision object. Every displayed value must
+        # be read from here rather than recomputed, so the UI can never show a
+        # number that differs from the one the execution decision used.
+        "authoritative": ((plan or {}).get("analysis_audit") or {}).get("authoritative")
+        or {
+            "strategy": analysis.get("strategy_name"),
+            "strategy_quality_score": analysis.get("strategy_quality_score"),
+            "minimum_quality_score": analysis.get("minimum_quality_score"),
+            "score_meaning": analysis.get("strategy_quality_score_meaning"),
+            "strategy_evaluation": (strategy_selected.get("metadata") or {}).get("evaluation"),
+            "data_quality": analysis.get("data_quality", {}),
+        },
+        "strategy_quality_score": analysis.get("strategy_quality_score",
+                                               confluence.get("score")),
+        "minimum_quality_score": analysis.get("minimum_quality_score",
+                                              confluence.get("minimum_score")),
+        "strategy_quality_score_meaning": analysis.get(
+            "strategy_quality_score_meaning",
+            "Setup completeness for the selected strategy (0-100). NOT a win probability.",
+        ),
         "reasons": analysis.get("reasons", []),
         "market_errors": analysis.get("market_errors", {}),
         "latest": market,
