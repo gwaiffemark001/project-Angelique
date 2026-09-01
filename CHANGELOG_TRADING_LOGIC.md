@@ -2,6 +2,60 @@
 
 All notable changes to the Angelique Trading Hub decision engine.
 
+## [Second audit pass] — 2026-09-01
+
+Follow-up corrections found while re-auditing the first hardening pass.
+
+### Fixed
+
+- **AMD (P1):** `RETRACEMENT_ENTRY` is now a hard requirement. An AMD
+  ACCUMULATION → RAID → REACTION → DISTRIBUTION → DELIVERY sequence with price
+  still extended away from the delivery zone is a completed *impulse*, not an
+  entry. `detect_amd` no longer reports `complete=True` until price is actually
+  inside the retracement zone, and `evaluate_amd` will not mark the sequence
+  executable without that phase. Phase ordering now includes the entry phase.
+- **Spread economics (P0):** `estimate_costs` no longer double-counts the
+  spread. When gross risk/reward are produced by `order_calc_profit` from the
+  actual executable Bid/Ask legs, the spread is already embedded in those
+  prices; a separate 2x spread cost would overstate the transaction drag and
+  make `net_rr` understate real economics. Callers pass
+  `prices_are_executable=True`; the legacy two-leg spread remains available for
+  midpoint/display-only calculations.
+- **Trade levels (P0):** `calculate_trade_levels` no longer requires a generic
+  structural-swing scan when the selected strategy already supplies both
+  `stop_reference` and `target` in its `plan_context`. Previously a breakout
+  measured move or mean-reversion mean could be rejected simply because the
+  swing scanner had no data — even though the strategy had already defined the
+  executable plan.
+- **Broker metadata completeness (P0):** `InstrumentProfile.missing_metadata`
+  now also flags missing `tick_value`, `tick_value_loss`, `trade_calc_mode`
+  and `currency_profit`, not only the basic price/volume grid. This prevents an
+  instrument with a name/mode guess from looking execution-complete when the
+  broker calculator semantics cannot be verified.
+- **Crypto market schedule (P1):** `analyze_structure` derives `trades_24_7`
+  from the broker symbol profile, so crypto (including broker-suffixed crypto
+  names) no longer inherits the FX weekend/closure model in data-quality and
+  session gates.
+- **Spread safety (P0):** the trading workflow now computes the authoritative
+  `spread_model` gate on live Bid/Ask (instrument class, rolling observed
+  distribution, spread-to-stop and spread-to-reward ratios) and passes that
+  result to `validate_trade_setup`. The per-profile hard-coded pip/point
+  ceilings are no longer the execution-spread decision; they remain as legacy
+  fallback for callers that do not supply the gate.
+- **Preflight net economics (P0):** `execution_preflight` now blocks with
+  `BROKER_CALCULATION_UNAVAILABLE` if the net RR cannot be computed because the
+  broker did not answer the take-profit `order_calc_profit`. Automatic
+  execution no longer proceeds on gross RR alone.
+
+### Tests added in this pass
+
+- `tests/test_trading_structure.py::test_amd_is_incomplete_until_price_retraces_into_the_delivery_zone`
+- `tests/test_trading_execution_math.py::test_executable_prices_do_not_double_count_the_spread`
+- `tests/test_trading_execution_math.py::test_non_executable_prices_still_charge_the_spread`
+- `tests/test_trading_hardening.py::test_strategy_plan_context_does_not_require_a_swing_scan`
+- `tests/test_safety_calculations.py::test_spread_gate_is_authoritative_and_overrides_legacy_profile_ceiling`
+- `tests/test_trading_execution_math.py::test_preflight_blocks_when_net_rr_cannot_be_computed`
+
 ## [Unreleased] — 2026-09-01
 
 Complete correction of the trading decision engine: indicator mathematics,

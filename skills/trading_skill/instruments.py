@@ -471,6 +471,10 @@ REQUIRED_EXECUTION_FIELDS = (
     "digits",
     "point",
     "tick_size",
+    "tick_value",
+    "tick_value_loss",
+    "trade_calc_mode",
+    "currency_profit",
     "contract_size",
     "volume_min",
     "volume_max",
@@ -510,18 +514,26 @@ def build_profile(symbol: str, specs: dict[str, Any] | None = None) -> Instrumen
     if digits <= 0 and point > 0:
         digits = max(0, round(-1 * (len(f"{point:.10f}".rstrip('0').split('.')[-1]) * -1)))
 
+    calc_mode_value = (
+        _i(specs["trade_calc_mode"], -1) if specs.get("trade_calc_mode") is not None else -1
+    )
+    currency_profit_value = _s(specs.get("currency_profit")).upper()
     missing = tuple(
         name
-        for name, value in (
-            ("digits", digits),
-            ("point", point),
-            ("tick_size", tick_size),
-            ("contract_size", contract_size),
-            ("volume_min", _f(pick("volume_min"))),
-            ("volume_max", _f(pick("volume_max"))),
-            ("volume_step", _f(pick("volume_step"))),
+        for name, value, valid in (
+            ("digits", digits, digits > 0),
+            ("point", point, point > 0),
+            ("tick_size", tick_size, tick_size > 0),
+            ("tick_value", tick_value, tick_value > 0),
+            ("tick_value_loss", tick_value_loss, tick_value_loss > 0),
+            ("trade_calc_mode", calc_mode_value, calc_mode_value >= 0),
+            ("currency_profit", currency_profit_value, bool(currency_profit_value)),
+            ("contract_size", contract_size, contract_size > 0),
+            ("volume_min", _f(pick("volume_min")), _f(pick("volume_min")) > 0),
+            ("volume_max", _f(pick("volume_max")), _f(pick("volume_max")) > 0),
+            ("volume_step", _f(pick("volume_step")), _f(pick("volume_step")) > 0),
         )
-        if _f(value) <= 0
+        if not valid
     )
 
     pip_size = _pip_size(instrument_class, point, digits, base, quote)

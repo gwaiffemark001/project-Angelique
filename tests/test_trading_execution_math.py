@@ -59,6 +59,21 @@ class Calculator:
         return {"margin": self.contract * volume * price / self.leverage}
 
 
+class ProfitFailCalculator(Calculator):
+    """Broker calculator that answers SL loss but refuses a TP profit figure."""
+
+    def calculate_profit(self, symbol, direction, volume, price_open, price_close):
+        result = super().calculate_profit(symbol, direction, volume, price_open, price_close)
+        if isinstance(result, dict) and result.get("profit") is not None and float(result["profit"]) > 0:
+            return {"status": "error", "error": "order_calc_profit unavailable at TP"}
+        return result
+
+    def calculate_margin(self, symbol, direction, volume, price):
+        if self.fail:
+            return {"status": "error", "error": "order_calc_margin unavailable"}
+        return {"margin": self.contract * volume * price / self.leverage}
+
+
 def _account(equity=10000.0):
     return {"equity": equity, "balance": equity, "margin_free": equity * 0.98,
             "margin": 0.0, "currency": "USD", "trade_allowed": True, "trade_expert": True}
@@ -321,6 +336,37 @@ def test_costs_can_destroy_an_apparently_good_rr():
     assert economics.reasons
 
 
+def test_executable_prices_do_not_double_count_the_spread():
+    # gross risk/reward were computed by order_calc_profit from live Ask/Bid, so
+    # the spread is already inside those prices. Charging a separate 2x spread
+    # would double-count it and overstate the drag on net RR.
+    profile = build_profile("EURUSD", FX_SPECS)
+    costs = estimate_costs(
+        profile, volume=1.0, spread_price=0.0001,
+        money_per_price_unit_per_lot=100000,
+        assumptions=CostAssumptions(commission_per_lot_per_side=3.5),
+        prices_are_executable=True,
+    )
+    assert costs.spread_cost == pytest.approx(0.0)
+    assert costs.total_cost == pytest.approx(7.0)      # 2 sides x 3.5/2? no, 7.0
+    economics = reward_to_risk(
+        entry=1.10000, stop_loss=1.09900, take_profit=1.10600,
+        minimum_rr=2.0, gross_risk_money=100.0, gross_reward_money=600.0,
+        costs=costs,
+        execution_prices=ExecutionPrices("BUY", bid=1.09990, ask=1.10000),
+    )
+    assert economics.net_rr == pytest.approx((600.0 - 7.0) / (100.0 + 7.0))
+
+
+def test_non_executable_prices_still_charge_the_spread():
+    profile = build_profile("EURUSD", FX_SPECS)
+    costs = estimate_costs(profile, volume=1.0, spread_price=0.0001,
+                           money_per_price_unit_per_lot=100000,
+                           assumptions=CostAssumptions(commission_per_lot_per_side=3.5))
+    assert costs.spread_cost == pytest.approx(20.0)     # 10 pips x 1.0 lot x 2 legs
+    assert costs.total_cost == pytest.approx(27.0)
+
+
 def test_net_rr_is_none_when_broker_money_values_are_missing():
     economics = reward_to_risk(entry=1.10, stop_loss=1.095, take_profit=1.115, minimum_rr=2.0)
     assert economics.net_rr is None
@@ -497,6 +543,16 @@ def test_preflight_blocks_a_wide_spread():
                        account=_account(), calculator=Calculator(),
                        order_checker=lambda request: {"retcode": 0})
     assert "SPREAD_UNACCEPTABLE" in [b.code for b in result.blockers]
+
+
+def test_preflight_blocks_when_net_rr_cannot_be_computed():
+    now = datetime.now(timezone.utc)
+    result = preflight(symbol="EURUSD", direction="BUY", specs=FX_SPECS, tick=_tick(now),
+                       plan=_plan(now), account=_account(), calculator=ProfitFailCalculator(),
+                       order_checker=lambda request: {"retcode": 0})
+    assert not result.approved
+    assert BROKER_CALCULATION_UNAVAILABLE in [b.code for b in result.blockers]
+    assert any("Net RR could not be computed" in b.message for b in result.blockers)
 
 
 def test_preflight_blocks_when_costs_destroy_the_net_rr():

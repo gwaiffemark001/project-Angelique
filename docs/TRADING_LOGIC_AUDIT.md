@@ -653,6 +653,28 @@ tested; broker agreement and market performance are unverified. Before live use:
 
 ---
 
+## 11.1 Second audit pass (remaining gaps found after the first pass)
+
+The first pass fixed the original P0 set. A second pass found the following
+remaining gaps, all corrected in this branch:
+
+| # | Severity | Module | Defect | Correction |
+|---|---|---|---|---|
+| 34 | P1 | `amd.py` / `strategies.py` | AMD could be `complete=True` without `RETRACEMENT_ENTRY`; a completed impulse was labelled an executable entry | Entry/retracement phase is now a hard requirement in `detect_amd` and `evaluate_amd`; phase ordering includes it |
+| 35 | P0 | `costs.py` / `execution_preflight.py` | Net RR charged the spread twice when gross money already used executable Bid/Ask legs | `prices_are_executable=True` in executable callers; spread component is 0 with an explicit note |
+| 36 | P0 | `trade_levels.py` | `calculate_trade_levels` required a swing scan even when strategy `plan_context` supplied both stop and target; breakout/mean-reversion plans could be rejected without data | Full strategy levels now bypass the swing scan; swings remain the fallback |
+| 37 | P0 | `instruments.py` | `metadata_complete` ignored `tick_value`, `tick_value_loss`, `trade_calc_mode`, `currency_profit`, so a guessed classification looked execution-complete | Added to `REQUIRED_EXECUTION_FIELDS` and `missing_metadata` |
+| 38 | P1 | `analysis.py` | Crypto inherited the FX weekend model because `trades_24_7` was only passed when a caller selected it | `analyze_structure` derives `trades_24_7` from the broker `InstrumentProfile` |
+| 39 | P0 | `workflow.py` / `safety.py` | Execution-spread decision still depended on per-profile hard-coded pip/point ceilings | Workflow computes `spread_model` gate on live Bid/Ask and passing it to `validate_trade_setup` as authoritative |
+| 40 | P0 | `execution_preflight.py` | Automatic execution could proceed with only gross RR when the broker failed to return a TP profit figure | New `require_net_rr` gate: missing net RR blocks with `BROKER_CALCULATION_UNAVAILABLE` |
+
+**Test result for this pass (trading modules):** `164 passed, 1 skipped` on the
+trading/financial test files. The remaining non-trading test that imports the
+whole `core/tools` stack depends on optional vision dependencies
+(`pytesseract`/`cv2`) and is outside this audit's scope.
+
+---
+
 ## 12. Pre-existing unrelated failure
 
 `tests/test_live_trading_guards.py::test_execute_tool_requires_canonical_registry`

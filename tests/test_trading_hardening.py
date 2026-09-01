@@ -1,3 +1,4 @@
+import pytest
 from types import SimpleNamespace
 
 
@@ -69,6 +70,28 @@ def test_structural_buy_levels_use_validated_swings_not_window_extremes():
     assert result["target_swing"]["index"] == 50
     assert result["stop_loss"] < 1.1000
     assert result["take_profit"] == 1.1300
+
+
+def test_strategy_plan_context_does_not_require_a_swing_scan():
+    from skills.trading_skill.trade_levels import calculate_trade_levels
+    profile = SimpleNamespace(structure_timeframe="M15", minimum_rr=1.5)
+    plan_context = {
+        "target": 1.12000,
+        "target_basis": "Breakout measured move",
+        "stop_reference": 1.09600,
+        "stop_basis": "Opposite side of the broken range",
+    }
+    result = calculate_trade_levels(
+        symbol="EURUSD", direction="BUY", strategy="BREAKOUT",
+        analysis={"smc": {}}, timeframes={}, specs=_specs(),
+        profile=profile, entry=1.10500, bid=1.09990, ask=1.10000,
+        plan_context=plan_context,
+    )
+    assert result["valid"], result.get("reason")
+    assert result["take_profit"] == pytest.approx(1.12000)
+    assert result["stop_loss"] < 1.09600
+    assert result["target_basis"] == "Breakout measured move"
+    assert result["stop_basis"] == "Opposite side of the broken range"
 
 
 def test_position_close_pending_is_not_called_closed():

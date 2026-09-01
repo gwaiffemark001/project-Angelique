@@ -16,10 +16,10 @@
     "non-trading skills"
   ],
   "summary": {
-    "total_findings": 33,
-    "p0": 24,
-    "p1": 9,
-    "fixed": 33
+    "total_findings": 40,
+    "p0": 29,
+    "p1": 11,
+    "fixed": 40
   },
   "score_policy": {
     "name": "strategy_quality_score",
@@ -340,6 +340,69 @@
       "remediation": "Non-trending regime and band re-entry are hard gates.",
       "status": "FIXED",
       "verified_by": "tests/test_trading_strategy_scoring.py::test_mean_reversion_is_blocked_in_a_trending_regime"
+    },
+    {
+      "priority": "P1",
+      "module": "amd.py / strategies.py",
+      "symbol": "detect_amd/evaluate_amd",
+      "defect": "AMD could report complete=True without RETRACEMENT_ENTRY; a completed impulse was labelled an executable entry.",
+      "remediation": "Retracement into the delivery zone is now a hard requirement and is included in phase ordering.",
+      "status": "FIXED",
+      "verified_by": "tests/test_trading_structure.py::test_amd_is_incomplete_until_price_retraces_into_the_delivery_zone"
+    },
+    {
+      "priority": "P0",
+      "module": "costs.py / execution_preflight.py",
+      "symbol": "estimate_costs/reward_to_risk",
+      "defect": "Net RR charged the spread twice when gross money already used executable Bid/Ask legs.",
+      "remediation": "Executable callers pass prices_are_executable=True; spread component is 0 with an explicit note.",
+      "status": "FIXED",
+      "verified_by": "tests/test_trading_execution_math.py::test_executable_prices_do_not_double_count_the_spread"
+    },
+    {
+      "priority": "P0",
+      "module": "trade_levels.py",
+      "symbol": "calculate_trade_levels",
+      "defect": "Required a swing scan even when strategy plan_context supplied both stop and target.",
+      "remediation": "Full strategy levels bypass the swing scan; swings remain the fallback.",
+      "status": "FIXED",
+      "verified_by": "tests/test_trading_hardening.py::test_strategy_plan_context_does_not_require_a_swing_scan"
+    },
+    {
+      "priority": "P0",
+      "module": "instruments.py",
+      "symbol": "InstrumentProfile.metadata_complete",
+      "defect": "ignored tick_value, tick_value_loss, trade_calc_mode and currency_profit; a guessed classification looked execution-complete.",
+      "remediation": "Added those fields to REQUIRED_EXECUTION_FIELDS and missing_metadata.",
+      "status": "FIXED",
+      "verified_by": "tests/test_trading_execution_math.py::test_incomplete_metadata_is_reported_precisely"
+    },
+    {
+      "priority": "P1",
+      "module": "analysis.py",
+      "symbol": "analyze_structure",
+      "defect": "Crypto inherited the FX weekend model because trades_24_7 was only passed when selected.",
+      "remediation": "derive trades_24_7 from the broker InstrumentProfile.",
+      "status": "FIXED",
+      "verified_by": "skills/trading_skill/analysis.py (source; no live broker available)"
+    },
+    {
+      "priority": "P0",
+      "module": "workflow.py / safety.py",
+      "symbol": "spread safety gate",
+      "defect": "Execution-spread decision still depended on per-profile hard-coded pip/point ceilings.",
+      "remediation": "Workflow computes spread_model gate on live Bid/Ask and passes it to validate_trade_setup as authoritative.",
+      "status": "FIXED",
+      "verified_by": "tests/test_safety_calculations.py::test_spread_gate_is_authoritative_and_overrides_legacy_profile_ceiling"
+    },
+    {
+      "priority": "P0",
+      "module": "execution_preflight.py",
+      "symbol": "preflight",
+      "defect": "Automatic execution could proceed with only gross RR when the broker failed to return a TP profit figure.",
+      "remediation": "New require_net_rr gate: missing net RR blocks with BROKER_CALCULATION_UNAVAILABLE.",
+      "status": "FIXED",
+      "verified_by": "tests/test_trading_execution_math.py::test_preflight_blocks_when_net_rr_cannot_be_computed"
     }
   ],
   "verification": {
@@ -413,5 +476,14 @@
     "execution_preflight.max_price_drift_ratio": 0.25,
     "execution_preflight.minimum_margin_level_percent": 200,
     "calibrated": false
+  },
+  "second_pass": {
+    "note": "Additional corrections applied after re-auditing the first hardening pass.",
+    "verified_dev_tests": "164 passed, 1 skipped on trading/financial test files.",
+    "not_verified": [
+      "Live MT5 broker audit was not performed in this sandbox (no MetaTrader5 terminal or Wine MT5 bridge was available).",
+      "Broker order_calc_profit/order_calc_margin were not observed against a live server.",
+      "No backtest or expectancy was produced."
+    ]
   }
 }

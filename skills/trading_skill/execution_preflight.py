@@ -74,6 +74,9 @@ class PreflightConfig:
     minimum_free_margin: float = 0.0
     minimum_margin_level_percent: float = 200.0
     minimum_net_rr: float | None = None
+    #: Automatic execution requires a computed NET RR after costs. A missing
+    #: broker-side TP profit calculation is a hard blocker, not a warning.
+    require_net_rr: bool = True
     stops_level_buffer_multiple: float = 1.5
     require_order_check: bool = True
     costs: CostAssumptions = field(default_factory=CostAssumptions)
@@ -304,11 +307,21 @@ def preflight(
         gross_risk = abs(float(solution.risk_amount_actual or 0))
         reward_calc = broker_profit(calculator, profile, direction, volume, live_entry, take_profit)
         gross_reward = abs(float(reward_calc.value)) if reward_calc.ok else None
-        money_per_price_unit = (gross_risk / (stop_distance * volume)) if (stop_distance > 0 and volume) else None
+        # Use the broker's own loss-per-lot figure (from solve_volume_for_risk)
+        # rather than re-deriving "money per unit" from the risk budget. The
+        # two are close when the broker model is linear, but the broker's is
+        # authoritative for non-FX / cross-currency symbols.
+        money_per_price_unit = None
+        if stop_distance > 0 and volume:
+            if solution.loss_per_lot:
+                money_per_price_unit = solution.loss_per_lot / stop_distance
+            else:
+                money_per_price_unit = gross_risk / (stop_distance * volume)
         costs = estimate_costs(
             profile, volume=volume, spread_price=measurement.raw_spread_price,
             money_per_price_unit_per_lot=money_per_price_unit,
             assumptions=config.costs, direction=direction,
+            prices_are_executable=True,   # gross money already used live ask/bid legs
         )
         minimum_rr = config.minimum_net_rr if config.minimum_net_rr is not None else float(plan.get("minimum_rr") or 2.0)
         economics = reward_to_risk(
@@ -323,6 +336,14 @@ def preflight(
                          net_rr=economics.net_rr, gross_rr=economics.gross_rr)
         elif economics.net_rr is not None:
             result.check(f"Net RR {economics.net_rr:.2f} after costs (gross {economics.gross_rr:.2f}).")
+        elif config.require_net_rr:
+            result.block(
+                BROKER_CALCULATION_UNAVAILABLE,
+                "Net RR could not be computed because the broker did not return a "
+                "profit figure at the take-profit level. Automatic execution is blocked "
+                "rather than relying on gross RR alone.",
+                gross_rr=economics.gross_rr, net_rr=None,
+            )
         else:
             result.warn("Net RR could not be computed; only the gross RR is available.")
 
