@@ -714,7 +714,8 @@ def evaluate_amd(
 
     ordering_ok = True
     previous_end = -1
-    for name in ("ACCUMULATION", "MANIPULATION", "REACTION", "DISTRIBUTION", "STRUCTURAL_DELIVERY"):
+    for name in ("ACCUMULATION", "MANIPULATION", "REACTION", "DISTRIBUTION",
+                 "STRUCTURAL_DELIVERY", "RETRACEMENT_ENTRY"):
         phase = phases.get(name) or {}
         if not phase.get("complete"):
             continue
@@ -728,7 +729,8 @@ def evaluate_amd(
                        ("MANIPULATION", "Liquidity raid of the range"),
                        ("REACTION", "Reclaim back inside the range"),
                        ("DISTRIBUTION", "Displacement in the raid direction"),
-                       ("STRUCTURAL_DELIVERY", "Closed-candle structure break")):
+                       ("STRUCTURAL_DELIVERY", "Closed-candle structure break"),
+                       ("RETRACEMENT_ENTRY", "Price retraced into the delivery zone")):
         phase = phases.get(key) or {}
         evaluation.require(key.lower(), label, bool(phase.get("complete")), str(phase.get("reason", "")))
     evaluation.require("phase_ordering", "Phases occurred in strict order", ordering_ok,

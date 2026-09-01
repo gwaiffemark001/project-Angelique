@@ -493,6 +493,29 @@ class TradingWorkflow:
         take_profit = float(level_result["take_profit"])
         distance = float(level_result["stop_distance"])
         expected_hold_days = self.profile.expected_hold_days
+
+        # Authoritative instrument-aware spread gate, computed on the live Bid
+        # and Ask. This replaces the old per-profile hard-coded pips/points
+        # ceilings as the execution-spread check.
+        spread_gate_dict = None
+        try:
+            from .instruments import build_profile
+            from .spread_model import evaluate_spread_gate, measure_spread, spread_store
+            _instrument_profile = build_profile(mt5_symbol, specs or {})
+            _measurement = measure_spread(_instrument_profile, market.bid, market.ask)
+            spread_store.observe(_measurement, (analysis.get("session_context") or {}).get("session", "ALL"))
+            _gate = evaluate_spread_gate(
+                _instrument_profile, _measurement,
+                stop_distance_price=float(level_result.get("stop_distance") or distance),
+                reward_distance_price=float(level_result.get("target_distance") or 0) or None,
+                session=(analysis.get("session_context") or {}).get("session", "ALL"),
+            )
+            spread_gate_dict = _gate.as_dict()
+        except Exception as exc:
+            spread_gate_dict = {
+                "allowed": False, "reasons": [f"Spread gate could not be evaluated: {exc}"],
+                "checks": [], "measurement": {}, "policy": {}, "stats": None,
+            }
         weekend_exposure = (
             self.profile.mode.value == "SWING_TRADING"
             and datetime.now(timezone.utc).weekday() + expected_hold_days >= 5
@@ -536,6 +559,7 @@ class TradingWorkflow:
                     commission_per_lot_per_side=float(specs.get("commission_per_lot") or 0.0)
                 ),
                 direction=analysis["direction"],
+                prices_are_executable=True,
             )
             net_economics = reward_to_risk(
                 entry=entry, stop_loss=stop_loss, take_profit=take_profit,
@@ -570,6 +594,7 @@ class TradingWorkflow:
             maximum_spread_points=max_spread_points_for_symbol(mt5_symbol, self.profile.mode),
             specs=specs,
             net_rr=net_economics.net_rr if net_economics else None,
+            spread_gate=spread_gate_dict,
         )
         if not safety["valid"]:
             return WorkflowResult(WorkflowState.BLOCKED_BY_RISK, f"BLOCKED_BY_RISK: {'; '.join(safety['reasons'])}", decision_state="BLOCKED_BY_RISK", account=account, market=market, details={"analysis": analysis, "safety": safety})

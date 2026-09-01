@@ -318,35 +318,51 @@ def calculate_trade_levels(
     instrument = build_profile(symbol, specs)
     plan_context = plan_context or {}
 
-    selected = select_structural_swings(analysis, structure_tf, direction, entry, strategy)
-    if not selected.get("valid"):
-        return selected
+    # A strategy that fully defines both sides of the trade (breakout measured
+    # move, mean-reversion mean, SMC target+invalidation) must NOT be discarded
+    # simply because a generic swing scan has no data. Structural swings remain
+    # the default, but they are not a prerequisite when the strategy already
+    # supplied the executable plan.
+    strategy_stop = plan_context.get("stop_reference")
+    strategy_target = plan_context.get("target")
+    has_full_strategy_levels = bool(
+        isinstance(strategy_stop, (int, float)) and strategy_stop
+        and isinstance(strategy_target, (int, float)) and strategy_target
+    )
+    if has_full_strategy_levels:
+        selected = {"valid": True, "stop_swing": None, "target_swing": None}
+    else:
+        selected = select_structural_swings(analysis, structure_tf, direction, entry, strategy)
+        if not selected.get("valid"):
+            return selected
 
     point = _as_float(specs.get("point"))
     tick_size = _as_float(specs.get("tick_size"))
     buffer = max(point * 2.0, tick_size) if max(point, tick_size) > 0 else 0.0
-    stop_swing = selected["stop_swing"]
-    target_swing = selected["target_swing"]
+    stop_swing = selected.get("stop_swing")
+    target_swing = selected.get("target_swing")
 
     # -- stop: strategy intent first, structural swing as the default --------
-    strategy_stop = plan_context.get("stop_reference")
     if isinstance(strategy_stop, (int, float)) and strategy_stop:
         stop_loss = float(strategy_stop) - buffer if direction == "BUY" else float(strategy_stop) + buffer
         stop_basis = plan_context.get("stop_basis") or f"{strategy} strategy invalidation level + broker buffer"
-    else:
+    elif stop_swing is not None:
         stop_loss = stop_swing["price"] - buffer if direction == "BUY" else stop_swing["price"] + buffer
         stop_basis = (f"Below {structure_tf} swing low + broker buffer" if direction == "BUY"
                       else f"Above {structure_tf} swing high + broker buffer")
+    else:
+        return {"valid": False, "reason": "No structural swing (and no strategy stop reference) is available."}
 
     # -- target: strategy intent first ---------------------------------------
-    strategy_target = plan_context.get("target")
     if isinstance(strategy_target, (int, float)) and strategy_target:
         take_profit = float(strategy_target)
         target_basis = plan_context.get("target_basis") or f"{strategy} strategy target"
-    else:
+    elif target_swing is not None:
         take_profit = target_swing["price"]
         target_basis = (f"Next valid {structure_tf} swing high / upside liquidity" if direction == "BUY"
                         else f"Next valid {structure_tf} swing low / downside liquidity")
+    else:
+        return {"valid": False, "reason": "No structural swing (and no strategy target) is available."}
 
     # -- direction sanity before any RR arithmetic ---------------------------
     if direction == "BUY" and not (stop_loss < entry < take_profit):

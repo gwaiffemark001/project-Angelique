@@ -296,7 +296,7 @@ def test_sweep_continuation_needs_a_qualified_entry_zone():
 # --------------------------------------------------------------------------
 # AMD sequencing
 # --------------------------------------------------------------------------
-def _amd_series(complete=True):
+def _amd_series(complete=True, retracement=True):
     rows, i = [], 0
 
     def add(o, h, l, c):
@@ -316,6 +316,11 @@ def _amd_series(complete=True):
         for k in range(6):                    # delivery
             base = 102.1 + k * 0.2
             add(base, base + 0.25, base - 0.1, base + 0.2)
+        # A completed AMD is not an entry until price returns into the
+        # displacement zone (100.25-102.10). This retracement candle makes the
+        # phase sequence executable; without it the setup is a completed impulse.
+        if retracement:
+            add(103.10, 103.15, 101.00, 101.80)
     else:
         add(100.10, 100.15, 99.80, 99.86)     # shallow raid
         add(99.86, 100.02, 99.84, 99.98)      # gentle reclaim, no displacement
@@ -335,6 +340,17 @@ def test_amd_phases_complete_in_strict_order():
     assert indices == sorted(indices), "phases completed out of order"
     for name in ("ACCUMULATION", "MANIPULATION", "REACTION", "DISTRIBUTION"):
         assert result["phase_map"][name] is True
+
+
+def test_amd_is_incomplete_until_price_retraces_into_the_delivery_zone():
+    rows = _amd_series(complete=True, retracement=False)
+    result = detect_amd(rows, structure=build_structure(rows)).as_dict()
+    assert result["complete"] is False
+    assert result["phase"] == "awaiting_entry"
+    assert result["phase_map"].get("RETRACEMENT_ENTRY") is False
+    retracement = next((p for p in result["phases"] if p["name"] == "RETRACEMENT_ENTRY"), None)
+    assert retracement is not None
+    assert any("retraced into the delivery zone" in p["reason"] for p in result["phases"])
 
 
 def test_amd_is_incomplete_without_displacement():

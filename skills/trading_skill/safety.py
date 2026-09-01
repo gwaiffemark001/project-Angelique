@@ -30,6 +30,7 @@ def validate_trade_setup(
     maximum_spread_points: float | None = None,
     specs: dict[str, Any] | None = None,
     net_rr: float | None = None,
+    spread_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Hard safety checks that gate trading decisions before execution.
 
@@ -37,6 +38,12 @@ def validate_trade_setup(
     metadata rather than by matching substrings in the symbol name. When
     ``net_rr`` is supplied it is enforced in addition to the gross RR, because
     only the net figure reflects the trade's real economics.
+
+    ``spread_gate`` is the authoritative result produced by
+    :mod:`spread_model.evaluate_spread_gate`. When present it replaces the
+    legacy hard-coded profile ceilings: it is based on live raw bid/ask,
+    instrument class, the observed rolling distribution and the actual
+    spread-to-stop / spread-to-reward economics of this specific trade.
     """
     checks: list[str] = []
     reasons: list[str] = []
@@ -107,7 +114,24 @@ def validate_trade_setup(
         uses_pips = instrument_class in FX_CLASSES and instrument_profile.pip_size is not None
     except Exception:
         instrument_profile = None
-    if not uses_pips and spread_points is not None:
+    if spread_gate is not None:
+        gate_allowed = bool(spread_gate.get("allowed", False))
+        gate_reasons = list(spread_gate.get("reasons", []) or [])
+        gate_checks = list(spread_gate.get("checks", []) or [])
+        measurement = spread_gate.get("measurement", {}) or {}
+        if not gate_allowed:
+            reasons.extend(gate_reasons or ["Instrument-aware spread gate rejected the trade."])
+        else:
+            checks.append("Instrument-aware spread gate passed.")
+        checks.extend(f"Spread gate: {line}" for line in gate_checks)
+        # Keep the display fields accurate regardless of which engine decided.
+        if "spread_pips" in measurement:
+            spread_pips = measurement.get("spread_pips")
+        if "spread_points" in measurement:
+            spread_points = measurement.get("spread_points")
+        if "spread_percent_of_price" in measurement:
+            checks.append(f"Spread {measurement.get('spread_percent_of_price'):.3f}% of price.")
+    elif not uses_pips and spread_points is not None:
         max_points = float(maximum_spread_points or 0.0)
         if max_points > 0 and spread_points > max_points + 1e-9:
             reasons.append(f"Spread is too wide for {instrument_class}: {spread_points:.0f} MT5 points "
@@ -145,5 +169,6 @@ def validate_trade_setup(
         "check_count": len(checks),
         "checks": checks,
         "reasons": reasons,
+        "spread_gate": spread_gate,
         "summary": "Trade safety checks passed." if valid else "Trade safety checks failed.",
     }

@@ -42,6 +42,16 @@ def analyze_structure(
     if not timeframes:
         return {"valid": False, "decision": "BLOCKED_BY_DATA", "reason": "No timeframe candles were provided.", "trends": {}, "indicators": {}, "smc": {}}
 
+    # Crypto is 24/7 and must never inherit the FX weekend model. The broker
+    # symbol profile (currency_base / instrument_class) is the source of truth,
+    # so broker-suffixed crypto names resolve correctly here too.
+    if not trades_24_7 and (symbol or specs):
+        try:
+            from .instruments import build_profile
+            trades_24_7 = bool(build_profile(symbol or "", specs or {}).trades_24_7)
+        except Exception:
+            trades_24_7 = False
+
     required = tuple(profile.analysis_required_timeframes)
     # Two distinct concerns, deliberately kept apart:
     #

@@ -338,8 +338,13 @@ def _evaluate_sequence(
         )
     phases.append(entry)
 
-    complete = all(p.complete for p in phases if p.name != "RETRACEMENT_ENTRY") and delivery.complete
-    phase_label = "delivered" if complete else "distribution"
+    # The AMD sequence is not complete until price has actually retraced into
+    # the delivery zone. A completed ACCUMULATION -> RAID -> REACTION ->
+    # DISTRIBUTION -> DELIVERY with price still extended away from the zone is a
+    # completed *impulse*, not an executable entry. Requiring RETRACEMENT_ENTRY
+    # prevents an unrelated late candle from being labelled an AMD setup.
+    complete = all(p.complete for p in phases)
+    phase_label = "delivered" if complete else ("awaiting_entry" if delivery.complete else "distribution")
     invalidation = manipulation.detail.get("extreme")
     if not complete:
         reasons.append(delivery.reason if not delivery.complete else entry.reason)

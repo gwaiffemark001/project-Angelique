@@ -84,12 +84,22 @@ def estimate_costs(
     money_per_price_unit_per_lot: float | None,
     assumptions: CostAssumptions | None = None,
     direction: str = "BUY",
+    prices_are_executable: bool = False,
 ) -> CostBreakdown:
     """Monetise the round-trip cost of a trade in account currency.
 
     ``money_per_price_unit_per_lot`` must come from the broker calculator
     (``order_calc_profit`` over a known distance / that distance), not from a
     generic tick-value formula.
+
+    ``prices_are_executable`` is the key double-counting guard. When the gross
+    risk/reward money values were calculated by ``order_calc_profit`` from the
+    actual executable side of the book (a BUY enters at Ask and exits at Bid, a
+    SELL enters at Bid and exits at Ask), the spread is already inside those
+    prices. Charging a separate 2x spread on top would double-count it, so the
+    spread component is recorded as zero with an explicit note. A caller that
+    computes gross money from midpoint prices (display-only) must leave it
+    False so the spread remains a real cost.
     """
     assumptions = assumptions or CostAssumptions()
     notes: list[str] = []
@@ -98,9 +108,17 @@ def estimate_costs(
     spread_cost = None
     slippage_cost = None
     if spread_price is not None and money_per_price_unit_per_lot:
-        legs = 2.0 if assumptions.charge_exit_spread else 1.0
-        spread_cost = abs(spread_price) * legs * money_per_price_unit_per_lot * volume
-        available["spread"] = True
+        if prices_are_executable:
+            spread_cost = 0.0
+            available["spread"] = True
+            notes.append(
+                "Spread is already embedded in the executable Bid/Ask legs used "
+                "by order_calc_profit; it is not charged again."
+            )
+        else:
+            legs = 2.0 if assumptions.charge_exit_spread else 1.0
+            spread_cost = abs(spread_price) * legs * money_per_price_unit_per_lot * volume
+            available["spread"] = True
         if assumptions.slippage_points and profile.point > 0:
             slippage_cost = (assumptions.slippage_points * profile.point
                              * money_per_price_unit_per_lot * volume)
